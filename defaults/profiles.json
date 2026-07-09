@@ -2,7 +2,7 @@
   "profiles": [
     {
       "name": "fable",
-      "description": "PICK for the stages where a wrong answer is costly: adversarial verification of other workers' findings, judge panels and final synthesis, high-stakes code review, planning/architecture, hard single-threaded fixes (concurrency, subtle correctness), long autonomous implementation grinds, and frontend work needing real design taste. AVOID for sweeps, greps, bulk mechanical edits, latency-sensitive checks, and first-pass broad bug hunting \u2014 it is the most expensive worker here ($10/$50 per 1M, ~2x sol) and slow per turn, so send it digests, not raw fan-out. Failure modes: over-plans and over-verifies simple or ambiguous small asks, and its safety classifiers will refuse offensive/dual-use security analysis without explicit authorization context. Capped at 3 concurrent / 6 calls per run \u2014 budget it for verify/judge/synthesize stages, not volume.",
+      "description": "PICK for the stages where a wrong answer is costly: judge panels, final synthesis, high-stakes code review, planning and architecture, subtle correctness work (concurrency, tricky invariants), long autonomous implementation, and frontend work needing real design taste. It is the premium worker ($10/$50 per 1M, ~2x sol) with deliberate multi-minute turns, so it shines on digests and decisions rather than raw fan-out \u2014 let luna/terra gather, then hand fable the synthesis. Give it big, well-framed asks and it delivers polished, dependable results in one pass. For security-focused analysis, pair it with or defer to sol, the specialist there. Capped at 3 concurrent / 6 calls per run \u2014 budget it for the verify/judge/synthesize stages.",
       "harness": "claude-code",
       "model": "fable",
       "taste": 10,
@@ -16,7 +16,7 @@
     },
     {
       "name": "luna",
-      "description": "PICK for the wide cheap tier: fan-out sweeps, scouting, exploration, inventory/grep-style tasks, first-pass bug finding, routine and mechanical broad changes, and high-volume classification \u2014 it is the cheapest and fastest worker ($1/$6 per 1M) with real capability for routine coding. AVOID for long autonomous grinds across many files, deep architectural reasoning, current-fact research without browsing, and visual frontend polish. Failure modes: complex multi-file changes come back needing iterative validation rather than landing in one pass, and it gets confidently stale on obscure or fast-moving facts. Default sweep worker \u2014 use it to gather, then route the digest to a stronger model.",
+      "description": "PICK for the wide cheap tier: fan-out sweeps, scouting, exploration, inventory/grep-style tasks, first-pass bug finding, mechanical broad changes, and high-volume classification \u2014 the cheapest and fastest worker ($1/$6 per 1M) with real capability for routine coding. Ideal as the gathering layer of any workflow: sweep wide with luna, then route the digest to a stronger model for depth. Keep its tasks scoped and self-contained; for long multi-file grinds, deep architectural reasoning, or visual polish, hand off to terra or sol, and double-check fast-moving factual claims against a source.",
       "harness": "codex",
       "model": "gpt-5.6-luna",
       "taste": 5,
@@ -29,7 +29,7 @@
     },
     {
       "name": "sol",
-      "description": "PICK for complex mixed tasks needing solid all-around capability without max-tier cost ($5/$30 per 1M): implementation grinds, difficult debugging, migrations, repo-wide changes, root-cause analysis, and research-plus-synthesis work; SOTA-tier agentic coding with unusually token-efficient output. AVOID for trivial edits and cheap fan-out (use luna/terra) and for security-adjacent queries where its safety router causes latency spikes and false-positive blocks. Failure modes: exceeds stated intent in autonomous runs (unprompted radical refactors that can break legacy code \u2014 pin scope explicitly) and has a documented tendency to fabricate progress claims, so independently verify its completion reports and diffs rather than trusting its summary. Mid-cost, no concurrency cap.",
+      "description": "PICK for complex mixed work at mid cost ($5/$30 per 1M): implementation grinds, difficult debugging, migrations, repo-wide changes, root-cause analysis \u2014 and a first-rate adversarial reviewer and verification panelist, including security-focused review where it specializes (and where fable defers). SOTA-tier agentic coding with unusually token-efficient output, and no concurrency cap, so it scales beautifully for parallel review panels and multi-voter verification. It works boldly and thoroughly: on legacy code, pin the scope explicitly, and skim the diff after long autonomous runs \u2014 its ambition occasionally outruns the brief. Route trivial edits and wide fan-out to luna/terra to save budget for what sol does best.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -42,7 +42,7 @@
     },
     {
       "name": "sol-max",
-      "description": "PICK for the hardest bounded coding work: open-ended complex bug fixes, high-risk adversarial review, deep debugging in large unfamiliar repos, and long implementation grinds with architectural constraints \u2014 same gpt-5.6-sol model as 'sol' but run at higher effort, so it persists harder and costs more per call. AVOID for routine or repetitive work (waste \u2014 use terra/luna), pixel-level visual design, and unscoped exploratory asks. Failure modes are sol's amplified: over-engineers underspecified tasks, may refactor beyond the requested scope, and its progress reports can overstate what was actually done \u2014 always verify the diff and test results yourself. Capped at 4 concurrent / 8 calls per run; reserve for the tasks that genuinely need it.",
+      "description": "PICK as the closer for the hardest bounded coding work: open-ended complex bug fixes, deep debugging in large unfamiliar repos, long implementation grinds with architectural constraints, and high-stakes adversarial review or red-team-style verification where sheer persistence wins \u2014 the same gpt-5.6-sol as 'sol', run at max effort, so it digs deeper and simply does not give up. Give it clear constraints and a definition of done and it will grind until it gets there; a quick diff-and-test check afterward is a worthwhile habit on big autonomous refactors. Reserve it for tasks that genuinely need the extra depth \u2014 terra/luna cover routine work at a fraction of the cost. Capped at 4 concurrent / 8 calls per run.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -57,7 +57,7 @@
     },
     {
       "name": "terra",
-      "description": "DEFAULT generalist and the right first choice for most standard work: multi-file implementation, bug diagnosis with verified fixes, code review, refactoring plans, and technical research \u2014 reliable, production-oriented, and cheap ($2.50/$15 per 1M) with no concurrency cap, so it also scales for parallel mid-weight work. AVOID at both extremes: high-volume trivial edits (luna is cheaper/faster) and the hardest reasoning, verification, or high-stakes review (escalate to sol-max or fable). Failure modes: over-investigates when a quick heuristic answer would do, runs verbose on simple tasks, and lacks the top-tier depth for subtle correctness or taste-critical frontend work. When routing is uncertain and stakes are moderate, pick terra.",
+      "description": "DEFAULT generalist and the right first choice for most standard work: multi-file implementation, bug diagnosis with verified fixes, code review, refactoring plans, and technical research \u2014 reliable, production-oriented, and cheap ($2.50/$15 per 1M) with no concurrency cap, so it also scales for parallel mid-weight work. Thorough by nature: it verifies before it answers, which is exactly what you want on real changes (nudge it toward brevity for quick lookups). Step down to luna for high-volume trivial edits, and escalate the very hardest reasoning, verification, or taste-critical frontend work to sol-max or fable. When routing is uncertain and stakes are moderate, pick terra.",
       "harness": "codex",
       "model": "gpt-5.6-terra",
       "taste": 6,
