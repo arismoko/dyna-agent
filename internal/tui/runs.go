@@ -176,10 +176,13 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 		if m.sel < len(m.runs) && (msg.String() == "y" || msg.String() == "Y") {
 			id := m.runs[m.sel].ID
 			var err error
-			if m.confirm == "delete" {
+			switch m.confirm {
+			case "delete":
 				err = runstore.Remove(id)
-			} else {
+			case "cancel":
 				err = runstore.Cancel(id)
+			case "pause":
+				err = runstore.SetPaused(id, true)
 			}
 			if err != nil {
 				m.statusMsg = "✗ " + err.Error()
@@ -217,12 +220,12 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 	case "p":
 		if m.sel < len(m.runs) && m.runs[m.sel].Status == "running" {
 			id := m.runs[m.sel].ID
-			paused := !runstore.IsPaused(id)
-			runstore.SetPaused(id, paused)
-			if paused {
-				m.statusMsg = "⏸ paused " + id
-			} else {
+			if runstore.IsPaused(id) {
+				runstore.SetPaused(id, false) // resuming needs no warning
 				m.statusMsg = "▶ resumed " + id
+			} else {
+				m.confirm = "pause"
+				m.statusMsg = ""
 			}
 		}
 	case "enter":
@@ -329,8 +332,12 @@ func (m runsModel) viewList(frame int) string {
 		b.WriteString(row + "\n")
 	}
 	if m.confirm != "" && m.sel < len(m.runs) {
-		verb := m.confirm
-		b.WriteString("\n" + sErrS.Render(verb+" "+m.runs[m.sel].Name+"? (y/n)"))
+		warn := map[string]string{
+			"delete": "delete %s? its journal and result are gone forever",
+			"cancel": "cancel %s? all in-flight workers will be KILLED",
+			"pause":  "pause %s? running workers finish, no new ones start",
+		}[m.confirm]
+		b.WriteString("\n" + sErrS.Render("⚠ "+fmt.Sprintf(warn, m.runs[m.sel].Name)) + "\n" + sErrS.Render("  confirm? (y/n)"))
 	} else if m.statusMsg != "" {
 		b.WriteString("\n" + sDim.Render(m.statusMsg))
 	}

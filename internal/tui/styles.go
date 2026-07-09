@@ -45,18 +45,18 @@ var (
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// statBar renders "▰▰▰▰▱" for v out of 5 in the given color.
+// statBar renders "▰▰▰▰▰▰▱▱▱▱" for v out of 10 in the given color.
 func statBar(v int, color lipgloss.AdaptiveColor) string {
 	if v < 0 {
 		v = 0
 	}
-	if v > 5 {
-		v = 5
+	if v > 10 {
+		v = 10
 	}
 	on := lipgloss.NewStyle().Foreground(color)
 	off := lipgloss.NewStyle().Foreground(cDim)
 	s := ""
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 10; i++ {
 		if i < v {
 			s += on.Render("▰")
 		} else {

@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"dyna-agent/internal/detect"
 	"dyna-agent/internal/profile"
 )
 
@@ -20,7 +21,26 @@ type profilesModel struct {
 	form          formModel
 	statusMsg     string
 	confirmDel    bool
+
+	// Wizard: detect models in the installed harnesses, pick which to
+	// register, then step through a prefilled form for each.
+	wizard     bool
+	wizLoading bool
+	wizCands   []detect.Candidate
+	wizSel     int
+	wizChecked map[int]bool
+	wizQueue   []profile.Profile
 }
+
+// wizCandsMsg delivers async detection results to the wizard.
+type wizCandsMsg []detect.Candidate
+
+func detectCmd(store *profile.Store) tea.Cmd {
+	return func() tea.Msg { return wizCandsMsg(detect.Candidates(store)) }
+}
+
+// customRow is the virtual "write your own" entry after the detected models.
+func (m *profilesModel) customRow() int { return len(m.wizCands) }
 
 func newProfilesModel(store *profile.Store) profilesModel {
 	return profilesModel{store: store}
@@ -46,8 +66,20 @@ func (m profilesModel) update(msg tea.KeyMsg) (profilesModel, tea.Cmd) {
 					m.statusMsg = "✓ saved " + p.Name
 				}
 			}
+			// Wizard chaining: continue with the next selected model.
+			if len(m.wizQueue) > 0 {
+				next := m.wizQueue[0]
+				m.wizQueue = m.wizQueue[1:]
+				m.form = newForm(next, "")
+				m.form.subtitle = wizProgress(len(m.wizQueue))
+				m.editing = true
+			}
 		}
 		return m, cmd
+	}
+
+	if m.wizard {
+		return m.updateWizard(msg)
 	}
 
 	if m.confirmDel {
@@ -74,15 +106,35 @@ func (m profilesModel) update(msg tea.KeyMsg) (profilesModel, tea.Cmd) {
 			m.sel++
 		}
 	case "a":
-		m.form = newForm(nil)
+		m.form = newForm(blankProfile(), "")
 		m.editing = true
 		m.statusMsg = ""
+	case "w":
+		m.wizard = true
+		m.wizLoading = true
+		m.wizCands = nil
+		m.wizChecked = map[int]bool{}
+		m.wizSel = 0
+		m.statusMsg = ""
+		return m, detectCmd(m.store)
 	case "e", "enter":
 		if m.sel < len(m.store.Profiles) {
 			p := m.store.Profiles[m.sel]
-			m.form = newForm(&p)
+			m.form = newForm(p, p.Name)
 			m.editing = true
 			m.statusMsg = ""
+		}
+	case "t", " ":
+		if m.sel < len(m.store.Profiles) {
+			p := m.store.Profiles[m.sel]
+			p.Disabled = !p.Disabled
+			m.store.Upsert(p)
+			m.store.Save()
+			if p.Disabled {
+				m.statusMsg = "◇ disabled " + p.Name + " (stats kept)"
+			} else {
+				m.statusMsg = "✓ enabled " + p.Name
+			}
 		}
 	case "d":
 		if m.sel < len(m.store.Profiles) {
@@ -100,9 +152,80 @@ func (m profilesModel) update(msg tea.KeyMsg) (profilesModel, tea.Cmd) {
 	return m, nil
 }
 
+func blankProfile() profile.Profile {
+	return profile.Profile{Harness: profile.HarnessClaudeCode, Taste: 5, Intelligence: 5, Cost: 5}
+}
+
+func wizProgress(remaining int) string {
+	if remaining == 0 {
+		return "wizard · last one"
+	}
+	return fmt.Sprintf("wizard · %d more after this", remaining)
+}
+
+// setWizCands receives async detection results.
+func (m *profilesModel) setWizCands(c []detect.Candidate) {
+	m.wizLoading = false
+	m.wizCands = c
+}
+
+func (m profilesModel) updateWizard(msg tea.KeyMsg) (profilesModel, tea.Cmd) {
+	last := m.customRow() // virtual "write your own" row
+	switch msg.String() {
+	case "esc", "q":
+		m.wizard = false
+	case "up", "k":
+		if m.wizSel > 0 {
+			m.wizSel--
+		}
+	case "down", "j":
+		if m.wizSel < last {
+			m.wizSel++
+		}
+	case " ", "x":
+		if m.wizSel == last || !m.wizCands[m.wizSel].Registered {
+			m.wizChecked[m.wizSel] = !m.wizChecked[m.wizSel]
+		}
+	case "a":
+		for i := range m.wizCands {
+			if !m.wizCands[i].Registered {
+				m.wizChecked[i] = true
+			}
+		}
+	case "n":
+		m.wizChecked = map[int]bool{}
+	case "enter":
+		var queue []profile.Profile
+		for i, c := range m.wizCands {
+			if m.wizChecked[i] && !c.Registered {
+				queue = append(queue, profile.Profile{
+					Name: c.Name, Harness: c.Harness, Model: c.Model,
+					Taste: 5, Intelligence: 5, Cost: 5,
+				})
+			}
+		}
+		if m.wizChecked[last] {
+			queue = append(queue, blankProfile())
+		}
+		if len(queue) == 0 {
+			m.statusMsg = "nothing selected — space toggles, enter confirms"
+			return m, nil
+		}
+		m.wizard = false
+		m.wizQueue = queue[1:]
+		m.form = newForm(queue[0], "")
+		m.form.subtitle = wizProgress(len(m.wizQueue))
+		m.editing = true
+	}
+	return m, nil
+}
+
 func (m profilesModel) view() string {
 	if m.editing {
 		return m.form.view(m.width, m.height)
+	}
+	if m.wizard {
+		return m.viewWizard()
 	}
 	lw := clamp(m.width/3, 30, 44)
 	rw := m.width - lw - 6
@@ -117,12 +240,22 @@ func (m profilesModel) view() string {
 		if p.Default {
 			icon = sOK.Render("●")
 		}
+		if p.Disabled {
+			icon = sDim.Render("◇")
+		}
 		name := p.Name
-		row := icon + " " + name
+		nameR := name
+		if p.Disabled {
+			nameR = sDim.Render(name)
+		}
+		row := icon + " " + nameR
 		if i == m.sel {
 			row = icon + " " + sSel.Render(name)
 		}
 		row += "  " + sDim.Render(p.Harness)
+		if p.Disabled {
+			row += sDim.Render(" · off")
+		}
 		b.WriteString(row + "\n")
 	}
 	if m.confirmDel && m.sel < len(m.store.Profiles) {
@@ -147,6 +280,9 @@ func (m profilesModel) viewCard(w int) string {
 	if p.Default {
 		name += "  " + sBadge.Render("default")
 	}
+	if p.Disabled {
+		name += "  " + sErrS.Render("● disabled") + sDim.Render(" (stats kept — press t to enable)")
+	}
 	b.WriteString(name + "\n\n")
 	b.WriteString(sDim.Render("harness ") + p.Harness)
 	if p.Model != "" {
@@ -155,7 +291,7 @@ func (m profilesModel) viewCard(w int) string {
 	b.WriteString("\n\n")
 
 	stat := func(label string, v int, c lipgloss.AdaptiveColor, note string) {
-		b.WriteString(fmt.Sprintf("%-14s %s  %d/5  %s\n", label, statBar(v, c), v, sDim.Render(note)))
+		b.WriteString(fmt.Sprintf("%-14s %s  %2d/10  %s\n", label, statBar(v, c), v, sDim.Render(note)))
 	}
 	stat("taste", p.Taste, cTaste, "quality · design · review judgment")
 	stat("intelligence", p.Intelligence, cIntel, "hard, long, complex tasks")
@@ -189,6 +325,58 @@ func (m profilesModel) viewCard(w int) string {
 	return b.String()
 }
 
+// viewWizard renders the model picker: detected models per harness plus a
+// custom entry, checkbox-toggled.
+func (m profilesModel) viewWizard() string {
+	var b strings.Builder
+	b.WriteString(sTitle.Render("Profile wizard") + sDim.Render(" · models detected in your installed agent CLIs") + "\n\n")
+	if m.wizLoading {
+		b.WriteString(sDim.Render("detecting models (probing claude, codex, opencode, pi)…") + "\n")
+		return sPaneR.Width(clamp(m.width-4, 40, 110)).Height(m.height - 2).Render(b.String())
+	}
+	if len(m.wizCands) == 0 {
+		b.WriteString(sDim.Render("no agent CLIs detected — pick “write your own” below\n\n"))
+	}
+	maxRows := m.height - 8
+	start := 0
+	if m.wizSel >= maxRows {
+		start = m.wizSel - maxRows + 1
+	}
+	renderRow := func(i int, checked bool, label, detail string, registered bool) {
+		box := "[ ]"
+		if checked {
+			box = sOK.Render("[x]")
+		}
+		cursor := "  "
+		if i == m.wizSel {
+			cursor = sHelpKey.Render("▸ ")
+		}
+		name := label
+		if i == m.wizSel {
+			name = sSel.Render(label)
+		}
+		line := fmt.Sprintf("%s%s %s  %s", cursor, box, name, sDim.Render(detail))
+		if registered {
+			line = fmt.Sprintf("%s%s %s  %s", cursor, sDim.Render("[✓]"), sDim.Render(label), sDim.Render(detail+" · already registered"))
+		}
+		b.WriteString(line + "\n")
+	}
+	for i := start; i < len(m.wizCands) && i-start < maxRows; i++ {
+		c := m.wizCands[i]
+		model := c.Model
+		if model == "" {
+			model = "(default model)"
+		}
+		renderRow(i, m.wizChecked[i], c.Name, c.Harness+" · "+model, c.Registered)
+	}
+	renderRow(m.customRow(), m.wizChecked[m.customRow()], "write your own…", "custom/niche profile, blank form", false)
+	if m.statusMsg != "" {
+		b.WriteString("\n" + sWarnS.Render(m.statusMsg))
+	}
+	b.WriteString("\n" + sDim.Render("each selected model opens a prefilled form: set its name, description, and stats"))
+	return sPaneR.Width(clamp(m.width-4, 40, 110)).Height(m.height - 2).Render(b.String())
+}
+
 // ---------------- form ----------------
 
 type fieldKind int
@@ -210,10 +398,11 @@ type field struct {
 }
 
 type formModel struct {
-	fields []field
-	focus  int
-	origPk string // original name when editing ("" = new)
-	errMsg string
+	fields   []field
+	focus    int
+	origPk   string // original name when editing ("" = new)
+	subtitle string // extra context (wizard progress)
+	errMsg   string
 }
 
 func textField(label, placeholder, value, note string) field {
@@ -225,23 +414,14 @@ func textField(label, placeholder, value, note string) field {
 	return field{label: label, kind: fText, input: ti, note: note}
 }
 
-func newForm(p *profile.Profile) formModel {
-	var v profile.Profile
-	if p != nil {
-		v = *p
-	} else {
-		v = profile.Profile{Harness: profile.HarnessClaudeCode, Taste: 3, Intelligence: 3, Cost: 3}
-	}
+func newForm(v profile.Profile, origPk string) formModel {
 	harnessIdx := 0
 	for i, h := range profile.Harnesses {
 		if h == v.Harness {
 			harnessIdx = i
 		}
 	}
-	f := formModel{}
-	if p != nil {
-		f.origPk = p.Name
-	}
+	f := formModel{origPk: origPk}
 	f.fields = []field{
 		textField("name", "e.g. opus-4.8", v.Name, "unique id agents reference in scripts"),
 		textField("description", "personality, strengths, weaknesses…", v.Description, "agents read this to pick workers"),
@@ -253,6 +433,7 @@ func newForm(p *profile.Profile) formModel {
 		textField("extra args", "--browser …", strings.Join(v.ExtraArgs, " "), "extra CLI args, space-separated"),
 		textField("limit conc.", "0 = unlimited", intStr(v.MaxConcurrent), "max simultaneous workers of this profile"),
 		textField("limit calls", "0 = unlimited", intStr(v.MaxCallsPerRun), "max total calls per run"),
+		{label: "enabled", kind: fCycle, cycle: []string{"yes", "no"}, cycleI: boolIdx(v.Disabled), note: "disabled profiles keep their stats but can't be used"},
 		{label: "default", kind: fCycle, cycle: []string{"no", "yes"}, cycleI: boolIdx(v.Default), note: "used when a script omits profile"},
 	}
 	f.fields[0].input.Focus()
@@ -277,7 +458,8 @@ func (f *formModel) toProfile() profile.Profile {
 		Cost:           f.fields[6].stat,
 		MaxConcurrent:  atoiOr0(f.fields[8].input.Value()),
 		MaxCallsPerRun: atoiOr0(f.fields[9].input.Value()),
-		Default:        f.fields[10].cycleI == 1,
+		Disabled:       f.fields[10].cycleI == 1,
+		Default:        f.fields[11].cycleI == 1,
 	}
 	if ea := strings.TrimSpace(f.fields[7].input.Value()); ea != "" {
 		p.ExtraArgs = strings.Fields(ea)
@@ -340,11 +522,13 @@ func (f *formModel) update(msg tea.KeyMsg) (bool, bool, tea.Cmd) {
 	case fStat:
 		switch msg.String() {
 		case "left", "h":
-			cur.stat = clamp(cur.stat-1, 1, 5)
+			cur.stat = clamp(cur.stat-1, 1, 10)
 		case "right", "l":
-			cur.stat = clamp(cur.stat+1, 1, 5)
-		case "1", "2", "3", "4", "5":
+			cur.stat = clamp(cur.stat+1, 1, 10)
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			cur.stat = int(msg.String()[0] - '0')
+		case "0":
+			cur.stat = 10
 		}
 	case fText:
 		var cmd tea.Cmd
@@ -368,7 +552,11 @@ func (f formModel) view(width, height int) string {
 		title = "Edit " + f.origPk
 	}
 	var b strings.Builder
-	b.WriteString(sTitle.Render(title) + "\n\n")
+	head := sTitle.Render(title)
+	if f.subtitle != "" {
+		head += "  " + sDim.Render(f.subtitle)
+	}
+	b.WriteString(head + "\n\n")
 	for i, fd := range f.fields {
 		cursor := "  "
 		labelSt := sDim
@@ -390,7 +578,7 @@ func (f formModel) view(width, height int) string {
 			case "cost-eff.":
 				c = cCost
 			}
-			val = statBar(fd.stat, c) + fmt.Sprintf("  %d/5", fd.stat)
+			val = statBar(fd.stat, c) + fmt.Sprintf("  %2d/10", fd.stat)
 		}
 		b.WriteString(fmt.Sprintf("%s%s %s\n", cursor, labelSt.Render(fmt.Sprintf("%-13s", fd.label)), val))
 		if i == f.focus && fd.note != "" {

@@ -73,9 +73,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tick()
 
+	case wizCandsMsg:
+		m.profs.setWizCands(msg)
+		return m, nil
+
 	case tea.KeyMsg:
-		// While the profile form is open it owns the keyboard.
-		if m.tab == tabProfiles && m.profs.editing {
+		// While the profile form or wizard is open it owns the keyboard.
+		if m.tab == tabProfiles && (m.profs.editing || m.profs.wizard) {
 			var cmd tea.Cmd
 			m.profs, cmd = m.profs.update(msg)
 			return m, cmd
@@ -144,12 +148,14 @@ func (m model) View() string {
 			help = helpLine("↑/↓", "select", "enter", "inspect", "p", "pause", "x", "cancel", "d", "delete", "1-3", "view", "q", "quit")
 		}
 	case tabProfiles:
-		if m.profs.editing {
-			body = m.profs.view()
-			help = helpLine("↑/↓/tab", "field", "←/→", "adjust", "ctrl+s", "save", "esc", "cancel")
-		} else {
-			body = m.profs.view()
-			help = helpLine("↑/↓", "select", "a", "add", "e", "edit", "d", "delete", "s", "set default", "q", "quit")
+		body = m.profs.view()
+		switch {
+		case m.profs.editing:
+			help = helpLine("↑/↓/tab", "field", "←/→", "adjust", "1-9/0", "set stat", "ctrl+s", "save", "esc", "cancel")
+		case m.profs.wizard:
+			help = helpLine("↑/↓", "move", "space", "toggle", "a/n", "all/none", "enter", "continue", "esc", "back")
+		default:
+			help = helpLine("↑/↓", "select", "w", "wizard", "a", "add", "e", "edit", "t", "on/off", "d", "delete", "s", "default", "q", "quit")
 		}
 	case tabGuide:
 		body = m.guide.view()

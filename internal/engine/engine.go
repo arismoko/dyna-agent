@@ -212,6 +212,9 @@ func (e *engine) bind(vm *goja.Runtime) error {
 	// stats: profiles.find(p => p.taste >= 4) etc.
 	profs := make([]map[string]any, 0, len(e.opts.Store.Profiles))
 	for _, p := range e.opts.Store.Profiles {
+		if p.Disabled {
+			continue
+		}
 		profs = append(profs, map[string]any{
 			"name": p.Name, "description": p.Description, "harness": p.Harness,
 			"model": p.Model, "taste": p.Taste, "intelligence": p.Intelligence,
@@ -277,6 +280,10 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		p, ok := e.opts.Store.Get(profName)
 		if !ok {
 			reject(fmt.Errorf("unknown profile %q — run `dyna profiles list` to see registered profiles", profName))
+			return vm.ToValue(promise)
+		}
+		if p.Disabled {
+			reject(fmt.Errorf("profile %q is disabled — the user must enable it (`dyna profiles enable %s`); pick another from the profiles global", profName, profName))
 			return vm.ToValue(promise)
 		}
 		prof = *p

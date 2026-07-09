@@ -75,6 +75,9 @@ func profilesCmd() *cobra.Command {
 				if p.Default {
 					def = "  (default)"
 				}
+				if p.Disabled {
+					def += "  (DISABLED)"
+				}
 				limits := ""
 				if p.MaxConcurrent > 0 {
 					limits += fmt.Sprintf("  max-concurrent: %d", p.MaxConcurrent)
@@ -82,7 +85,7 @@ func profilesCmd() *cobra.Command {
 				if p.MaxCallsPerRun > 0 {
 					limits += fmt.Sprintf("  max-calls/run: %d", p.MaxCallsPerRun)
 				}
-				fmt.Printf("%s%s\n  harness: %s  model: %s%s\n  taste: %d/5  intelligence: %d/5  cost-efficiency: %d/5\n  %s\n\n",
+				fmt.Printf("%s%s\n  harness: %s  model: %s%s\n  taste: %d/10  intelligence: %d/10  cost-efficiency: %d/10\n  %s\n\n",
 					p.Name, def, p.Harness, orDash(p.Model), limits, p.Taste, p.Intelligence, p.Cost, p.Description)
 			}
 			return nil
@@ -135,9 +138,9 @@ func profilesCmd() *cobra.Command {
 	f.StringVar(&p.Description, "desc", "", "personality/strengths description shown to agents")
 	f.StringVar(&p.Harness, "harness", profile.HarnessClaudeCode, "one of: "+strings.Join(profile.Harnesses, ", "))
 	f.StringVar(&p.Model, "model", "", "model id passed to the harness CLI")
-	f.IntVar(&p.Taste, "taste", 3, "1..5, higher better")
-	f.IntVar(&p.Intelligence, "intelligence", 3, "1..5, higher better")
-	f.IntVar(&p.Cost, "cost", 3, "cost efficiency 1..5, higher better (5 = very cheap)")
+	f.IntVar(&p.Taste, "taste", 5, "1..10, higher better")
+	f.IntVar(&p.Intelligence, "intelligence", 5, "1..10, higher better")
+	f.IntVar(&p.Cost, "cost", 5, "cost efficiency 1..10, higher better (10 = very cheap)")
 	f.StringArrayVar(&p.ExtraArgs, "extra-arg", nil, "extra CLI arg for the harness (repeatable)")
 	f.StringArrayVar(&command, "command", nil, "custom harness argv (repeatable; {{prompt}}/{{model}} placeholders)")
 	f.IntVar(&p.TimeoutSec, "timeout", 0, "default per-call timeout in seconds")
@@ -163,6 +166,36 @@ func profilesCmd() *cobra.Command {
 		},
 	}
 
+	toggle := func(use, short string, disabled bool) *cobra.Command {
+		return &cobra.Command{
+			Use:   use + " <name>",
+			Short: short,
+			Args:  cobra.ExactArgs(1),
+			RunE: func(c *cobra.Command, a []string) error {
+				s, err := loadStore()
+				if err != nil {
+					return err
+				}
+				p, ok := s.Get(a[0])
+				if !ok {
+					return fmt.Errorf("no profile named %q", a[0])
+				}
+				q := *p
+				q.Disabled = disabled
+				if err := s.Upsert(q); err != nil {
+					return err
+				}
+				if err := s.Save(); err != nil {
+					return err
+				}
+				fmt.Println(use + "d " + a[0])
+				return nil
+			},
+		}
+	}
+	enable := toggle("enable", "Re-enable a disabled profile", false)
+	disable := toggle("disable", "Disable a profile (stats/description kept, workflows can't use it)", true)
+
 	setDefault := &cobra.Command{
 		Use:   "set-default <name>",
 		Short: "Mark a profile as the default worker",
@@ -185,7 +218,7 @@ func profilesCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(list, show, add, rm, setDefault)
+	cmd.AddCommand(list, show, add, rm, enable, disable, setDefault)
 	return cmd
 }
 
@@ -581,11 +614,11 @@ func demoCmd() *cobra.Command {
 				return err
 			}
 			demos := []profile.Profile{
-				{Name: "mock-workhorse", Harness: profile.HarnessMock, Taste: 2, Intelligence: 5, Cost: 3, Default: true,
+				{Name: "mock-workhorse", Harness: profile.HarnessMock, Taste: 4, Intelligence: 10, Cost: 6, Default: true,
 					Description: "Demo worker. Pretend GPT-class workhorse: grinds long tasks alone, correct but unpolished code, weak frontend taste."},
-				{Name: "mock-reviewer", Harness: profile.HarnessMock, Taste: 5, Intelligence: 4, Cost: 2,
+				{Name: "mock-reviewer", Harness: profile.HarnessMock, Taste: 10, Intelligence: 8, Cost: 4,
 					Description: "Demo worker. Pretend Opus-class reviewer: excellent taste, finds subtle issues, great frontend instincts, pricey."},
-				{Name: "mock-sprinter", Harness: profile.HarnessMock, Taste: 4, Intelligence: 3, Cost: 5,
+				{Name: "mock-sprinter", Harness: profile.HarnessMock, Taste: 8, Intelligence: 6, Cost: 10,
 					Description: "Demo worker. Pretend GLM-class sprinter: fast and very cheap, great taste, slightly below the big models."},
 			}
 			for _, d := range demos {

@@ -25,8 +25,8 @@ when the user asks for a workflow.
 patterns). Quick reference:
 
 1. ` + "`dyna profiles list --json`" + ` — the workers you may use. Each has a
-   description and stats (taste, intelligence, cost — 1-5, higher is better;
-   cost = cost-efficiency, 5 = very cheap). Match workers to stages: high
+   description and stats (taste, intelligence, cost — 1-10, higher is better;
+   cost = cost-efficiency, 10 = very cheap). Match workers to stages: high
    taste → review/judging/frontend; high intelligence → long hard tasks;
    high cost stat (cheap) → wide fan-outs and first-pass triage.
 2. Write the script: ` + "`agent(prompt, {profile, label, phase, schema})`" + `,

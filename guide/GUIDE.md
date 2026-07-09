@@ -51,12 +51,16 @@ The script's `return` value is printed as JSON on stdout when the run ends.
 
 ## Choosing workers: profiles
 
-Users register profiles (`dyna profiles add` or the TUI). Each has a
-description plus three standardized stats, all **1–5, higher is better**:
+Users register profiles (`dyna profiles add`, or the TUI's profile wizard).
+Each has a description plus three standardized stats, all **1–10, higher is
+better**:
 
 - **taste** — code quality, judgment, design/frontend sense, review ability
 - **intelligence** — raw capability on hard, long, complex tasks
-- **cost** — cost efficiency (5 = very cheap to run, 1 = very expensive)
+- **cost** — cost efficiency (10 = very cheap to run, 1 = very expensive)
+
+Disabled profiles never appear in your `profiles` global and calling them
+fails — only orchestrate with what you can see.
 
 Read the descriptions — they tell you each worker's personality (e.g. "tireless
 workhorse, writes correct but unpolished code, weak frontend taste"). Match
@@ -67,7 +71,7 @@ workers to stages:
 - High **cost** (cheap) → wide fan-outs, sweeps, dedup, first-pass triage
 
 Scripts also get a `profiles` global — the registry as an array — so you can
-select dynamically: `profiles.filter(p => p.cost >= 4).map(p => p.name)`.
+select dynamically: `profiles.filter(p => p.cost >= 8).map(p => p.name)`.
 Omitting `profile` in `agent()` uses the user's default profile.
 
 Profiles may carry user-set limits, visible in `dyna profiles list --json`:

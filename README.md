@@ -54,23 +54,34 @@ those away automatically.)
 ## Worker profiles
 
 You register the models agents are allowed to use, each with a description and
-three standardized stats (**1–5, higher is better** — for cost, higher means
-*cheaper*):
+three standardized stats (**1–10, higher is better** — for cost, higher means
+*cheaper*). The fastest way is the TUI's **profile wizard** (`w` on the
+Profiles tab): it probes your installed agent CLIs for their models (claude
+model aliases, codex config + known ids, `opencode models`), lets you pick
+which to register — plus a "write your own" entry for niche setups — and
+steps you through a prefilled form for each (name, description, stats).
+
+Or register by hand:
 
 ```bash
 dyna profiles add --name gpt-5.5-xhigh --harness codex --model gpt-5.5 \
   --extra-arg '-c' --extra-arg 'model_reasoning_effort=xhigh' \
-  --taste 2 --intelligence 5 --cost 3 --default \
+  --taste 4 --intelligence 10 --cost 6 --default \
   --desc "Workhorse. Operates alone on long tasks, writes good but unpolished code. Weak frontend design taste."
 
 dyna profiles add --name opus-4.8 --harness claude-code --model opus \
-  --taste 5 --intelligence 4 --cost 2 \
+  --taste 10 --intelligence 8 --cost 4 \
   --desc "Excellent taste; reviews code and finds issues extremely well; excels at frontend. Not the best at long complex grinds. High cost."
 
 dyna profiles add --name glm-5.2 --harness opencode --model zai/glm-5.2 \
-  --taste 4 --intelligence 3 --cost 5 \
+  --taste 8 --intelligence 6 --cost 10 \
   --desc "Low cost, fast, great taste; intelligence a notch below opus/gpt. Ideal for wide fan-outs and first-pass triage."
 ```
+
+Profiles can be **toggled on/off** without losing anything: `dyna profiles
+disable <name>` / `enable <name>` (TUI: `t`). A disabled profile keeps its
+stats and description and stays editable, but disappears from the agents'
+view and any `agent()` call to it fails.
 
 Harnesses: `claude-code`, `codex`, `opencode`, `pi`, `custom` (any argv with
 `{{prompt}}`/`{{model}}` placeholders, prompt on stdin if no placeholder), and
