@@ -9,7 +9,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"dyna-agent/internal/detect"
 	"dyna-agent/internal/profile"
 )
 
@@ -22,25 +21,9 @@ type profilesModel struct {
 	statusMsg     string
 	confirmDel    bool
 
-	// Wizard: detect models in the installed harnesses, pick which to
-	// register, then step through a prefilled form for each.
-	wizard     bool
-	wizLoading bool
-	wizCands   []detect.Candidate
-	wizSel     int
-	wizChecked map[int]bool
-	wizQueue   []profile.Profile
+	// Wizard: slide-based profile builder (see wizard.go). nil = closed.
+	wiz *wizModel
 }
-
-// wizCandsMsg delivers async detection results to the wizard.
-type wizCandsMsg []detect.Candidate
-
-func detectCmd(store *profile.Store) tea.Cmd {
-	return func() tea.Msg { return wizCandsMsg(detect.Candidates(store)) }
-}
-
-// customRow is the virtual "write your own" entry after the detected models.
-func (m *profilesModel) customRow() int { return len(m.wizCands) }
 
 func newProfilesModel(store *profile.Store) profilesModel {
 	return profilesModel{store: store}
@@ -66,20 +49,21 @@ func (m profilesModel) update(msg tea.KeyMsg) (profilesModel, tea.Cmd) {
 					m.statusMsg = "✓ saved " + p.Name
 				}
 			}
-			// Wizard chaining: continue with the next selected model.
-			if len(m.wizQueue) > 0 {
-				next := m.wizQueue[0]
-				m.wizQueue = m.wizQueue[1:]
-				m.form = newForm(next, "")
-				m.form.subtitle = wizProgress(len(m.wizQueue))
-				m.editing = true
-			}
 		}
 		return m, cmd
 	}
 
-	if m.wizard {
-		return m.updateWizard(msg)
+	if m.wiz != nil {
+		closed, saved, cmd := m.wiz.update(msg, m.store)
+		if saved != nil {
+			m.wiz = nil
+			m.statusMsg = "✓ saved " + saved.Name
+			return m, cmd
+		}
+		if closed {
+			m.wiz = nil
+		}
+		return m, cmd
 	}
 
 	if m.confirmDel {
@@ -110,13 +94,8 @@ func (m profilesModel) update(msg tea.KeyMsg) (profilesModel, tea.Cmd) {
 		m.editing = true
 		m.statusMsg = ""
 	case "w":
-		m.wizard = true
-		m.wizLoading = true
-		m.wizCands = nil
-		m.wizChecked = map[int]bool{}
-		m.wizSel = 0
+		m.wiz = newWizard()
 		m.statusMsg = ""
-		return m, detectCmd(m.store)
 	case "e", "enter":
 		if m.sel < len(m.store.Profiles) {
 			p := m.store.Profiles[m.sel]
@@ -156,76 +135,12 @@ func blankProfile() profile.Profile {
 	return profile.Profile{Harness: profile.HarnessClaudeCode, Taste: 5, Intelligence: 5, Cost: 5}
 }
 
-func wizProgress(remaining int) string {
-	if remaining == 0 {
-		return "wizard · last one"
-	}
-	return fmt.Sprintf("wizard · %d more after this", remaining)
-}
-
-// setWizCands receives async detection results.
-func (m *profilesModel) setWizCands(c []detect.Candidate) {
-	m.wizLoading = false
-	m.wizCands = c
-}
-
-func (m profilesModel) updateWizard(msg tea.KeyMsg) (profilesModel, tea.Cmd) {
-	last := m.customRow() // virtual "write your own" row
-	switch msg.String() {
-	case "esc", "q":
-		m.wizard = false
-	case "up", "k":
-		if m.wizSel > 0 {
-			m.wizSel--
-		}
-	case "down", "j":
-		if m.wizSel < last {
-			m.wizSel++
-		}
-	case " ", "x":
-		if m.wizSel == last || !m.wizCands[m.wizSel].Registered {
-			m.wizChecked[m.wizSel] = !m.wizChecked[m.wizSel]
-		}
-	case "a":
-		for i := range m.wizCands {
-			if !m.wizCands[i].Registered {
-				m.wizChecked[i] = true
-			}
-		}
-	case "n":
-		m.wizChecked = map[int]bool{}
-	case "enter":
-		var queue []profile.Profile
-		for i, c := range m.wizCands {
-			if m.wizChecked[i] && !c.Registered {
-				queue = append(queue, profile.Profile{
-					Name: c.Name, Harness: c.Harness, Model: c.Model,
-					Taste: 5, Intelligence: 5, Cost: 5,
-				})
-			}
-		}
-		if m.wizChecked[last] {
-			queue = append(queue, blankProfile())
-		}
-		if len(queue) == 0 {
-			m.statusMsg = "nothing selected — space toggles, enter confirms"
-			return m, nil
-		}
-		m.wizard = false
-		m.wizQueue = queue[1:]
-		m.form = newForm(queue[0], "")
-		m.form.subtitle = wizProgress(len(m.wizQueue))
-		m.editing = true
-	}
-	return m, nil
-}
-
 func (m profilesModel) view() string {
 	if m.editing {
 		return m.form.view(m.width, m.height)
 	}
-	if m.wizard {
-		return m.viewWizard()
+	if m.wiz != nil {
+		return m.wiz.view(m.width, m.height)
 	}
 	lw := clamp(m.width/3, 30, 44)
 	rw := m.width - lw - 6
@@ -323,58 +238,6 @@ func (m profilesModel) viewCard(w int) string {
 		b.WriteString(sDim.Render(fmt.Sprintf("timeout: %ds", p.TimeoutSec)) + "\n")
 	}
 	return b.String()
-}
-
-// viewWizard renders the model picker: detected models per harness plus a
-// custom entry, checkbox-toggled.
-func (m profilesModel) viewWizard() string {
-	var b strings.Builder
-	b.WriteString(sTitle.Render("Profile wizard") + sDim.Render(" · models detected in your installed agent CLIs") + "\n\n")
-	if m.wizLoading {
-		b.WriteString(sDim.Render("detecting models (probing claude, codex, opencode, pi)…") + "\n")
-		return sPaneR.Width(clamp(m.width-4, 40, 110)).Height(m.height - 2).Render(b.String())
-	}
-	if len(m.wizCands) == 0 {
-		b.WriteString(sDim.Render("no agent CLIs detected — pick “write your own” below\n\n"))
-	}
-	maxRows := m.height - 8
-	start := 0
-	if m.wizSel >= maxRows {
-		start = m.wizSel - maxRows + 1
-	}
-	renderRow := func(i int, checked bool, label, detail string, registered bool) {
-		box := "[ ]"
-		if checked {
-			box = sOK.Render("[x]")
-		}
-		cursor := "  "
-		if i == m.wizSel {
-			cursor = sHelpKey.Render("▸ ")
-		}
-		name := label
-		if i == m.wizSel {
-			name = sSel.Render(label)
-		}
-		line := fmt.Sprintf("%s%s %s  %s", cursor, box, name, sDim.Render(detail))
-		if registered {
-			line = fmt.Sprintf("%s%s %s  %s", cursor, sDim.Render("[✓]"), sDim.Render(label), sDim.Render(detail+" · already registered"))
-		}
-		b.WriteString(line + "\n")
-	}
-	for i := start; i < len(m.wizCands) && i-start < maxRows; i++ {
-		c := m.wizCands[i]
-		model := c.Model
-		if model == "" {
-			model = "(default model)"
-		}
-		renderRow(i, m.wizChecked[i], c.Name, c.Harness+" · "+model, c.Registered)
-	}
-	renderRow(m.customRow(), m.wizChecked[m.customRow()], "write your own…", "custom/niche profile, blank form", false)
-	if m.statusMsg != "" {
-		b.WriteString("\n" + sWarnS.Render(m.statusMsg))
-	}
-	b.WriteString("\n" + sDim.Render("each selected model opens a prefilled form: set its name, description, and stats"))
-	return sPaneR.Width(clamp(m.width-4, 40, 110)).Height(m.height - 2).Render(b.String())
 }
 
 // ---------------- form ----------------

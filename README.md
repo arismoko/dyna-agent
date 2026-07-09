@@ -56,10 +56,17 @@ those away automatically.)
 You register the models agents are allowed to use, each with a description and
 three standardized stats (**1–10, higher is better** — for cost, higher means
 *cheaper*). The fastest way is the TUI's **profile wizard** (`w` on the
-Profiles tab): it probes your installed agent CLIs for their models (claude
-model aliases, codex config + known ids, `opencode models`), lets you pick
-which to register — plus a "write your own" entry for niche setups — and
-steps you through a prefilled form for each (name, description, stats).
+Profiles tab) — six multiple-choice slides:
+
+1. **Harness** — which CLI runs the worker
+2. **Model** — asked from the harness itself: `codex debug models` (the real
+   catalog, with descriptions), `claude --help` model aliases,
+   `opencode models`; or "type it yourself" for niche models
+3. **Reasoning effort** — the levels that model actually supports (from the
+   codex catalog per model), translated to the right flags/env on save
+4. **Stats** — taste / intelligence / cost-efficiency
+5. **Description** — the personality blurb agents read
+6. **Finish** — name (auto-suggested), limits, enabled, default, save
 
 Or register by hand:
 
