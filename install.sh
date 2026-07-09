@@ -81,7 +81,7 @@ if [ "${DYNA_NO_SKILLS:-0}" != "1" ]; then
 fi
 
 bold "next steps"
+info "dyna profiles init   # register the curated default fleet (fable/sol/terra/luna)"
 info "dyna demo            # mock workers + sample workflow"
-info "dyna profiles add    # register your real models"
 info "dyna tui             # the dashboard"
 info "dyna guide           # scripting guide for agents"

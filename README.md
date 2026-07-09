@@ -55,7 +55,19 @@ those away automatically.)
 
 You register the models agents are allowed to use, each with a description and
 three standardized stats (**1–10, higher is better** — for cost, higher means
-*cheaper*). The fastest way is the TUI's **profile wizard** (`w` on the
+*cheaper*).
+
+**Quick start: `dyna profiles init`** registers a curated default fleet —
+`fable` (Claude Fable 5 via claude-code: verification, judging, high-stakes
+review, frontend taste), `sol`/`sol-max` (gpt-5.6-sol via codex at high/max
+effort: hard implementation and debugging), `terra` (the balanced default
+generalist), and `luna` (cheap fast sweeps). Their descriptions were
+researched (pricing, reviewed strengths/failure modes) and refined by the
+models themselves through a dyna workflow — each description tells agents
+when to pick the worker, when to avoid it, and how it fails. Existing
+profiles are never overwritten unless you pass `--force`.
+
+Or build profiles interactively with the TUI's **profile wizard** (`w` on the
 Profiles tab) — six multiple-choice slides:
 
 1. **Harness** — which CLI runs the worker

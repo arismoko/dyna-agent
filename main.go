@@ -28,6 +28,9 @@ import (
 //go:embed guide/GUIDE.md
 var guideMD string
 
+//go:embed defaults/profiles.json
+var defaultProfilesJSON []byte
+
 func main() {
 	root := &cobra.Command{
 		Use:   "dyna",
@@ -218,7 +221,50 @@ func profilesCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(list, show, add, rm, enable, disable, setDefault)
+	var force bool
+	initCmd := &cobra.Command{
+		Use:   "init",
+		Short: "Register the bundled default worker profiles (fable, sol, sol-max, terra, luna)",
+		Long: "Registers a curated starter fleet: Claude Fable 5 via claude-code plus the\n" +
+			"gpt-5.6 family (sol/sol-max/terra/luna) via codex, with agent-facing\n" +
+			"descriptions, stats, and sensible limits. Existing profiles with the same\n" +
+			"name are kept unless --force is given.",
+		RunE: func(c *cobra.Command, _ []string) error {
+			s, err := loadStore()
+			if err != nil {
+				return err
+			}
+			var bundle struct {
+				Profiles []profile.Profile `json:"profiles"`
+			}
+			if err := json.Unmarshal(defaultProfilesJSON, &bundle); err != nil {
+				return err
+			}
+			// The bundle marks terra default; don't fight an existing default.
+			_, hasDefault := s.DefaultProfile()
+			for _, p := range bundle.Profiles {
+				if _, exists := s.Get(p.Name); exists && !force {
+					fmt.Printf("  – %-8s exists, kept (overwrite with --force)\n", p.Name)
+					continue
+				}
+				if p.Default && hasDefault && !force {
+					p.Default = false
+				}
+				if err := s.Upsert(p); err != nil {
+					return err
+				}
+				fmt.Printf("  ✓ %-8s %s · %s\n", p.Name, p.Harness, orDash(p.Model))
+			}
+			if err := s.Save(); err != nil {
+				return err
+			}
+			fmt.Println("browse them with `dyna tui` (Profiles tab); agents see them via `dyna profiles list --json`")
+			return nil
+		},
+	}
+	initCmd.Flags().BoolVar(&force, "force", false, "overwrite existing profiles with the same name")
+
+	cmd.AddCommand(list, show, add, rm, enable, disable, setDefault, initCmd)
 	return cmd
 }
 
