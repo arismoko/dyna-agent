@@ -43,6 +43,12 @@ type Profile struct {
 	// SafeMode keeps the harness's own permission prompts / sandbox. By
 	// default dyna bypasses them (workers run headless and must act freely).
 	SafeMode bool `json:"safeMode,omitempty"`
+	// MaxConcurrent caps how many workers of this profile may run at once
+	// across a workflow (0 = unlimited). Expensive models set this low.
+	MaxConcurrent int `json:"maxConcurrent,omitempty"`
+	// MaxCallsPerRun caps total agent() calls to this profile in one run
+	// (0 = unlimited). Calls beyond it fail (parallel/pipeline absorb to null).
+	MaxCallsPerRun int `json:"maxCallsPerRun,omitempty"`
 }
 
 func (p *Profile) Validate() error {

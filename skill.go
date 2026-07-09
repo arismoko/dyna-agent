@@ -58,15 +58,19 @@ const (
 	markEnd   = "<!-- dyna:skill:end -->"
 )
 
+// Every supported harness loads Claude-style skills (a directory holding a
+// SKILL.md with name/description frontmatter), so installation is always a
+// standalone skill dir. legacyAgentsMD points at the AGENTS.md an older dyna
+// version wrote a managed block into; install/uninstall clean it up.
 type harnessTarget struct {
 	name string
 	// detect returns true if this harness appears to be installed.
 	detect func() bool
-	// path of the file we manage.
+	// path of the SKILL.md we manage.
 	path func() string
-	// standalone: write a whole file (claude skill); otherwise manage a
-	// marker block inside a shared AGENTS.md-style file.
-	standalone bool
+	// legacyAgentsMD is a shared instructions file older versions managed a
+	// marker block in; cleaned up on install/uninstall. Empty = none.
+	legacyAgentsMD func() string
 }
 
 func home() string { h, _ := os.UserHomeDir(); return h }
@@ -76,25 +80,27 @@ func hasCLI(bin string) bool { _, err := exec.LookPath(bin); return err == nil }
 func skillTargets() []harnessTarget {
 	return []harnessTarget{
 		{
-			name:       "claude-code",
-			detect:     func() bool { return hasCLI("claude") || dirExists(filepath.Join(home(), ".claude")) },
-			path:       func() string { return filepath.Join(home(), ".claude", "skills", "dyna", "SKILL.md") },
-			standalone: true,
+			name:   "claude-code",
+			detect: func() bool { return hasCLI("claude") || dirExists(filepath.Join(home(), ".claude")) },
+			path:   func() string { return filepath.Join(home(), ".claude", "skills", "dyna", "SKILL.md") },
 		},
 		{
-			name:   "codex",
-			detect: func() bool { return hasCLI("codex") || dirExists(filepath.Join(home(), ".codex")) },
-			path:   func() string { return filepath.Join(home(), ".codex", "AGENTS.md") },
+			name:           "codex",
+			detect:         func() bool { return hasCLI("codex") || dirExists(filepath.Join(home(), ".codex")) },
+			path:           func() string { return filepath.Join(home(), ".codex", "skills", "dyna", "SKILL.md") },
+			legacyAgentsMD: func() string { return filepath.Join(home(), ".codex", "AGENTS.md") },
 		},
 		{
-			name:   "opencode",
-			detect: func() bool { return hasCLI("opencode") || dirExists(filepath.Join(home(), ".config", "opencode")) },
-			path:   func() string { return filepath.Join(home(), ".config", "opencode", "AGENTS.md") },
+			name:           "opencode",
+			detect:         func() bool { return hasCLI("opencode") || dirExists(filepath.Join(home(), ".config", "opencode")) },
+			path:           func() string { return filepath.Join(home(), ".config", "opencode", "skills", "dyna", "SKILL.md") },
+			legacyAgentsMD: func() string { return filepath.Join(home(), ".config", "opencode", "AGENTS.md") },
 		},
 		{
-			name:   "pi",
-			detect: func() bool { return hasCLI("pi") || dirExists(filepath.Join(home(), ".pi")) },
-			path:   func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
+			name:           "pi",
+			detect:         func() bool { return hasCLI("pi") || dirExists(filepath.Join(home(), ".pi")) },
+			path:           func() string { return filepath.Join(home(), ".pi", "agent", "skills", "dyna", "SKILL.md") },
+			legacyAgentsMD: func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
 		},
 	}
 }
@@ -182,56 +188,42 @@ func installSkill(t harnessTarget) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	if t.standalone {
-		return os.WriteFile(p, []byte(skillFrontmatter+skillBody), 0o644)
-	}
-	// Managed block inside a shared instructions file: replace if present,
-	// append otherwise.
-	block := markBegin + "\n\n" + skillBody + "\n" + markEnd + "\n"
-	existing, err := os.ReadFile(p)
-	if err != nil && !os.IsNotExist(err) {
+	if err := os.WriteFile(p, []byte(skillFrontmatter+skillBody), 0o644); err != nil {
 		return err
 	}
-	content := string(existing)
-	if start := strings.Index(content, markBegin); start >= 0 {
-		if end := strings.Index(content, markEnd); end >= 0 {
-			content = content[:start] + block + content[end+len(markEnd)+1:]
-		} else {
-			content = content[:start] + block
-		}
-	} else {
-		if content != "" && !strings.HasSuffix(content, "\n") {
-			content += "\n"
-		}
-		if content != "" {
-			content += "\n"
-		}
-		content += block
-	}
-	return os.WriteFile(p, []byte(content), 0o644)
+	removeLegacyBlock(t)
+	return nil
 }
 
 func uninstallSkill(t harnessTarget) (bool, error) {
+	removed := removeLegacyBlock(t)
 	p := t.path()
-	if t.standalone {
-		if _, err := os.Stat(p); err != nil {
-			return false, nil
-		}
-		if err := os.Remove(p); err != nil {
-			return false, err
-		}
-		// Clean the now-empty skill dir.
-		os.Remove(filepath.Dir(p))
-		return true, nil
+	if _, err := os.Stat(p); err != nil {
+		return removed, nil
 	}
+	if err := os.Remove(p); err != nil {
+		return removed, err
+	}
+	// Clean the now-empty skill dir.
+	os.Remove(filepath.Dir(p))
+	return true, nil
+}
+
+// removeLegacyBlock strips the AGENTS.md marker block written by older dyna
+// versions. Reports whether anything was removed.
+func removeLegacyBlock(t harnessTarget) bool {
+	if t.legacyAgentsMD == nil {
+		return false
+	}
+	p := t.legacyAgentsMD()
 	existing, err := os.ReadFile(p)
 	if err != nil {
-		return false, nil
+		return false
 	}
 	content := string(existing)
 	start := strings.Index(content, markBegin)
 	if start < 0 {
-		return false, nil
+		return false
 	}
 	end := strings.Index(content, markEnd)
 	if end < 0 {
@@ -239,7 +231,8 @@ func uninstallSkill(t harnessTarget) (bool, error) {
 	}
 	out := strings.TrimRight(content[:start], "\n") + "\n" + strings.TrimLeft(content[end+len(markEnd):], "\n")
 	if strings.TrimSpace(out) == "" {
-		return true, os.Remove(p)
+		os.Remove(p)
+		return true
 	}
-	return true, os.WriteFile(p, []byte(out), 0o644)
+	return os.WriteFile(p, []byte(out), 0o644) == nil
 }

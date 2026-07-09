@@ -99,7 +99,10 @@ func Execute(ctx context.Context, o Options) (string, error) {
 			maxConc = 2
 		}
 	}
-	eng := &engine{opts: o, sem: make(chan struct{}, maxConc), curPhase: ""}
+	eng := &engine{
+		opts: o, sem: make(chan struct{}, maxConc),
+		profSems: map[string]chan struct{}{}, profCalls: map[string]int{},
+	}
 
 	wrapped, err := transform(o.ScriptSrc)
 	if err != nil {
@@ -136,14 +139,16 @@ func Execute(ctx context.Context, o Options) (string, error) {
 }
 
 type engine struct {
-	opts     Options
-	sem      chan struct{}
-	ctx      context.Context
-	loop     *eventloop.EventLoop
-	vm       *goja.Runtime // valid only on the loop thread
-	mu       sync.Mutex
-	curPhase string
-	agentSeq int
+	opts      Options
+	sem       chan struct{}
+	ctx       context.Context
+	loop      *eventloop.EventLoop
+	vm        *goja.Runtime // valid only on the loop thread
+	mu        sync.Mutex
+	curPhase  string
+	agentSeq  int
+	profSems  map[string]chan struct{} // per-profile concurrency limiters
+	profCalls map[string]int           // per-profile call counts this run
 }
 
 func (e *engine) emit(ev runstore.Event) {
@@ -193,6 +198,7 @@ func (e *engine) bind(vm *goja.Runtime, done chan outcome) error {
 			"name": p.Name, "description": p.Description, "harness": p.Harness,
 			"model": p.Model, "taste": p.Taste, "intelligence": p.Intelligence,
 			"cost": p.Cost, "default": p.Default,
+			"maxConcurrent": p.MaxConcurrent, "maxCallsPerRun": p.MaxCallsPerRun,
 		})
 	}
 	vm.Set("profiles", vm.ToValue(profs))
@@ -308,7 +314,41 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		}
 	}
 
+	// Per-profile limits: users cap how hard a profile may be leaned on
+	// (e.g. don't let a workflow spin up 50 concurrent expensive workers).
+	if prof.MaxCallsPerRun > 0 {
+		e.mu.Lock()
+		e.profCalls[prof.Name]++
+		n := e.profCalls[prof.Name]
+		e.mu.Unlock()
+		if n > prof.MaxCallsPerRun {
+			err := fmt.Errorf("profile %q call limit reached (%d per run)", prof.Name, prof.MaxCallsPerRun)
+			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: err.Error()})
+			reject(err)
+			return vm.ToValue(promise)
+		}
+	}
+	var profSem chan struct{}
+	if prof.MaxConcurrent > 0 {
+		e.mu.Lock()
+		profSem = e.profSems[prof.Name]
+		if profSem == nil {
+			profSem = make(chan struct{}, prof.MaxConcurrent)
+			e.profSems[prof.Name] = profSem
+		}
+		e.mu.Unlock()
+	}
+
 	go func() {
+		if profSem != nil {
+			select {
+			case profSem <- struct{}{}:
+			case <-e.ctx.Done():
+				reject(e.ctx.Err())
+				return
+			}
+			defer func() { <-profSem }()
+		}
 		select {
 		case e.sem <- struct{}{}:
 		case <-e.ctx.Done():

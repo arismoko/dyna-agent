@@ -70,6 +70,13 @@ Scripts also get a `profiles` global — the registry as an array — so you can
 select dynamically: `profiles.filter(p => p.cost >= 4).map(p => p.name)`.
 Omitting `profile` in `agent()` uses the user's default profile.
 
+Profiles may carry user-set limits, visible in `dyna profiles list --json`:
+`maxConcurrent` (simultaneous workers of that profile) and `maxCallsPerRun`
+(total calls per run). Concurrency limits queue automatically — you don't
+need to do anything. Call limits are hard: calls beyond the cap fail (they
+become `null` in `parallel`/`pipeline`), so plan fan-out sizes around
+`maxCallsPerRun` and route bulk work to unlimited/cheap profiles.
+
 ## Script API
 
 Scripts are plain JavaScript (NOT TypeScript) running in an async context —

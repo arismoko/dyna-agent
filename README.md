@@ -37,17 +37,19 @@ dyna tui                  # open the dashboard
 
 ## Teaching your agents about dyna
 
-`dyna skill install` plants a short skill/instructions block into every
-detected harness so agents know dyna exists and to read `dyna guide`:
+`dyna skill install` plants a proper agent skill (SKILL.md with
+name/description frontmatter) into every detected harness so agents know dyna
+exists and to read `dyna guide`:
 
 - **claude-code** → `~/.claude/skills/dyna/SKILL.md`
-- **codex** → managed block in `~/.codex/AGENTS.md`
-- **opencode** → managed block in `~/.config/opencode/AGENTS.md`
-- **pi** → managed block in `~/.pi/AGENTS.md`
+- **codex** → `~/.codex/skills/dyna/SKILL.md`
+- **opencode** → `~/.config/opencode/skills/dyna/SKILL.md`
+- **pi** → `~/.pi/agent/skills/dyna/SKILL.md`
 
 `dyna skill install <harness>` forces one, `--all` forces all,
-`dyna skill uninstall` removes cleanly (managed markers make it idempotent),
-`dyna skill show` prints the content.
+`dyna skill uninstall` removes cleanly, `dyna skill show` prints the content.
+(Older versions wrote managed AGENTS.md blocks; install/uninstall migrate
+those away automatically.)
 
 ## Worker profiles
 
@@ -84,6 +86,13 @@ harness-specific flags with `--extra-arg`.
 Agents discover the fleet with `dyna profiles list --json` and pick workers by
 description and stats — or dynamically inside scripts via the `profiles`
 global.
+
+Profiles can also be **limited** so agents can't lean on an expensive model
+too hard: `--limit-concurrent N` caps simultaneous workers of that profile
+(excess calls queue), and `--limit-calls N` hard-caps total calls per run
+(excess calls fail and become `null` in `parallel`/`pipeline`). Limits show
+up in `profiles list` and in the scripts' `profiles` global, so agents can
+plan fan-outs around them.
 
 ## For agents
 

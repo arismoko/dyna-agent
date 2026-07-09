@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -161,6 +162,17 @@ func (m profilesModel) viewCard(w int) string {
 	stat("cost-eff.", p.Cost, cCost, "higher = cheaper to run")
 	b.WriteString("\n")
 
+	if p.MaxConcurrent > 0 || p.MaxCallsPerRun > 0 {
+		lim := "limits:"
+		if p.MaxConcurrent > 0 {
+			lim += fmt.Sprintf("  ≤%d concurrent", p.MaxConcurrent)
+		}
+		if p.MaxCallsPerRun > 0 {
+			lim += fmt.Sprintf("  ≤%d calls/run", p.MaxCallsPerRun)
+		}
+		b.WriteString(sWarnS.Render(lim) + "\n\n")
+	}
+
 	if p.Description != "" {
 		b.WriteString(sTitle.Render("Description") + "\n")
 		b.WriteString(lipgloss.NewStyle().Width(w).Render(p.Description) + "\n\n")
@@ -238,7 +250,9 @@ func newForm(p *profile.Profile) formModel {
 		{label: "taste", kind: fStat, stat: v.Taste, note: "quality · design · review judgment"},
 		{label: "intelligence", kind: fStat, stat: v.Intelligence, note: "hard, long, complex tasks"},
 		{label: "cost-eff.", kind: fStat, stat: v.Cost, note: "higher = cheaper (5 = very cheap)"},
-		textField("extra args", "--dangerously-skip-permissions …", strings.Join(v.ExtraArgs, " "), "extra CLI args, space-separated"),
+		textField("extra args", "--browser …", strings.Join(v.ExtraArgs, " "), "extra CLI args, space-separated"),
+		textField("limit conc.", "0 = unlimited", intStr(v.MaxConcurrent), "max simultaneous workers of this profile"),
+		textField("limit calls", "0 = unlimited", intStr(v.MaxCallsPerRun), "max total calls per run"),
 		{label: "default", kind: fCycle, cycle: []string{"no", "yes"}, cycleI: boolIdx(v.Default), note: "used when a script omits profile"},
 	}
 	f.fields[0].input.Focus()
@@ -254,19 +268,36 @@ func boolIdx(b bool) int {
 
 func (f *formModel) toProfile() profile.Profile {
 	p := profile.Profile{
-		Name:         strings.TrimSpace(f.fields[0].input.Value()),
-		Description:  strings.TrimSpace(f.fields[1].input.Value()),
-		Harness:      f.fields[2].cycle[f.fields[2].cycleI],
-		Model:        strings.TrimSpace(f.fields[3].input.Value()),
-		Taste:        f.fields[4].stat,
-		Intelligence: f.fields[5].stat,
-		Cost:         f.fields[6].stat,
-		Default:      f.fields[8].cycleI == 1,
+		Name:           strings.TrimSpace(f.fields[0].input.Value()),
+		Description:    strings.TrimSpace(f.fields[1].input.Value()),
+		Harness:        f.fields[2].cycle[f.fields[2].cycleI],
+		Model:          strings.TrimSpace(f.fields[3].input.Value()),
+		Taste:          f.fields[4].stat,
+		Intelligence:   f.fields[5].stat,
+		Cost:           f.fields[6].stat,
+		MaxConcurrent:  atoiOr0(f.fields[8].input.Value()),
+		MaxCallsPerRun: atoiOr0(f.fields[9].input.Value()),
+		Default:        f.fields[10].cycleI == 1,
 	}
 	if ea := strings.TrimSpace(f.fields[7].input.Value()); ea != "" {
 		p.ExtraArgs = strings.Fields(ea)
 	}
 	return p
+}
+
+func intStr(v int) string {
+	if v == 0 {
+		return ""
+	}
+	return strconv.Itoa(v)
+}
+
+func atoiOr0(s string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // update returns (done, saved).

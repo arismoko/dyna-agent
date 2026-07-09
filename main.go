@@ -75,8 +75,15 @@ func profilesCmd() *cobra.Command {
 				if p.Default {
 					def = "  (default)"
 				}
-				fmt.Printf("%s%s\n  harness: %s  model: %s\n  taste: %d/5  intelligence: %d/5  cost-efficiency: %d/5\n  %s\n\n",
-					p.Name, def, p.Harness, orDash(p.Model), p.Taste, p.Intelligence, p.Cost, p.Description)
+				limits := ""
+				if p.MaxConcurrent > 0 {
+					limits += fmt.Sprintf("  max-concurrent: %d", p.MaxConcurrent)
+				}
+				if p.MaxCallsPerRun > 0 {
+					limits += fmt.Sprintf("  max-calls/run: %d", p.MaxCallsPerRun)
+				}
+				fmt.Printf("%s%s\n  harness: %s  model: %s%s\n  taste: %d/5  intelligence: %d/5  cost-efficiency: %d/5\n  %s\n\n",
+					p.Name, def, p.Harness, orDash(p.Model), limits, p.Taste, p.Intelligence, p.Cost, p.Description)
 			}
 			return nil
 		},
@@ -136,6 +143,8 @@ func profilesCmd() *cobra.Command {
 	f.IntVar(&p.TimeoutSec, "timeout", 0, "default per-call timeout in seconds")
 	f.BoolVar(&p.Default, "default", false, "make this the default profile")
 	f.BoolVar(&p.SafeMode, "safe-mode", false, "keep the harness's own permission prompts/sandbox (default: bypassed)")
+	f.IntVar(&p.MaxConcurrent, "limit-concurrent", 0, "max simultaneous workers of this profile per run (0 = unlimited)")
+	f.IntVar(&p.MaxCallsPerRun, "limit-calls", 0, "max total calls to this profile per run (0 = unlimited)")
 	add.MarkFlagRequired("name")
 
 	rm := &cobra.Command{
