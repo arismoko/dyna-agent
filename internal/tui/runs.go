@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -20,16 +21,27 @@ type runsModel struct {
 	result        string
 	vp            viewport.Model
 	follow        bool // stick to bottom while running
+
+	// Inspector: drill into one run's agents to read full prompts/responses.
+	inspecting bool
+	journal    []runstore.JournalEntry
+	agentSel   int
+	ivp        viewport.Model
 }
 
 func newRunsModel() runsModel {
-	return runsModel{vp: viewport.New(0, 0), follow: true}
+	return runsModel{vp: viewport.New(0, 0), ivp: viewport.New(0, 0), follow: true}
 }
 
 func (m *runsModel) setSize(w, h int) {
 	m.width, m.height = w, h
 	m.vp.Width = m.detailWidth() - 4
 	m.vp.Height = h - 2
+	m.ivp.Width = m.detailWidth() - 4
+	m.ivp.Height = h - 2
+	if m.inspecting {
+		m.loadInspect(false)
+	}
 }
 
 func (m *runsModel) listWidth() int   { return clamp(m.width/3, 30, 48) }
@@ -45,6 +57,66 @@ func (m *runsModel) refresh() {
 		m.sel = clamp(len(m.runs)-1, 0, 1<<30)
 	}
 	m.loadSelected()
+	if m.inspecting && m.sel < len(m.runs) && m.runs[m.sel].Status == "running" {
+		m.reloadJournal()
+	}
+}
+
+func (m *runsModel) reloadJournal() {
+	if m.sel < 0 || m.sel >= len(m.runs) {
+		return
+	}
+	m.journal, _ = runstore.ReadJournal(m.runs[m.sel].ID)
+	if m.agentSel >= len(m.journal) {
+		m.agentSel = clamp(len(m.journal)-1, 0, 1<<30)
+	}
+	m.loadInspect(false)
+}
+
+// loadInspect renders the selected agent's full prompt + response into the
+// inspector viewport. resetScroll jumps back to the top (agent switched).
+func (m *runsModel) loadInspect(resetScroll bool) {
+	w := m.detailWidth() - 4
+	if m.agentSel < 0 || m.agentSel >= len(m.journal) {
+		m.ivp.SetContent(sDim.Render("no agent calls recorded yet"))
+		return
+	}
+	e := m.journal[m.agentSel]
+	var b strings.Builder
+	title := sTitle.Render(e.Label) + "  " + sProfTag.Render("["+e.Profile+"]")
+	if e.Cached {
+		title += sWarnS.Render("  ⚡cached")
+	}
+	b.WriteString(title + "\n\n")
+	if e.Error != "" {
+		b.WriteString(sErrS.Render("Error") + "\n" + wrap(e.Error, w) + "\n\n")
+	}
+	if e.Dir != "" {
+		b.WriteString(sWarnS.Render("kept worktree: "+e.Dir) + "\n\n")
+	}
+	b.WriteString(sPhase.Render("▮ Prompt") + "\n")
+	b.WriteString(wrap(e.Prompt, w) + "\n\n")
+	b.WriteString(sPhase.Render("▮ Response") + "\n")
+	b.WriteString(wrap(formatResult(e.Result), w) + "\n")
+	m.ivp.SetContent(b.String())
+	if resetScroll {
+		m.ivp.GotoTop()
+	}
+}
+
+func formatResult(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "(none)"
+	case string:
+		return x
+	default:
+		b, err := json.MarshalIndent(x, "", "  ")
+		if err != nil {
+			return fmt.Sprintf("%v", x)
+		}
+		return string(b)
+	}
 }
 
 func (m *runsModel) loadSelected() {
@@ -72,6 +144,31 @@ func (m *runsModel) runningCount() int {
 }
 
 func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
+	if m.inspecting {
+		switch msg.String() {
+		case "esc", "backspace", "q":
+			m.inspecting = false
+		case "up", "k":
+			if m.agentSel > 0 {
+				m.agentSel--
+				m.loadInspect(true)
+			}
+		case "down", "j":
+			if m.agentSel < len(m.journal)-1 {
+				m.agentSel++
+				m.loadInspect(true)
+			}
+		case "g":
+			m.ivp.GotoTop()
+		case "G":
+			m.ivp.GotoBottom()
+		case "pgup", "u":
+			m.ivp.HalfViewUp()
+		case "pgdown", "d", " ":
+			m.ivp.HalfViewDown()
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "up", "k":
 		if m.sel > 0 {
@@ -84,6 +181,13 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 			m.sel++
 			m.follow = true
 			m.loadSelected()
+		}
+	case "enter":
+		if m.sel < len(m.runs) {
+			m.inspecting = true
+			m.agentSel = 0
+			m.reloadJournal()
+			m.loadInspect(true)
 		}
 	case "r":
 		m.refresh()
@@ -103,9 +207,52 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 }
 
 func (m runsModel) view(frame int) string {
+	if m.inspecting {
+		right := sPaneR.Width(m.detailWidth()).Height(m.height - 2).Render(m.ivp.View())
+		return lipgloss.JoinHorizontal(lipgloss.Top, m.viewAgentList(), right)
+	}
 	left := m.viewList(frame)
 	right := m.viewDetailPane(frame)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+}
+
+// viewAgentList is the inspector's left pane: every agent call in the run.
+func (m runsModel) viewAgentList() string {
+	w := m.listWidth()
+	var b strings.Builder
+	name := ""
+	if m.sel < len(m.runs) {
+		name = m.runs[m.sel].Name
+	}
+	b.WriteString(sTitle.Render("Agents") + sDim.Render(" · "+name) + "\n")
+	if len(m.journal) == 0 {
+		b.WriteString(sDim.Render("\nno agent calls recorded yet"))
+	}
+	maxRows := m.height - 4
+	start := 0
+	if m.agentSel >= maxRows {
+		start = m.agentSel - maxRows + 1
+	}
+	for i := start; i < len(m.journal) && i-start < maxRows; i++ {
+		e := m.journal[i]
+		icon := sOK.Render("✓")
+		if e.Error != "" {
+			icon = sErrS.Render("✗")
+		} else if e.Cached {
+			icon = sWarnS.Render("⚡")
+		}
+		label := e.Label
+		if lipgloss.Width(label) > w-8 {
+			label = label[:w-9] + "…"
+		}
+		row := icon + " " + label
+		if i == m.agentSel {
+			row = icon + " " + sSel.Render(label)
+		}
+		row += "  " + sDim.Render(e.Profile)
+		b.WriteString(row + "\n")
+	}
+	return sPaneL.Width(w).Height(m.height - 2).Render(b.String())
 }
 
 func (m runsModel) viewList(frame int) string {

@@ -81,7 +81,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		switch msg.String() {
-		case "q", "ctrl+c":
+		case "ctrl+c":
+			return m, tea.Quit
+		case "q":
+			// Inside the run inspector, q backs out instead of quitting.
+			if m.tab == tabRuns && m.runs.inspecting {
+				break
+			}
 			return m, tea.Quit
 		case "1":
 			m.tab = tabRuns
@@ -132,7 +138,11 @@ func (m model) View() string {
 	switch m.tab {
 	case tabRuns:
 		body = m.runs.view(m.frame)
-		help = helpLine("↑/↓", "select run", "enter", "open", "r", "refresh", "tab/1-3", "switch view", "q", "quit")
+		if m.runs.inspecting {
+			help = helpLine("↑/↓", "agent", "pgup/pgdn/space", "scroll", "g/G", "top/bottom", "esc", "back")
+		} else {
+			help = helpLine("↑/↓", "select run", "enter", "inspect agents", "r", "refresh", "tab/1-3", "switch view", "q", "quit")
+		}
 	case tabProfiles:
 		if m.profs.editing {
 			body = m.profs.view()
@@ -150,14 +160,15 @@ func (m model) View() string {
 }
 
 func (m model) viewHeader() string {
-	logo := sLogo.Render(" ⬡ dyna ")
-	tabs := ""
+	logo := sLogo.Render("⬡ dyna")
+	tabs := " "
 	for i, name := range tabNames {
+		label := itoa(i+1) + " " + name
 		st := sTab
 		if tab(i) == m.tab {
 			st = sTabActive
 		}
-		tabs += st.Render(name)
+		tabs += st.Render(label) + " "
 	}
 	running := ""
 	if n := m.runs.runningCount(); n > 0 {

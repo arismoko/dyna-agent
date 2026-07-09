@@ -13,11 +13,18 @@ var (
 	cTaste   = lipgloss.AdaptiveColor{Light: "#AF00AF", Dark: "#E980E9"}
 	cIntel   = lipgloss.AdaptiveColor{Light: "#005FD7", Dark: "#6CA9FF"}
 	cCost    = lipgloss.AdaptiveColor{Light: "#00875F", Dark: "#3AD787"}
+	// Header pill backgrounds: dark enough that fixed white text reads on
+	// both light and dark terminals.
+	cAccentBg  = lipgloss.AdaptiveColor{Light: "#5A56E0", Dark: "#4B47C9"}
+	cAccent2Bg = lipgloss.AdaptiveColor{Light: "#0087AF", Dark: "#005F87"}
 
-	sLogo      = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
-	sTab       = lipgloss.NewStyle().Padding(0, 2).Foreground(cDim)
+	// Header styles avoid theme-dependent dim colors: colored backgrounds
+	// with fixed white text read on any terminal theme.
+	sLogo = lipgloss.NewStyle().Bold(true).
+		Foreground(lipgloss.Color("#FFFFFF")).Background(cAccentBg).Padding(0, 1)
+	sTab       = lipgloss.NewStyle().Padding(0, 2)
 	sTabActive = lipgloss.NewStyle().Padding(0, 2).Bold(true).
-			Foreground(cAccent).Underline(true)
+			Foreground(lipgloss.Color("#FFFFFF")).Background(cAccent2Bg)
 
 	sPaneL = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cDim).Padding(0, 1)
 	sPaneR = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(cAccent).Padding(0, 1)
