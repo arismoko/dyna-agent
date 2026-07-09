@@ -2,7 +2,7 @@
   "profiles": [
     {
       "name": "fable",
-      "description": "PICK for the stages where a wrong answer is costly: judge panels, final synthesis, high-stakes code review, planning and architecture, subtle correctness work (concurrency, tricky invariants), long autonomous implementation, and frontend work needing real design taste. It is the premium worker ($10/$50 per 1M, ~2x sol) with deliberate multi-minute turns, so it shines on digests and decisions rather than raw fan-out \u2014 let luna/terra gather, then hand fable the synthesis. Give it big, well-framed asks and it delivers polished, dependable results in one pass. For security-focused analysis, pair it with or defer to sol, the specialist there. Capped at 3 concurrent / 6 calls per run \u2014 budget it for the verify/judge/synthesize stages.",
+      "description": "PICK for the stages where a wrong answer is costly: judge panels, final synthesis, high-stakes code review, planning and architecture, subtle correctness work (concurrency, tricky invariants), long autonomous implementation, and frontend work needing real design taste. It is the premium worker ($10/$50 per 1M, ~2x sol) with deliberate multi-minute turns, so it shines on digests and decisions rather than raw fan-out \u2014 let luna/terra gather, then hand fable the synthesis. For the most important verdicts, pair it with sol-max: two frontier models from different families with uncorrelated errors beat either alone. For security-focused analysis, defer to sol, the specialist. Capped at 3 concurrent / 6 calls per run \u2014 budget it for the verify/judge/synthesize stages.",
       "harness": "claude-code",
       "model": "fable",
       "taste": 10,
@@ -29,7 +29,7 @@
     },
     {
       "name": "sol",
-      "description": "PICK for complex mixed work at mid cost ($5/$30 per 1M): implementation grinds, difficult debugging, migrations, repo-wide changes, root-cause analysis \u2014 and a first-rate adversarial reviewer and verification panelist, including security-focused review where it specializes (and where fable defers). SOTA-tier agentic coding with unusually token-efficient output, and no concurrency cap, so it scales beautifully for parallel review panels and multi-voter verification. It works boldly and thoroughly: on legacy code, pin the scope explicitly, and skim the diff after long autonomous runs \u2014 its ambition occasionally outruns the brief. Route trivial edits and wide fan-out to luna/terra to save budget for what sol does best.",
+      "description": "THE worker for the hardest jobs: complex implementation grinds, deep debugging, migrations, repo-wide changes, root-cause analysis, and security-focused work where it specializes ($5/$30 per 1M). Also a first-rate adversarial reviewer and verification panelist \u2014 token-efficient, uncapped concurrency, so it scales beautifully for parallel review panels and multi-voter verification. It works boldly and thoroughly: on legacy code, pin the scope explicitly, and skim the diff after long autonomous runs. Route trivial edits and wide fan-out to luna/terra to save budget for what sol does best.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -42,7 +42,7 @@
     },
     {
       "name": "sol-max",
-      "description": "PICK as the closer for the hardest bounded coding work: open-ended complex bug fixes, deep debugging in large unfamiliar repos, long implementation grinds with architectural constraints, and high-stakes adversarial review or red-team-style verification where sheer persistence wins \u2014 the same gpt-5.6-sol as 'sol', run at max effort, so it digs deeper and simply does not give up. Give it clear constraints and a definition of done and it will grind until it gets there; a quick diff-and-test check afterward is a worthwhile habit on big autonomous refactors. Reserve it for tasks that genuinely need the extra depth \u2014 terra/luna cover routine work at a fraction of the cost. Capped at 4 concurrent / 8 calls per run.",
+      "description": "Fable's peer from a different model family \u2014 the same gpt-5.6-sol as 'sol' pushed to max effort, putting it at the very top tier alongside fable. Its value is the alternate angle: uncorrelated errors make it the ideal cross-check on fable's verdicts (and fable on its), the tie-breaker in judge panels, and the second opinion on decisions too important for one frontier model. Also the closer when sol-high needs backup on an open-ended brutal problem \u2014 give it constraints and a definition of done and it will not give up. Reserve it for top-tier work; sol-high covers most hard jobs at lower cost. Capped at 4 concurrent / 8 calls per run.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
