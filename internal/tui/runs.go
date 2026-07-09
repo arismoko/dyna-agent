@@ -27,6 +27,9 @@ type runsModel struct {
 	journal    []runstore.JournalEntry
 	agentSel   int
 	ivp        viewport.Model
+
+	confirm   string // pending confirmation: "delete" | "cancel"
+	statusMsg string
 }
 
 func newRunsModel() runsModel {
@@ -169,6 +172,25 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.confirm != "" {
+		if m.sel < len(m.runs) && (msg.String() == "y" || msg.String() == "Y") {
+			id := m.runs[m.sel].ID
+			var err error
+			if m.confirm == "delete" {
+				err = runstore.Remove(id)
+			} else {
+				err = runstore.Cancel(id)
+			}
+			if err != nil {
+				m.statusMsg = "✗ " + err.Error()
+			} else {
+				m.statusMsg = "✓ " + m.confirm + "d " + id
+			}
+			m.refresh()
+		}
+		m.confirm = ""
+		return m, nil
+	}
 	switch msg.String() {
 	case "up", "k":
 		if m.sel > 0 {
@@ -181,6 +203,27 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 			m.sel++
 			m.follow = true
 			m.loadSelected()
+		}
+	case "d":
+		if m.sel < len(m.runs) {
+			m.confirm = "delete"
+			m.statusMsg = ""
+		}
+	case "x":
+		if m.sel < len(m.runs) && m.runs[m.sel].Status == "running" {
+			m.confirm = "cancel"
+			m.statusMsg = ""
+		}
+	case "p":
+		if m.sel < len(m.runs) && m.runs[m.sel].Status == "running" {
+			id := m.runs[m.sel].ID
+			paused := !runstore.IsPaused(id)
+			runstore.SetPaused(id, paused)
+			if paused {
+				m.statusMsg = "⏸ paused " + id
+			} else {
+				m.statusMsg = "▶ resumed " + id
+			}
 		}
 	case "enter":
 		if m.sel < len(m.runs) {
@@ -269,7 +312,11 @@ func (m runsModel) viewList(frame int) string {
 	}
 	for i := start; i < len(m.runs) && i-start < maxRows; i++ {
 		r := m.runs[i]
-		icon := statusIcon(r.Status, frame)
+		status := r.Status
+		if status == "running" && runstore.IsPaused(r.ID) {
+			status = "paused"
+		}
+		icon := statusIcon(status, frame)
 		name := r.Name
 		if lipgloss.Width(name) > w-14 {
 			name = name[:w-15] + "…"
@@ -281,6 +328,12 @@ func (m runsModel) viewList(frame int) string {
 		}
 		b.WriteString(row + "\n")
 	}
+	if m.confirm != "" && m.sel < len(m.runs) {
+		verb := m.confirm
+		b.WriteString("\n" + sErrS.Render(verb+" "+m.runs[m.sel].Name+"? (y/n)"))
+	} else if m.statusMsg != "" {
+		b.WriteString("\n" + sDim.Render(m.statusMsg))
+	}
 	return sPaneL.Width(w).Height(m.height - 2).Render(b.String())
 }
 
@@ -288,6 +341,8 @@ func statusIcon(status string, frame int) string {
 	switch status {
 	case "running":
 		return sWarnS.Render(spinnerFrames[frame%len(spinnerFrames)])
+	case "paused":
+		return sWarnS.Render("⏸")
 	case "ok":
 		return sOK.Render("✓")
 	case "error":

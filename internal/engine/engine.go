@@ -42,6 +42,9 @@ type Options struct {
 	MaxConc   int                  // 0 => min(16, cores-2)
 	MaxAgents int                  // lifetime agent() cap; 0 => 1000
 	Cache     *Cache               // resume cache (nil = fresh run)
+	// Paused, when it returns true, blocks new worker launches (running
+	// workers finish). Polled while waiting to start each agent.
+	Paused func() bool
 }
 
 // Cache maps agent-call keys to prior results so a resumed run replays the
@@ -110,10 +113,11 @@ func Execute(ctx context.Context, o Options) (string, error) {
 	}
 
 	loop := eventloop.NewEventLoop(eventloop.EnableConsole(false))
-	done := make(chan outcome, 1)
+	eng.done = make(chan outcome, 1)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	eng.ctx = ctx
+	eng.cancel = cancel
 	eng.loop = loop
 
 	loop.Start()
@@ -121,17 +125,17 @@ func Execute(ctx context.Context, o Options) (string, error) {
 
 	loop.RunOnLoop(func(vm *goja.Runtime) {
 		console.Enable(vm)
-		if err := eng.bind(vm, done); err != nil {
-			done <- outcome{err: err}
+		if err := eng.bind(vm); err != nil {
+			eng.settle(outcome{err: err})
 			return
 		}
 		if _, err := vm.RunScript("workflow.js", wrapped); err != nil {
-			done <- outcome{err: fmt.Errorf("script error: %w", err)}
+			eng.settle(outcome{err: fmt.Errorf("script error: %w", err)})
 		}
 	})
 
 	select {
-	case res := <-done:
+	case res := <-eng.done:
 		return res.resultJSON, res.err
 	case <-ctx.Done():
 		return "", ctx.Err()
@@ -139,16 +143,31 @@ func Execute(ctx context.Context, o Options) (string, error) {
 }
 
 type engine struct {
-	opts      Options
-	sem       chan struct{}
-	ctx       context.Context
-	loop      *eventloop.EventLoop
-	vm        *goja.Runtime // valid only on the loop thread
-	mu        sync.Mutex
-	curPhase  string
-	agentSeq  int
-	profSems  map[string]chan struct{} // per-profile concurrency limiters
-	profCalls map[string]int           // per-profile call counts this run
+	opts       Options
+	sem        chan struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
+	loop       *eventloop.EventLoop
+	vm         *goja.Runtime // valid only on the loop thread
+	done       chan outcome
+	settleOnce sync.Once
+	mu         sync.Mutex
+	curPhase   string
+	agentSeq   int
+	profSems   map[string]chan struct{} // per-profile concurrency limiters
+	profCalls  map[string]int           // per-profile call counts this run
+}
+
+// settle delivers the run's single outcome (first caller wins).
+func (e *engine) settle(o outcome) {
+	e.settleOnce.Do(func() { e.done <- o })
+}
+
+// abort fails the whole run and cancels every in-flight worker. Used when
+// continuing would only produce a degraded result (e.g. a profile cap hit).
+func (e *engine) abort(err error) {
+	e.settle(outcome{err: err})
+	e.cancel()
 }
 
 func (e *engine) emit(ev runstore.Event) {
@@ -164,7 +183,7 @@ func (e *engine) emit(ev runstore.Event) {
 // bind installs the Go-backed globals: __spawn, __phase, __log, __finish,
 // __fail, args, profiles — then evaluates the JS prelude that builds the
 // public API (agent/parallel/pipeline/phase/log) on top of them.
-func (e *engine) bind(vm *goja.Runtime, done chan outcome) error {
+func (e *engine) bind(vm *goja.Runtime) error {
 	e.vm = vm
 	vm.Set("__phase", func(title string) {
 		e.mu.Lock()
@@ -175,12 +194,11 @@ func (e *engine) bind(vm *goja.Runtime, done chan outcome) error {
 	vm.Set("__log", func(msg string) {
 		e.emit(runstore.Event{T: "log", Msg: truncate(msg, 4000)})
 	})
-	var once sync.Once
 	vm.Set("__finish", func(resultJSON string) {
-		once.Do(func() { done <- outcome{resultJSON: resultJSON} })
+		e.settle(outcome{resultJSON: resultJSON})
 	})
 	vm.Set("__fail", func(msg string) {
-		once.Do(func() { done <- outcome{err: fmt.Errorf("workflow failed: %s", msg)} })
+		e.settle(outcome{err: fmt.Errorf("workflow failed: %s", msg)})
 	})
 	vm.Set("__spawn", e.spawn)
 
@@ -316,15 +334,19 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 
 	// Per-profile limits: users cap how hard a profile may be leaned on
 	// (e.g. don't let a workflow spin up 50 concurrent expensive workers).
+	// Exceeding a call cap aborts the WHOLE run: a workflow that silently
+	// drops calls would produce a degraded result while still spending money.
 	if prof.MaxCallsPerRun > 0 {
 		e.mu.Lock()
 		e.profCalls[prof.Name]++
 		n := e.profCalls[prof.Name]
 		e.mu.Unlock()
 		if n > prof.MaxCallsPerRun {
-			err := fmt.Errorf("profile %q call limit reached (%d per run)", prof.Name, prof.MaxCallsPerRun)
+			err := fmt.Errorf("profile %q call limit exceeded (%d per run)", prof.Name, prof.MaxCallsPerRun)
 			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: err.Error()})
+			e.emit(runstore.Event{T: "log", Msg: "aborting run: " + err.Error()})
 			reject(err)
+			e.abort(fmt.Errorf("workflow aborted: %v — size the fan-out within the profile's maxCallsPerRun (see `dyna profiles list --json`) or route bulk work to an unlimited profile", err))
 			return vm.ToValue(promise)
 		}
 	}
@@ -340,6 +362,15 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 	}
 
 	go func() {
+		// Pause gate: hold new launches while the run is paused.
+		for e.opts.Paused != nil && e.opts.Paused() {
+			select {
+			case <-time.After(500 * time.Millisecond):
+			case <-e.ctx.Done():
+				reject(e.ctx.Err())
+				return
+			}
+		}
 		if profSem != nil {
 			select {
 			case profSem <- struct{}{}:

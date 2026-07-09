@@ -73,9 +73,11 @@ Omitting `profile` in `agent()` uses the user's default profile.
 Profiles may carry user-set limits, visible in `dyna profiles list --json`:
 `maxConcurrent` (simultaneous workers of that profile) and `maxCallsPerRun`
 (total calls per run). Concurrency limits queue automatically — you don't
-need to do anything. Call limits are hard: calls beyond the cap fail (they
-become `null` in `parallel`/`pipeline`), so plan fan-out sizes around
-`maxCallsPerRun` and route bulk work to unlimited/cheap profiles.
+need to do anything. Call limits are FATAL: the first call past the cap
+**aborts the entire run** (a silently degraded result would still spend
+money). Before writing a script, check `maxCallsPerRun` for each profile you
+use and size fan-outs within it — route bulk work to unlimited/cheap
+profiles, reserve capped profiles for the few calls that need them.
 
 ## Script API
 
@@ -142,6 +144,9 @@ dyna run <script.js> [--args '<json>'] [--name x] [--dir path] [--json] [--quiet
 dyna runs list [--json]            # past/active runs
 dyna runs show <id> [--json]       # events, result
 dyna runs wait <id> [--timeout N]  # block until a run finishes, print result
+dyna runs cancel <id>              # stop a running workflow (kills workers)
+dyna runs pause <id> / unpause <id> # hold new worker launches / resume
+dyna runs remove <id>... | clear   # delete finished runs
 dyna guide                         # this document
 dyna tui                           # human dashboard (profiles + live runs)
 ```

@@ -264,7 +264,9 @@ func runCmd() *cobra.Command {
 				ScriptSrc: string(src), Args: argsVal, Store: store,
 				Run: run, OnEvent: onEvent, WorkDir: dir, MaxConc: maxConc,
 				MaxAgents: maxAgents, Cache: cache,
+				Paused: func() bool { return runstore.IsPaused(run.Meta.ID) },
 			})
+			runstore.SetPaused(run.Meta.ID, false)
 			status := "ok"
 			if err != nil {
 				if ctx.Err() != nil {
@@ -381,7 +383,11 @@ func runsCmd() *cobra.Command {
 				return nil
 			}
 			for _, r := range runs {
-				fmt.Printf("%-32s %-9s %-20s %s\n", r.ID, r.Status, r.StartedAt.Format("2006-01-02 15:04:05"), r.Name)
+				status := r.Status
+				if status == "running" && runstore.IsPaused(r.ID) {
+					status = "paused"
+				}
+				fmt.Printf("%-32s %-9s %-20s %s\n", r.ID, status, r.StartedAt.Format("2006-01-02 15:04:05"), r.Name)
 			}
 			return nil
 		},
@@ -451,7 +457,82 @@ func runsCmd() *cobra.Command {
 	}
 	wait.Flags().IntVar(&waitTimeout, "timeout", 0, "give up after N seconds (0 = wait forever)")
 
-	cmd.AddCommand(list, show, wait)
+	cancel := &cobra.Command{
+		Use:   "cancel <run-id>",
+		Short: "Stop a running workflow (in-flight workers are killed)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, a []string) error {
+			if err := runstore.Cancel(a[0]); err != nil {
+				return err
+			}
+			fmt.Println("canceled " + a[0])
+			return nil
+		},
+	}
+
+	pause := &cobra.Command{
+		Use:   "pause <run-id>",
+		Short: "Pause a running workflow: running workers finish, no new ones start",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, a []string) error {
+			m, err := runstore.ReadMeta(a[0])
+			if err != nil {
+				return err
+			}
+			if m.Status != "running" {
+				return fmt.Errorf("run %s is not running (status %s)", a[0], m.Status)
+			}
+			if err := runstore.SetPaused(a[0], true); err != nil {
+				return err
+			}
+			fmt.Println("paused " + a[0] + " — resume with `dyna runs unpause " + a[0] + "`")
+			return nil
+		},
+	}
+
+	unpause := &cobra.Command{
+		Use:   "unpause <run-id>",
+		Short: "Resume a paused workflow",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, a []string) error {
+			if err := runstore.SetPaused(a[0], false); err != nil {
+				return err
+			}
+			fmt.Println("resumed " + a[0])
+			return nil
+		},
+	}
+
+	remove := &cobra.Command{
+		Use:     "remove <run-id>...",
+		Aliases: []string{"rm", "delete"},
+		Short:   "Delete finished runs (cancel running ones first)",
+		Args:    cobra.MinimumNArgs(1),
+		RunE: func(c *cobra.Command, a []string) error {
+			for _, id := range a {
+				if err := runstore.Remove(id); err != nil {
+					return err
+				}
+				fmt.Println("removed " + id)
+			}
+			return nil
+		},
+	}
+
+	clear := &cobra.Command{
+		Use:   "clear",
+		Short: "Delete every finished run",
+		RunE: func(c *cobra.Command, _ []string) error {
+			n, err := runstore.ClearCompleted()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("removed %d run(s)\n", n)
+			return nil
+		},
+	}
+
+	cmd.AddCommand(list, show, wait, cancel, pause, unpause, remove, clear)
 	return cmd
 }
 

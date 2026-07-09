@@ -89,10 +89,11 @@ global.
 
 Profiles can also be **limited** so agents can't lean on an expensive model
 too hard: `--limit-concurrent N` caps simultaneous workers of that profile
-(excess calls queue), and `--limit-calls N` hard-caps total calls per run
-(excess calls fail and become `null` in `parallel`/`pipeline`). Limits show
-up in `profiles list` and in the scripts' `profiles` global, so agents can
-plan fan-outs around them.
+(excess calls queue), and `--limit-calls N` hard-caps total calls per run —
+the first call past the cap **aborts the whole workflow** with a clear error,
+rather than continuing toward a silently degraded (but still billed) result.
+Limits show up in `profiles list` and in the scripts' `profiles` global, so
+agents can size fan-outs around them up front.
 
 ## For agents
 
@@ -112,7 +113,13 @@ dyna run audit.js --detach                       # background; prints run id
 dyna runs wait <id>                              # block until done, print result
 dyna run review.js --resume <id>                 # replay unchanged agent calls from a prior run
 dyna runs list                                   # inspect history
+dyna runs cancel <id>                            # stop a running workflow
+dyna runs pause <id> / unpause <id>              # hold new worker launches / resume
+dyna runs remove <id>... / clear                 # delete finished runs
 ```
+
+Cancel, pause, and delete are also available in the TUI (`x`, `p`, `d` on the
+Workflows tab).
 
 Per-agent `isolation: 'worktree'` runs a worker in a detached git worktree —
 removed automatically if untouched, kept (and its path logged) if the worker

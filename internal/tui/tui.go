@@ -141,7 +141,7 @@ func (m model) View() string {
 		if m.runs.inspecting {
 			help = helpLine("↑/↓", "agent", "pgup/pgdn/space", "scroll", "g/G", "top/bottom", "esc", "back")
 		} else {
-			help = helpLine("↑/↓", "select run", "enter", "inspect agents", "r", "refresh", "tab/1-3", "switch view", "q", "quit")
+			help = helpLine("↑/↓", "select", "enter", "inspect", "p", "pause", "x", "cancel", "d", "delete", "1-3", "view", "q", "quit")
 		}
 	case tabProfiles:
 		if m.profs.editing {
