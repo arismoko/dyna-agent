@@ -113,7 +113,7 @@ func SuggestName(harness, model, effort string) string {
 }
 
 // claudeModels parses the model aliases out of `claude --help`'s --model
-// section — the CLI documents its own accepted aliases there.
+// section; the CLI documents its own accepted aliases there.
 func claudeModels() []Model {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -1,4 +1,4 @@
-// dyna workflow prelude — builds the public script API on top of the
+// dyna workflow prelude: builds the public script API on top of the
 // Go-backed hooks (__spawn, __phase, __log).
 "use strict";
 
@@ -42,7 +42,7 @@ globalThis.pipeline = function (items, ...stages) {
   );
 };
 
-// sleep(ms) — pacing helper for polling loops.
+// sleep(ms): pacing helper for polling loops.
 globalThis.sleep = function (ms) {
   return new Promise((res) => setTimeout(res, ms));
 };

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -29,7 +30,10 @@ import (
 	"dyna-agent/internal/runstore"
 )
 
-const defaultAgentTimeout = 30 * time.Minute
+const (
+	defaultAgentTimeout = 30 * time.Minute
+	defaultJournalIdle  = 5 * time.Minute
+)
 
 // Options configures one workflow execution.
 type Options struct {
@@ -42,6 +46,10 @@ type Options struct {
 	MaxConc   int                  // 0 => min(16, cores-2)
 	MaxAgents int                  // lifetime agent() cap; 0 => 1000
 	Cache     *Cache               // resume cache (nil = fresh run)
+	// JournalIdle controls how long a running worker may go without an
+	// agent-authored progress record before an exact-session reminder. Zero
+	// uses five minutes; exposed primarily as a deterministic test seam.
+	JournalIdle time.Duration
 	// Paused, when it returns true, blocks new worker launches (running
 	// workers finish). Polled while waiting to start each agent.
 	Paused func() bool
@@ -56,7 +64,7 @@ type Cache struct {
 }
 
 // NewCache builds a resume cache from a previous run's journal (successful,
-// non-isolated calls only — failures and worktree runs re-execute).
+// non-isolated calls only; failures and worktree runs re-execute).
 func NewCache(entries []runstore.JournalEntry) *Cache {
 	c := &Cache{m: map[string][]any{}}
 	for _, e := range entries {
@@ -136,8 +144,18 @@ func Execute(ctx context.Context, o Options) (string, error) {
 
 	select {
 	case res := <-eng.done:
+		eng.stopWorkers()
 		return res.resultJSON, res.err
 	case <-ctx.Done():
+		// abort() settles before canceling, so preserve its concrete diagnostic
+		// instead of racing it into a generic context cancellation.
+		select {
+		case res := <-eng.done:
+			eng.stopWorkers()
+			return res.resultJSON, res.err
+		default:
+		}
+		eng.stopWorkers()
 		return "", ctx.Err()
 	}
 }
@@ -156,6 +174,9 @@ type engine struct {
 	agentSeq   int
 	profSems   map[string]chan struct{} // per-profile concurrency limiters
 	profCalls  map[string]int           // per-profile call counts this run
+	workerMu   sync.Mutex
+	workers    sync.WaitGroup
+	stopping   bool
 }
 
 // settle delivers the run's single outcome (first caller wins).
@@ -170,6 +191,26 @@ func (e *engine) abort(err error) {
 	e.cancel()
 }
 
+func (e *engine) beginWorker() bool {
+	e.workerMu.Lock()
+	defer e.workerMu.Unlock()
+	if e.stopping || e.ctx.Err() != nil {
+		return false
+	}
+	e.workers.Add(1)
+	return true
+}
+
+// stopWorkers prevents new launches, cancels every in-flight harness, and
+// waits for their terminal journal/event writes before the caller closes Run.
+func (e *engine) stopWorkers() {
+	e.workerMu.Lock()
+	e.stopping = true
+	e.cancel()
+	e.workerMu.Unlock()
+	e.workers.Wait()
+}
+
 func (e *engine) emit(ev runstore.Event) {
 	if e.opts.Run != nil {
 		e.opts.Run.Append(ev)
@@ -181,7 +222,7 @@ func (e *engine) emit(ev runstore.Event) {
 }
 
 // bind installs the Go-backed globals: __spawn, __phase, __log, __finish,
-// __fail, args, profiles — then evaluates the JS prelude that builds the
+// __fail, args, profiles, then evaluates the JS prelude that builds the
 // public API (agent/parallel/pipeline/phase/log) on top of them.
 func (e *engine) bind(vm *goja.Runtime) error {
 	e.vm = vm
@@ -279,18 +320,18 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 	if profName != "" {
 		p, ok := e.opts.Store.Get(profName)
 		if !ok {
-			reject(fmt.Errorf("unknown profile %q — run `dyna profiles list` to see registered profiles", profName))
+			reject(fmt.Errorf("unknown profile %q; run `dyna profiles list` to see registered profiles", profName))
 			return vm.ToValue(promise)
 		}
 		if p.Disabled {
-			reject(fmt.Errorf("profile %q is disabled — the user must enable it (`dyna profiles enable %s`); pick another from the profiles global", profName, profName))
+			reject(fmt.Errorf("profile %q is disabled; the user must enable it (`dyna profiles enable %s`); pick another from the profiles global", profName, profName))
 			return vm.ToValue(promise)
 		}
 		prof = *p
 	} else {
 		p, ok := e.opts.Store.DefaultProfile()
 		if !ok {
-			reject(fmt.Errorf("no profiles registered — run `dyna profiles add` first"))
+			reject(fmt.Errorf("no profiles registered; run `dyna profiles add` first"))
 			return vm.ToValue(promise)
 		}
 		prof = *p
@@ -316,7 +357,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 	}
 	e.mu.Unlock()
 	if id > maxAgents {
-		reject(fmt.Errorf("agent cap reached (%d) — raise with --max-agents", maxAgents))
+		reject(fmt.Errorf("agent cap reached (%d); raise with --max-agents", maxAgents))
 		return vm.ToValue(promise)
 	}
 	if label == "" {
@@ -353,7 +394,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: err.Error()})
 			e.emit(runstore.Event{T: "log", Msg: "aborting run: " + err.Error()})
 			reject(err)
-			e.abort(fmt.Errorf("workflow aborted: %v — size the fan-out within the profile's maxCallsPerRun (see `dyna profiles list --json`) or route bulk work to an unlimited profile", err))
+			e.abort(fmt.Errorf("workflow aborted: %v; size the fan-out within the profile's maxCallsPerRun (see `dyna profiles list --json`) or route bulk work to an unlimited profile", err))
 			return vm.ToValue(promise)
 		}
 	}
@@ -368,13 +409,27 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		e.mu.Unlock()
 	}
 
+	if !e.beginWorker() {
+		err := e.ctx.Err()
+		if err == nil {
+			err = fmt.Errorf("workflow is already finishing")
+		}
+		e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: truncate(err.Error(), 2000)})
+		reject(err)
+		return vm.ToValue(promise)
+	}
+	failBeforeRun := func(err error) {
+		e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: truncate(err.Error(), 2000)})
+		reject(err)
+	}
 	go func() {
+		defer e.workers.Done()
 		// Pause gate: hold new launches while the run is paused.
 		for e.opts.Paused != nil && e.opts.Paused() {
 			select {
 			case <-time.After(500 * time.Millisecond):
 			case <-e.ctx.Done():
-				reject(e.ctx.Err())
+				failBeforeRun(e.ctx.Err())
 				return
 			}
 		}
@@ -382,7 +437,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			select {
 			case profSem <- struct{}{}:
 			case <-e.ctx.Done():
-				reject(e.ctx.Err())
+				failBeforeRun(e.ctx.Err())
 				return
 			}
 			defer func() { <-profSem }()
@@ -390,7 +445,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		select {
 		case e.sem <- struct{}{}:
 		case <-e.ctx.Done():
-			reject(e.ctx.Err())
+			failBeforeRun(e.ctx.Err())
 			return
 		}
 		defer func() { <-e.sem }()
@@ -401,6 +456,25 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		actx, cancel := context.WithTimeout(e.ctx, timeout)
 		defer cancel()
 
+		journalPath := ""
+		if e.opts.Run != nil {
+			var journalErr error
+			journalPath, journalErr = e.opts.Run.StartAgentJournal(id, label, prof.Name, phase, prompt)
+			if journalErr != nil {
+				e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: truncate(journalErr.Error(), 2000)})
+				reject(fmt.Errorf("start work journal for %s: %w", label, journalErr))
+				return
+			}
+			prof.Env = cloneEnv(prof.Env)
+			prof.Env[runstore.AgentJournalEnv] = journalPath
+			if runRoot, rootErr := filepath.Abs(e.opts.Run.Dir); rootErr == nil {
+				prof.Env[runstore.AgentJournalRootEnv] = runRoot
+			}
+			if exe, exeErr := os.Executable(); exeErr == nil {
+				prof.Env["DYNA_BIN"] = exe
+			}
+		}
+
 		// Worktree isolation: run the worker on a detached copy of the repo;
 		// keep the tree only if the worker changed something.
 		keptDir := ""
@@ -408,6 +482,9 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		if isolation == "worktree" {
 			wt, cleanup, werr := addWorktree(actx, cwd)
 			if werr != nil {
+				if e.opts.Run != nil && journalPath != "" {
+					_ = e.opts.Run.AppendAgentJournal(id, runstore.AgentJournalEntry{Kind: "error", Message: truncate(werr.Error(), 4000)})
+				}
 				e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: truncate(werr.Error(), 2000)})
 				reject(werr)
 				return
@@ -416,26 +493,92 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			cleanupWT = cleanup
 		}
 
+		journalIdle := e.opts.JournalIdle
+		if journalIdle <= 0 {
+			journalIdle = defaultJournalIdle
+		}
+		journalOpts := harness.JournalOptions{
+			Path: journalPath, IdleAfter: journalIdle, State: harness.NewJournalState(),
+		}
+		if journalPath != "" {
+			nudgeSent := make(map[string]bool)
+			journalOpts.OnEntry = func(entry runstore.AgentJournalEntry) {
+				nudgeSent[harness.JournalNudgeIdle] = false
+				e.emit(runstore.Event{
+					T: "agent_journal", ID: id, Label: label, Profile: prof.Name, Phase: phase,
+					Kind: entry.Kind, Preview: truncate(entry.Message, 240),
+				})
+			}
+			journalOpts.OnNudge = func(nudge harness.JournalNudge) {
+				wasSent := nudgeSent[nudge.Reason]
+				if nudge.Delivered {
+					nudgeSent[nudge.Reason] = true
+				}
+				msg := "journal quiet for five minutes; exact-session write-and-continue reminder sent"
+				next := "Write a progress entry, then continue the original task."
+				status := "sent"
+				if nudge.Reason == harness.JournalNudgeMissing {
+					msg = "worker finished without an agent-authored entry; exact-session write-now reminder sent"
+					next = "Write one brief entry; preserve the completed task result."
+				}
+				if !nudge.Delivered {
+					status = "unavailable"
+					if wasSent {
+						status = "ignored"
+						msg = "exact-session journal reminder was delivered, but the worker still wrote no agent-authored entry"
+						next = "No further reminder will be sent for this completed task."
+					} else if nudge.Reason == harness.JournalNudgeMissing {
+						msg = "worker finished without an agent-authored entry; a safe exact-session reminder was unavailable or failed"
+					} else {
+						msg = "journal quiet for five minutes; live reminder unavailable because this harness/session cannot be safely resumed"
+					}
+				}
+				_ = e.opts.Run.AppendAgentJournal(id, runstore.AgentJournalEntry{
+					Kind: "nudge", Message: msg, Next: next,
+				})
+				e.emit(runstore.Event{
+					T: "agent_nudge", ID: id, Label: label, Profile: prof.Name, Phase: phase,
+					Kind: nudge.Reason, Status: status, Msg: msg,
+				})
+			}
+		}
+		workerPrompt := prompt
+		if journalPath != "" {
+			workerPrompt = journalWorkerPrompt(prompt, journalPath)
+		}
+
 		var (
 			resultAny any
 			rawOut    string
+			nudged    bool
 			err       error
 		)
 		if schemaJSON != "" {
-			resultAny, rawOut, err = e.runWithSchema(actx, prof, prompt, schemaJSON, cwd)
+			resultAny, rawOut, nudged, err = e.runWithSchema(actx, prof, workerPrompt, schemaJSON, cwd, journalOpts)
 		} else {
 			var r harness.Result
-			r, err = harness.Run(actx, prof, prompt, cwd)
+			r, err = harness.RunWithJournal(actx, prof, workerPrompt, cwd, true, journalOpts)
 			rawOut = r.Output
 			resultAny = r.Output
+			nudged = r.Nudged
 		}
 		dur := time.Since(start)
+		if nudged && err == nil {
+			e.emit(runstore.Event{T: "log", Msg: fmt.Sprintf("%s recovered by nudging the same %s session", label, prof.Harness)})
+		}
 
 		if cleanupWT != nil {
 			if kept := cleanupWT(); kept {
 				keptDir = cwd
 				e.emit(runstore.Event{T: "log", Msg: fmt.Sprintf("%s kept worktree with changes: %s", label, cwd)})
 			}
+		}
+		if e.opts.Run != nil && journalPath != "" {
+			kind, msg := "complete", "Agent completed the task."
+			if err != nil {
+				kind, msg = "error", truncate(err.Error(), 4000)
+			}
+			_ = e.opts.Run.AppendAgentJournal(id, runstore.AgentJournalEntry{Kind: kind, Message: msg})
 		}
 
 		if e.opts.Run != nil {
@@ -459,25 +602,27 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 
 // runWithSchema wraps the prompt with JSON-output instructions, extracts and
 // validates the JSON, retrying up to 2 times with the validation error.
-func (e *engine) runWithSchema(ctx context.Context, prof profile.Profile, prompt, schemaJSON, cwd string) (any, string, error) {
+func (e *engine) runWithSchema(ctx context.Context, prof profile.Profile, prompt, schemaJSON, cwd string, journal harness.JournalOptions) (any, string, bool, error) {
 	sch, err := jsonschema.CompileString("schema.json", schemaJSON)
 	if err != nil {
-		return nil, "", fmt.Errorf("invalid schema: %w", err)
+		return nil, "", false, fmt.Errorf("invalid schema: %w", err)
 	}
-	base := prompt + "\n\n---\nOUTPUT FORMAT: Respond with ONLY a JSON value that validates against this JSON Schema — no prose, no markdown fences, no explanation:\n" + schemaJSON
+	base := prompt + "\n\n---\nOUTPUT FORMAT: Respond with ONLY a JSON value that validates against this JSON Schema. No prose, no markdown fences, no explanation:\n" + schemaJSON
 	ask := base
 	var lastErr error
 	var raw string
+	var nudged bool
 	for attempt := 0; attempt < 3; attempt++ {
-		r, err := harness.Run(ctx, prof, ask, cwd)
+		r, err := harness.RunWithJournal(ctx, prof, ask, cwd, !nudged, journal)
+		nudged = nudged || r.Nudged
 		if err != nil {
-			return nil, r.Output, err
+			return nil, r.Output, nudged, err
 		}
 		raw = r.Output
 		val, jerr := extractJSON(raw)
 		if jerr == nil {
 			if verr := sch.Validate(val); verr == nil {
-				return val, raw, nil
+				return val, raw, nudged, nil
 			} else {
 				jerr = verr
 			}
@@ -487,7 +632,32 @@ func (e *engine) runWithSchema(ctx context.Context, prof profile.Profile, prompt
 			"\nPrevious response (truncated): " + truncate(raw, 1500) +
 			"\nRespond again with ONLY the corrected JSON."
 	}
-	return nil, raw, fmt.Errorf("schema validation failed after 3 attempts: %w", lastErr)
+	return nil, raw, nudged, fmt.Errorf("schema validation failed after 3 attempts: %w", lastErr)
+}
+
+func cloneEnv(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src)+2)
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func journalWorkerPrompt(task, path string) string {
+	return fmt.Sprintf(`[DYNA WORK JOURNAL - REQUIRED]
+Keep a concise, append-only work journal while you perform this task. Its run-owned path is:
+%s
+
+After orienting, append your first entry. Add another after meaningful discoveries, decisions, verification, or blockers; before a long operation; and before finishing. Use:
+  dyna journal "what changed or what you learned" --kind update --next "next concrete step"
+If dyna is not on PATH, invoke the current binary as "$DYNA_BIN" journal ... instead.
+Kinds include update, finding, decision, verification, and blocker. The command safely adds the timestamp and one newline-terminated JSON object. Keep each entry brief: one or two sentences plus an optional next step. Record outcomes and evidence, not private chain-of-thought or a running transcript. Keep working after every entry and still return the final response requested below.
+
+This applies to read-only exploration too: the run-owned journal is the only allowed write and does not modify the target workspace. The journal side channel is separate from any final-response JSON schema.
+[/DYNA WORK JOURNAL]
+
+[ORIGINAL TASK]
+%s`, path, task)
 }
 
 // addWorktree creates a detached git worktree of repoDir at HEAD. The
@@ -508,7 +678,7 @@ func addWorktree(ctx context.Context, repoDir string) (string, func() bool, erro
 			gitRun(context.Background(), repoDir, "worktree", "remove", "--force", wt)
 			return false
 		}
-		return true // keep: worker made changes (or status failed — don't destroy work)
+		return true // keep: worker made changes (or status failed; do not destroy work)
 	}
 	return wt, cleanup, nil
 }

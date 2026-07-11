@@ -148,7 +148,7 @@ func (m profilesModel) view() string {
 	var b strings.Builder
 	b.WriteString(sTitle.Render("Worker profiles") + "\n")
 	if len(m.store.Profiles) == 0 {
-		b.WriteString(sDim.Render("\nnone yet — press ") + sHelpKey.Render("a") + sDim.Render(" to add\nor run `dyna demo`"))
+		b.WriteString(sDim.Render("\nnone yet. Press ") + sHelpKey.Render("a") + sDim.Render(" to add\nor run `dyna demo`"))
 	}
 	for i, p := range m.store.Profiles {
 		icon := sDim.Render("○")
@@ -187,7 +187,7 @@ func (m profilesModel) view() string {
 
 func (m profilesModel) viewCard(w int) string {
 	if m.sel >= len(m.store.Profiles) {
-		return sDim.Render("select a profile — these are the workers agents may orchestrate")
+		return sDim.Render("select a profile; these are the workers agents may orchestrate")
 	}
 	p := m.store.Profiles[m.sel]
 	var b strings.Builder
@@ -196,7 +196,7 @@ func (m profilesModel) viewCard(w int) string {
 		name += "  " + sBadge.Render("default")
 	}
 	if p.Disabled {
-		name += "  " + sErrS.Render("● disabled") + sDim.Render(" (stats kept — press t to enable)")
+		name += "  " + sErrS.Render("● disabled") + sDim.Render(" (stats kept; press t to enable)")
 	}
 	b.WriteString(name + "\n\n")
 	b.WriteString(sDim.Render("harness ") + p.Harness)

@@ -21,13 +21,16 @@ const (
 
 var tabNames = []string{"Workflows", "Profiles", "Guide"}
 
-type tickMsg time.Time
+type tickMsg struct {
+	generation uint64
+}
 
 type model struct {
-	tab    tab
-	width  int
-	height int
-	frame  int
+	tab            tab
+	width          int
+	height         int
+	frame          int
+	tickGeneration uint64
 
 	runs  runsModel
 	profs profilesModel
@@ -45,17 +48,21 @@ func Run(guideMD string) error {
 		profs: newProfilesModel(store),
 		guide: newGuideModel(guideMD),
 	}
-	m.runs.refresh()
+	m.runs.refreshing = true
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }
 
-func tick() tea.Cmd {
-	return tea.Tick(400*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+func tick(generation uint64) tea.Cmd {
+	return tea.Tick(400*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg{generation: generation}
+	})
 }
 
-func (m model) Init() tea.Cmd { return tick() }
+func (m model) Init() tea.Cmd {
+	return tea.Batch(tick(m.tickGeneration), m.runs.initialRefresh())
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -67,11 +74,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		m.frame++
-		if m.tab == tabRuns {
-			m.runs.refresh()
+		if m.tab != tabRuns || msg.generation != m.tickGeneration {
+			return m, nil
 		}
-		return m, tick()
+		m.frame++
+		refresh := m.runs.requestRefresh(false)
+		return m, tea.Batch(tick(m.tickGeneration), refresh)
+
+	case runsRefreshMsg:
+		cmd := m.runs.applyRefresh(msg, m.tab == tabRuns)
+		return m, cmd
 
 	case wizModelsMsg:
 		if m.profs.wiz != nil {
@@ -96,17 +108,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "1":
-			m.tab = tabRuns
-			return m, nil
+			return m.switchTab(tabRuns)
 		case "2":
-			m.tab = tabProfiles
-			return m, nil
+			return m.switchTab(tabProfiles)
 		case "3":
-			m.tab = tabGuide
-			return m, nil
+			return m.switchTab(tabGuide)
 		case "tab":
-			m.tab = (m.tab + 1) % 3
-			return m, nil
+			return m.switchTab((m.tab + 1) % 3)
 		}
 		var cmd tea.Cmd
 		switch m.tab {
@@ -123,6 +131,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.guide, cmd = m.guide.update(msg)
 		return m, cmd
+	}
+	return m, nil
+}
+
+func (m model) switchTab(next tab) (tea.Model, tea.Cmd) {
+	if next == m.tab {
+		return m, nil
+	}
+	wasRuns := m.tab == tabRuns
+	m.tab = next
+	if wasRuns || next == tabRuns {
+		m.tickGeneration++
+	}
+	if next == tabRuns {
+		return m, tea.Batch(tick(m.tickGeneration), m.runs.requestRefresh(true))
 	}
 	return m, nil
 }
@@ -145,9 +168,13 @@ func (m model) View() string {
 	case tabRuns:
 		body = m.runs.view(m.frame)
 		if m.runs.inspecting {
-			help = helpLine("↑/↓", "agent", "pgup/pgdn/space", "scroll", "g/G", "top/bottom", "esc", "back")
+			if m.runs.inspectFocus {
+				help = helpLine("j/k/↑/↓", "scroll detail", "←/→", "switch Journal/Task/Result", "f", "follow", "g/G", "top/bottom", "esc", "agents")
+			} else {
+				help = helpLine("j/k/↑/↓", "agent", "enter/→", "open detail", "esc", "back")
+			}
 		} else {
-			help = helpLine("↑/↓", "select", "enter", "inspect", "p", "pause", "x", "cancel", "d", "delete", "1-3", "view", "q", "quit")
+			help = helpLine("↑/↓", "select", "enter", "inspect agents", "pgup/pgdn", "scroll run result", "p", "pause", "x", "cancel", "d", "delete", "q", "quit")
 		}
 	case tabProfiles:
 		body = m.profs.view()

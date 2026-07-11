@@ -1,10 +1,12 @@
-# dyna — dynamic multi-agent workflows for any coding agent
+# dyna
+
+Dynamic multi-agent workflows for any coding agent.
 
 `dyna` is a standalone, harness-agnostic port of Claude Code's dynamic
-workflow system. Any coding agent — codex CLI, claude-code, opencode, pi —
-can write plain-JavaScript workflow scripts that orchestrate fleets of model
+workflow system. Any coding agent (claude-code, codex CLI, opencode, pi) can
+write plain JavaScript workflow scripts that orchestrate fleets of model
 workers deterministically, while humans configure the fleet and watch runs
-live in a beautiful TUI.
+live in a terminal dashboard.
 
 ```
 ┌─────────────┐   dyna run script.js    ┌──────────────────────────────┐
@@ -17,110 +19,126 @@ live in a beautiful TUI.
                         claude -p …      codex exec …     opencode run …
 ```
 
+![dyna TUI: a live adversarial-review run with agents fanning out](docs/img/tui-workflows.png)
+
 ## Install
 
-One-liner (once the repo is public — downloads a release binary, falls back to
-building from source, and installs agent skills into detected harnesses):
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Aria-Figueredo/dyna-agent/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/arismoko/dyna-agent/main/install.sh | bash
 ```
 
-From a checkout, `./install.sh` does the same (builds locally into
-`~/.local/bin`). Overrides: `DYNA_INSTALL_DIR`, `DYNA_REPO`, `DYNA_VERSION`,
-`DYNA_NO_SKILLS=1`.
+The installer downloads a release binary, falls back to building from source,
+and installs the agent skill into every detected harness. From a checkout,
+`./install.sh` does the same (builds locally into `~/.local/bin`). Overrides:
+`DYNA_INSTALL_DIR`, `DYNA_REPO`, `DYNA_VERSION`, `DYNA_NO_SKILLS=1`.
+
+Then:
 
 ```bash
-dyna demo                 # registers mock workers + runs a sample workflow
+dyna profiles init        # register the curated default worker fleet
+dyna demo                 # register mock workers and run a sample workflow
 dyna tui                  # open the dashboard
 ```
 
 ## Teaching your agents about dyna
 
-`dyna skill install` plants a proper agent skill (SKILL.md with
-name/description frontmatter) into every detected harness so agents know dyna
-exists and to read `dyna guide`:
+`dyna skill install` writes an agent skill (a SKILL.md with name/description
+frontmatter) into every detected harness, so agents know dyna exists and to
+read `dyna guide`:
 
-- **claude-code** → `~/.claude/skills/dyna/SKILL.md`
-- **codex** → `~/.codex/skills/dyna/SKILL.md`
-- **opencode** → `~/.config/opencode/skills/dyna/SKILL.md`
-- **pi** → `~/.pi/agent/skills/dyna/SKILL.md`
+- **claude-code**: `~/.claude/skills/dyna/SKILL.md`
+- **codex**: `~/.codex/skills/dyna/SKILL.md`
+- **opencode**: `~/.config/opencode/skills/dyna/SKILL.md`
+- **pi**: `~/.pi/agent/skills/dyna/SKILL.md`
 
 `dyna skill install <harness>` forces one, `--all` forces all,
-`dyna skill uninstall` removes cleanly, `dyna skill show` prints the content.
-(Older versions wrote managed AGENTS.md blocks; install/uninstall migrate
-those away automatically.)
+`dyna skill uninstall` removes cleanly, and `dyna skill show` prints the
+content. Older versions wrote managed AGENTS.md blocks; install and uninstall
+migrate those away automatically.
 
 ## Worker profiles
 
-You register the models agents are allowed to use, each with a description and
-three standardized stats (**1–10, higher is better** — for cost, higher means
-*cheaper*).
+You register the models agents are allowed to use, each with a description
+and three standardized stats, all 1-10 where higher is better (for cost,
+higher means cheaper):
 
-**Quick start: `dyna profiles init`** registers a curated default fleet —
-`fable` (Claude Fable 5 via claude-code: verification, judging, high-stakes
-review, frontend taste), `sol`/`sol-max` (gpt-5.6-sol via codex at high/max
-effort: hard implementation and debugging), `terra` (the balanced default
-generalist), and `luna` (cheap fast sweeps). Their descriptions were
-researched (pricing, reviewed strengths/failure modes) and refined by the
-models themselves through a dyna workflow — each description tells agents
-when to pick the worker, when to avoid it, and how it fails. Existing
-profiles are never overwritten unless you pass `--force`.
+- **taste**: code quality, judgment, design sense, review ability
+- **intelligence**: raw capability on hard, long, complex tasks
+- **cost**: cost efficiency (10 = very cheap to run, 1 = very expensive)
 
-Or build profiles interactively with the TUI's **profile wizard** (`w` on the
-Profiles tab) — six multiple-choice slides:
+**Quick start:** `dyna profiles init` registers a curated default fleet:
+`fable` (Claude Fable 5 via claude-code, for verification, judging,
+high-stakes review, and frontend work), `sol` and `sol-max` (gpt-5.6-sol via
+codex at high and max effort, for hard implementation and debugging), `terra`
+(the balanced default generalist), and `luna` (cheap, fast sweeps). Each
+description tells agents when to pick that worker, when to avoid it, and how
+it tends to fail. Existing profiles are never overwritten unless you pass
+`--force`.
 
-1. **Harness** — which CLI runs the worker
-2. **Model** — asked from the harness itself: `codex debug models` (the real
-   catalog, with descriptions), `claude --help` model aliases,
-   `opencode models`; or "type it yourself" for niche models
-3. **Reasoning effort** — the levels that model actually supports (from the
-   codex catalog per model), translated to the right flags/env on save
-4. **Stats** — taste / intelligence / cost-efficiency
-5. **Description** — the personality blurb agents read
-6. **Finish** — name (auto-suggested), limits, enabled, default, save
+Or build profiles interactively with the TUI's profile wizard (`w` on the
+Profiles tab), six multiple-choice steps:
+
+1. **Harness**: which CLI runs the worker
+2. **Model**: fetched from the harness itself (`codex debug models`,
+   `claude --help` model aliases, `opencode models`), or type it yourself
+3. **Reasoning effort**: the levels that model actually supports, translated
+   to the right flags and env vars on save
+4. **Stats**: taste, intelligence, cost efficiency
+5. **Description**: the blurb agents read when picking workers
+6. **Finish**: name (auto-suggested), limits, enabled, default, save
 
 Or register by hand:
 
 ```bash
-dyna profiles add --name gpt-5.5-xhigh --harness codex --model gpt-5.5 \
-  --extra-arg '-c' --extra-arg 'model_reasoning_effort=xhigh' \
-  --taste 4 --intelligence 10 --cost 6 --default \
-  --desc "Workhorse. Operates alone on long tasks, writes good but unpolished code. Weak frontend design taste."
+dyna profiles add --name sol --harness codex --model gpt-5.6-sol \
+  --extra-arg '-c' --extra-arg 'model_reasoning_effort=high' \
+  --taste 7 --intelligence 9 --cost 6 \
+  --desc "Workhorse for hard implementation and debugging. Works boldly; pin the scope on legacy code."
 
-dyna profiles add --name opus-4.8 --harness claude-code --model opus \
-  --taste 10 --intelligence 8 --cost 4 \
-  --desc "Excellent taste; reviews code and finds issues extremely well; excels at frontend. Not the best at long complex grinds. High cost."
+dyna profiles add --name fable --harness claude-code --model fable \
+  --taste 10 --intelligence 10 --cost 2 \
+  --desc "Premium reviewer and judge. Excellent taste; best for verification and high-stakes decisions."
 
-dyna profiles add --name glm-5.2 --harness opencode --model zai/glm-5.2 \
-  --taste 8 --intelligence 6 --cost 10 \
-  --desc "Low cost, fast, great taste; intelligence a notch below opus/gpt. Ideal for wide fan-outs and first-pass triage."
+dyna profiles add --name luna --harness codex --model gpt-5.6-luna \
+  --taste 5 --intelligence 7 --cost 10 \
+  --desc "Cheap and fast. Ideal for wide fan-outs, sweeps, and first-pass triage."
 ```
 
-Profiles can be **toggled on/off** without losing anything: `dyna profiles
-disable <name>` / `enable <name>` (TUI: `t`). A disabled profile keeps its
-stats and description and stays editable, but disappears from the agents'
-view and any `agent()` call to it fails.
+Profiles can be toggled on and off without losing anything:
+`dyna profiles disable <name>` / `enable <name>` (TUI: `t`). A disabled
+profile keeps its stats and description and stays editable, but disappears
+from the agents' view, and any `agent()` call to it fails.
 
-Harnesses: `claude-code`, `codex`, `opencode`, `pi`, `custom` (any argv with
-`{{prompt}}`/`{{model}}` placeholders, prompt on stdin if no placeholder), and
-`mock` for demos/tests. Workers run headless (`claude -p`, `codex exec`,
-`opencode run`) in the workflow's working directory, so they can read and
-edit files. **Permissions are bypassed by default** — claude-code workers get
-`--dangerously-skip-permissions`, codex workers get
-`--dangerously-bypass-approvals-and-sandbox` (no sandbox) — because headless
-workers that stop to ask for permission hang forever. Register a profile with
-`--safe-mode` to keep the harness's own guardrails. Add other
+Supported harnesses: `claude-code`, `codex`, `opencode`, `pi`, `custom` (any
+argv with `{{prompt}}`/`{{model}}` placeholders; the prompt goes to stdin if
+no placeholder is given), and `mock` for demos and tests. Workers run
+headless (`claude -p`, `codex exec`, `opencode run`) in the workflow's
+working directory, so they can read and edit files.
+
+**Permissions are bypassed by default** unless a profile supplies an explicit
+permission or sandbox mode: claude-code workers get
+`--dangerously-skip-permissions` and codex workers get
+`--dangerously-bypass-approvals-and-sandbox`, because a headless worker that
+stops to ask for permission hangs forever. Register a profile with
+`--safe-mode` to keep the harness's own guardrails, and add other
 harness-specific flags with `--extra-arg`.
 
-Agents discover the fleet with `dyna profiles list --json` and pick workers by
-description and stats — or dynamically inside scripts via the `profiles`
+If a built-in harness exits unsuccessfully or loses its final output after
+establishing a session, dyna waits briefly and nudges that exact session once
+to finish the original task. The retry stays inside the original timeout and
+logical `agent()` call. Cancellation is never retried, and profiles with
+explicit persistence, session, budget, or resume-incompatible flags (and
+custom harnesses) stay single-shot so recovery cannot silently change those
+controls.
+
+Agents discover the fleet with `dyna profiles list --json` and pick workers
+by description and stats, or dynamically inside scripts via the `profiles`
 global.
 
-Profiles can also be **limited** so agents can't lean on an expensive model
-too hard: `--limit-concurrent N` caps simultaneous workers of that profile
-(excess calls queue), and `--limit-calls N` hard-caps total calls per run —
-the first call past the cap **aborts the whole workflow** with a clear error,
+Profiles can also be limited so agents can't lean on an expensive model too
+hard: `--limit-concurrent N` caps simultaneous workers of that profile
+(excess calls queue), and `--limit-calls N` hard-caps total calls per run.
+The first call past a call cap aborts the whole workflow with a clear error
 rather than continuing toward a silently degraded (but still billed) result.
 Limits show up in `profiles list` and in the scripts' `profiles` global, so
 agents can size fan-outs around them up front.
@@ -138,37 +156,120 @@ dyna guide --plain
 Then:
 
 ```bash
-dyna run review.js --args '{"target":"src/"}'   # progress → stderr, result JSON → stdout
-dyna run audit.js --detach                       # background; prints run id
-dyna runs wait <id>                              # block until done, print result
-dyna run review.js --resume <id>                 # replay unchanged agent calls from a prior run
-dyna runs list                                   # inspect history
-dyna runs cancel <id>                            # stop a running workflow
-dyna runs pause <id> / unpause <id>              # hold new worker launches / resume
-dyna runs remove <id>... / clear                 # delete finished runs
+dyna run review.js --args '{"target":"src/"}'   # progress on stderr, result JSON on stdout
+dyna run audit.js --detach                      # background; prints the run id
+dyna journal "mapped the parser boundary" --kind finding --next "check callers"
+dyna runs wait <id>                             # block until done, print the result
+dyna run review.js --resume <id>                # replay unchanged agent calls from a prior run
+dyna runs list                                  # inspect history
+dyna runs cancel <id>                           # stop a running workflow
+dyna runs pause <id> / unpause <id>             # hold new worker launches / resume
+dyna runs remove <id>... / clear                # delete finished runs
 ```
 
 Cancel, pause, and delete are also available in the TUI (`x`, `p`, `d` on the
 Workflows tab).
 
-Per-agent `isolation: 'worktree'` runs a worker in a detached git worktree —
-removed automatically if untouched, kept (and its path logged) if the worker
-changed files.
+Per-agent `isolation: 'worktree'` runs a worker in a detached git worktree,
+removed automatically if untouched and kept (with its path logged) if the
+worker changed files.
 
-Every run persists under `~/.local/share/dyna/runs/<id>/`: the script,
-`events.jsonl` (live-tailed by the TUI), `journal.jsonl` (full per-agent
-prompts and results), and `result.json`.
+Every run persists under `~/.local/share/dyna/runs/<run-id>/`:
+
+```text
+script.js                        # captured workflow
+meta.json                        # run status and timestamps
+events.jsonl                     # live run/agent event stream
+journal.jsonl                    # completed-call/resume ledger
+agents/<agent-id>/journal.jsonl  # that worker's live progress journal
+result.json                      # final workflow value
+```
+
+The root `journal.jsonl` holds the completed-call records (including prompts
+and results) used by workflow resume; it is not the live progress journal.
+Every live worker, including a read-only explorer, gets its own run-owned
+`agents/<agent-id>/journal.jsonl`.
+
+## Agent journals
+
+Dyna prepends journal instructions to every worker prompt. During a run the
+worker records concise progress notes with:
+
+```bash
+dyna journal "confirmed the decoder rejects truncated input" \
+  --kind verification --next "report the evidence"
+```
+
+`--kind` is one of `update`, `finding`, `decision`, `verification`, or
+`blocker`; `--next` is optional. Dyna supplies the timestamp and agent
+identity and serializes appends so concurrent writes cannot corrupt a line.
+An agent-authored line is a complete JSON object followed by a newline:
+
+```json
+{"ts":1783706645123,"kind":"finding","message":"Located the retry boundary.","next":"Inspect cancellation behavior.","source":"agent"}
+```
+
+`ts` is Unix time in milliseconds. `message` is a non-empty progress note and
+`next` is optional. Dyna may also append system start, nudge, and completion
+records with extra metadata. Each physical line is independently valid JSON;
+the file is JSONL, not a single JSON array.
+
+Orchestrators should reinforce the cadence in worker prompts: write once
+after orientation, at meaningful discoveries, decisions, verifications, and
+blockers, before a long operation, and before finishing. Entries should say
+what changed and what comes next, in one or two sentences plus an optional
+next step. They are not chain-of-thought, scratchpads, command transcripts,
+or a substitute for the final answer.
+
+This applies to read-only exploration too: the worker treats its run-owned
+journal as its only allowed write. When a codex profile explicitly selects a
+read-only sandbox or a built-in read-only permission profile, dyna preserves
+that boundary and layers a narrow permission profile that makes only the
+agent's journal directory writable. It does not turn the target workspace
+writable or silently disable the read-only sandbox. Other provider-managed or
+custom read-only modes are never auto-bypassed; if they cannot expose a
+narrow journal exception, dyna records the missing entry instead of widening
+access.
+
+After five minutes without a valid agent-authored entry, dyna marks the
+worker quiet. For resumable built-in harnesses it gracefully interrupts,
+allows the CLI to flush its session, and continues the exact same session
+with a reminder to write now and keep working; it never launches a fresh
+worker. Explicitly non-resumable sessions and custom harnesses can be shown
+as quiet, but cannot be safely live-resumed.
+
+A resumable worker that finishes quickly without writing anything gets one
+bounded, immediate reminder in that same session to add a brief entry; its
+already-successful task result stays authoritative. If a custom or explicitly
+non-resumable worker finishes without an entry, dyna records that the
+reminder was unavailable rather than risking a duplicate fresh invocation.
+
+The journal is a progress side channel. A final response still has to satisfy
+the `schema` passed to `agent()` (when present); journal JSONL never counts
+as or replaces that result.
 
 ## The TUI
 
-`dyna tui` — three views, switch with `tab` or `1`/`2`/`3`:
+`dyna tui` has three views; switch with `tab` or `1`/`2`/`3`:
 
-- **Workflows** — every run with a live progress tree: phases, per-agent
-  spinner/status, durations, result previews, the `log()` narration, and the
-  final result. Updates in real time while runs execute in other terminals.
-- **Profiles** — the fleet at a glance: description plus taste/intelligence/
-  cost-efficiency stat bars. `a` add, `e` edit, `d` delete, `s` set default.
-- **Guide** — the scripting guide, rendered.
+- **Workflows**: every run, with active agents visible. Inspect a run for a
+  journal-first live timeline and per-agent **Journal**, **Task**, and
+  **Result** modes. Agent rows show lifecycle status, journal-entry count,
+  relative freshness, and whether a quiet-worker nudge was sent. Press
+  `enter` or `right` to focus, `left`/`right` to change mode, `j`/`k` or
+  arrows to scroll, `g`/`G` for top/bottom, `f` to follow new entries, and
+  `esc` to return to the agent list. The selected run's events, completion
+  ledger, and selected agent journal are tailed independently about every
+  400 ms, so entries appear while the worker is still running, not only when
+  it finishes.
+
+  ![Run inspector: per-agent journal timeline while workers run](docs/img/tui-journal.png)
+- **Profiles**: the fleet at a glance, with descriptions and
+  taste/intelligence/cost stat bars. `a` add, `e` edit, `d` delete, `s` set
+  default, `t` toggle enabled, `w` wizard.
+
+  ![Profiles tab: the worker fleet with stats and descriptions](docs/img/tui-profiles.png)
+- **Guide**: the scripting guide, rendered.
 
 ## Script example
 
@@ -177,28 +278,35 @@ export const meta = { name: 'fix-and-check', phases: [{title:'Fix'},{title:'Chec
 
 phase('Fix')
 const fix = await agent(`Fix the failing test in ${args.pkg}. Edit files as needed.`,
-  { profile: 'gpt-5.5-xhigh', label: 'fix' })
+  { profile: 'sol', label: 'fix' })
 
 phase('Check')
 const verdict = await agent(
   `Review the working-tree diff. Was the fix correct and minimal? ${fix}`,
-  { profile: 'opus-4.8', label: 'review', schema: { type:'object', required:['ok'],
+  { profile: 'fable', label: 'review', schema: { type:'object', required:['ok'],
     properties: { ok: {type:'boolean'}, notes: {type:'string'} } } })
 
 return { verdict }
 ```
 
-See `examples/` for adversarial review and judge-panel workflows, and
+See `examples/` for adversarial-review and judge-panel workflows, and
 `dyna guide` for the full API.
 
 ## Layout
 
-- `main.go` — CLI (cobra): `profiles`, `run`, `runs`, `guide`, `tui`, `demo`
-- `internal/engine` — embedded JS runtime (goja + event loop), concurrency
-  semaphore, JSON-schema-validated structured output with auto-retry
-- `internal/harness` — adapters that turn one `agent()` call into one
-  headless CLI invocation
-- `internal/profile` — profile registry (`~/.config/dyna/profiles.json`)
-- `internal/runstore` — run persistence and event journal
-- `internal/tui` — Bubble Tea dashboard
-- `guide/GUIDE.md` — the agent-facing scripting guide (embedded)
+- `main.go`: CLI (cobra): `profiles`, `run`, `runs`, `journal`, `guide`,
+  `tui`, `demo`, `skill`
+- `internal/engine`: embedded JS runtime (goja plus an event loop),
+  concurrency semaphore, JSON-schema-validated structured output with
+  auto-retry
+- `internal/harness`: headless CLI adapters with bounded, exact-session
+  recovery for transient harness failures
+- `internal/profile`: profile registry (`~/.config/dyna/profiles.json`)
+- `internal/runstore`: run persistence, event stream, completed-call ledger,
+  and per-agent journals
+- `internal/tui`: Bubble Tea dashboard
+- `guide/GUIDE.md`: the agent-facing scripting guide (embedded in the binary)
+
+## License
+
+MIT

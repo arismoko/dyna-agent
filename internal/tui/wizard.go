@@ -71,7 +71,7 @@ type wizModel struct {
 func newWizard() *wizModel {
 	w := &wizModel{stats: [3]int{5, 5, 5}, enabled: true}
 	w.customInput = wizInput("model id, e.g. zai/glm-5.2", 300)
-	w.desc = wizInput("personality, strengths, weaknesses — agents read this to pick workers", 500)
+	w.desc = wizInput("personality, strengths, weaknesses; agents read this to pick workers", 500)
 	w.name = wizInput("unique name", 80)
 	w.limConc = wizInput("0 = unlimited", 6)
 	w.limCalls = wizInput("0 = unlimited", 6)
@@ -381,7 +381,7 @@ func (w *wizModel) view(width, height int) string {
 			dots += sDim.Render("○") + " "
 		}
 	}
-	b.WriteString(sTitle.Render("Profile wizard") + sDim.Render(fmt.Sprintf(" · step %d/%d — ", int(w.step)+1, wizSteps)) + sPhase.Render(wizTitles[w.step]) + "\n")
+	b.WriteString(sTitle.Render("Profile wizard") + sDim.Render(fmt.Sprintf(" · step %d/%d: ", int(w.step)+1, wizSteps)) + sPhase.Render(wizTitles[w.step]) + "\n")
 	b.WriteString(dots + "\n\n")
 
 	choice := func(i, sel int, label, detail string) {
@@ -443,7 +443,7 @@ func (w *wizModel) view(width, height int) string {
 		}
 
 	case stepStats:
-		b.WriteString("Rate this worker (1–10, higher is better; ←/→ or 1-9/0):\n\n")
+		b.WriteString("Rate this worker (1-10, higher is better; ←/→ or 1-9/0):\n\n")
 		labels := []string{"taste", "intelligence", "cost-eff."}
 		notes := []string{"quality · design · review judgment", "hard, long, complex tasks", "higher = cheaper to run"}
 		cs := []lipgloss.AdaptiveColor{cTaste, cIntel, cCost}
@@ -458,7 +458,7 @@ func (w *wizModel) view(width, height int) string {
 		}
 
 	case stepDesc:
-		b.WriteString("Describe this worker — agents read this to decide when to use it:\n\n  " + w.desc.View() + "\n")
+		b.WriteString("Describe this worker; agents read this to decide when to use it:\n\n  " + w.desc.View() + "\n")
 
 	case stepFinal:
 		b.WriteString("Last details:\n\n")

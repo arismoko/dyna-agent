@@ -41,6 +41,21 @@ var (
 	sHelp    = lipgloss.NewStyle().Foreground(cDim)
 	sHelpKey = lipgloss.NewStyle().Foreground(cAccent2)
 	sProfTag = lipgloss.NewStyle().Foreground(cAccent2)
+
+	// Journal inspector: compact mode tabs and live-state badges stay legible
+	// on both light and dark terminals without overwhelming the entry text.
+	sInspectTab       = lipgloss.NewStyle().Foreground(cDim).Padding(0, 1)
+	sInspectTabActive = lipgloss.NewStyle().Bold(true).
+				Foreground(lipgloss.Color("#FFFFFF")).Background(cAccentBg).Padding(0, 1)
+	sJournalKind = lipgloss.NewStyle().Bold(true).Foreground(cAccent2)
+	sNext        = lipgloss.NewStyle().Bold(true).Foreground(cTaste)
+	sFollow      = lipgloss.NewStyle().Bold(true).Foreground(cOK)
+	sUnseen      = lipgloss.NewStyle().Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).Background(cWarn).Padding(0, 1)
+	sNudge = lipgloss.NewStyle().Bold(true).
+		Foreground(lipgloss.Color("#FFFFFF")).Background(cTaste).Padding(0, 1)
+	sNudgeUnavailable = lipgloss.NewStyle().Bold(true).
+				Foreground(lipgloss.Color("#FFFFFF")).Background(cErr).Padding(0, 1)
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}

@@ -3,12 +3,14 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"dyna-agent/internal/runstore"
 )
@@ -17,94 +19,431 @@ type runsModel struct {
 	width, height int
 	runs          []runstore.Meta
 	sel           int
-	events        []runstore.Event
 	result        string
 	vp            viewport.Model
 	follow        bool // stick to bottom while running
+	paused        map[string]bool
+	catalogLoaded bool
+
+	// The event files are append-only. Keep byte offsets and a derived view
+	// model so a poll only decodes newly appended records instead of replaying
+	// the run's entire history.
+	loadedID       string
+	eventOffset    int64
+	eventsComplete bool
+	resultLoaded   bool
+	metaFinal      bool // terminal status observed in meta.json, after result write
+	phases         []*phaseState
+	phaseByName    map[string]*phaseState
+	agents         map[int]*agentState
+	logs           []string
+	omittedLogs    int
 
 	// Inspector: drill into one run's agents to read full prompts/responses.
-	inspecting bool
-	journal    []runstore.JournalEntry
-	agentSel   int
-	ivp        viewport.Model
+	inspecting       bool
+	journal          []runstore.JournalEntry // final completion ledger
+	journalOffset    int64
+	journalComplete  bool
+	completionByID   map[int]*runstore.JournalEntry
+	completionOrder  []int
+	agentOrder       []*agentState // lifecycle agent_start order
+	legacyAgentOrder []*agentState // completion-only records for old runs
+	agentSel         int
+	inspectFocus     bool
+	inspectMode      inspectMode
+	ivp              viewport.Model
 
-	confirm   string // pending confirmation: "delete" | "cancel"
+	// Only the selected agent's work journal is tailed. Aggregate progress for
+	// every other agent arrives through events.jsonl, avoiding journal fanout.
+	agentJournal         []runstore.AgentJournalEntry
+	agentJournalOffset   int64
+	agentJournalComplete bool
+	agentJournalMissing  bool
+	agentJournalLoaded   bool
+	journalFollow        bool
+	journalUnseen        int
+	inspectOffsets       [inspectModeCount]int
+
+	// Polling happens in tea.Cmd so disk I/O never blocks keyboard handling.
+	// generation rejects a response after selection or mode has changed.
+	generation      uint64
+	refreshing      bool
+	refreshQueued   bool
+	forceList       bool
+	pollsUntilList  int
+	pauseGeneration uint64
+
+	confirm   string // pending confirmation: "delete" | "cancel" | "pause"
+	confirmID string
 	statusMsg string
 }
 
 func newRunsModel() runsModel {
-	return runsModel{vp: viewport.New(0, 0), ivp: viewport.New(0, 0), follow: true}
+	return runsModel{
+		vp:             viewport.New(0, 0),
+		ivp:            viewport.New(0, 0),
+		follow:         true,
+		paused:         make(map[string]bool),
+		phaseByName:    make(map[string]*phaseState),
+		agents:         make(map[int]*agentState),
+		completionByID: make(map[int]*runstore.JournalEntry),
+		journalFollow:  true,
+	}
 }
 
 func (m *runsModel) setSize(w, h int) {
+	widthChanged := w != m.width
+	detailY, inspectY := m.vp.YOffset, m.ivp.YOffset
+	detailAtTop, inspectAtTop := m.vp.AtTop(), m.ivp.AtTop()
+	detailAtBottom, inspectAtBottom := m.vp.AtBottom(), m.ivp.AtBottom()
 	m.width, m.height = w, h
 	m.vp.Width = m.detailWidth() - 4
-	m.vp.Height = h - 2
+	m.vp.Height = max(1, h-6) // two header lines + gap + pane border
 	m.ivp.Width = m.detailWidth() - 4
-	m.ivp.Height = h - 2
+	m.ivp.Height = max(1, h-6) // identity + Journal/Task/Result mode bar
 	if m.inspecting {
-		m.loadInspect(false)
+		if widthChanged {
+			m.loadInspect(false)
+		}
+		if m.inspectMode == inspectJournal && m.journalFollow {
+			m.ivp.GotoBottom()
+			m.journalUnseen = 0
+		} else if inspectAtTop {
+			m.ivp.GotoTop()
+		} else if inspectAtBottom {
+			m.ivp.GotoBottom()
+		} else {
+			m.ivp.SetYOffset(inspectY)
+		}
+	} else if widthChanged {
+		m.rebuildDetail(false)
+	}
+	if !m.inspecting {
+		if m.follow && m.selectedStatus() == "running" {
+			m.vp.GotoBottom()
+		} else if detailAtTop {
+			m.vp.GotoTop()
+		} else if detailAtBottom {
+			m.vp.GotoBottom()
+		} else {
+			m.vp.SetYOffset(detailY)
+		}
 	}
 }
 
 func (m *runsModel) listWidth() int   { return clamp(m.width/3, 30, 48) }
 func (m *runsModel) detailWidth() int { return m.width - m.listWidth() - 6 }
 
-func (m *runsModel) refresh() {
-	runs, err := runstore.List()
-	if err != nil {
-		return
-	}
-	m.runs = runs
-	if m.sel >= len(m.runs) {
-		m.sel = clamp(len(m.runs)-1, 0, 1<<30)
-	}
-	m.loadSelected()
-	if m.inspecting && m.sel < len(m.runs) && m.runs[m.sel].Status == "running" {
-		m.reloadJournal()
-	}
+const runListPolls = 4 // selected data: 400ms; full run catalog: about 2s
+
+type runsRefreshRequest struct {
+	generation         uint64
+	runID              string
+	eventOffset        int64
+	journalOffset      int64
+	agentID            int
+	agentJournalOffset int64
+	readEvents         bool
+	readJournal        bool
+	readAgentJournal   bool
+	readResult         bool
+	includeList        bool
+	pauseGeneration    uint64
 }
 
-func (m *runsModel) reloadJournal() {
-	if m.sel < 0 || m.sel >= len(m.runs) {
-		return
-	}
-	m.journal, _ = runstore.ReadJournal(m.runs[m.sel].ID)
-	if m.agentSel >= len(m.journal) {
-		m.agentSel = clamp(len(m.journal)-1, 0, 1<<30)
-	}
-	m.loadInspect(false)
+type runsRefreshMsg struct {
+	generation          uint64
+	runID               string
+	runs                []runstore.Meta
+	listLoaded          bool
+	paused              map[string]bool
+	events              []runstore.Event
+	eventNext           int64
+	eventRead           bool
+	eventReset          bool
+	journal             []runstore.JournalEntry
+	journalNext         int64
+	journalRead         bool
+	journalReset        bool
+	agentID             int
+	agentJournal        []runstore.AgentJournalEntry
+	agentJournalNext    int64
+	agentJournalRead    bool
+	agentJournalReset   bool
+	agentJournalMissing bool
+	result              string
+	resultFound         bool
+	resultRead          bool
+	pauseGeneration     uint64
 }
 
-// loadInspect renders the selected agent's full prompt + response into the
-// inspector viewport. resetScroll jumps back to the top (agent switched).
-func (m *runsModel) loadInspect(resetScroll bool) {
-	w := m.detailWidth() - 4
-	if m.agentSel < 0 || m.agentSel >= len(m.journal) {
-		m.ivp.SetContent(sDim.Render("no agent calls recorded yet"))
-		return
+func (m runsModel) initialRefresh() tea.Cmd {
+	req := runsRefreshRequest{
+		generation:      m.generation,
+		includeList:     true,
+		pauseGeneration: m.pauseGeneration,
 	}
-	e := m.journal[m.agentSel]
-	var b strings.Builder
-	title := sTitle.Render(e.Label) + "  " + sProfTag.Render("["+e.Profile+"]")
-	if e.Cached {
-		title += sWarnS.Render("  ⚡cached")
+	return func() tea.Msg { return readRunsRefresh(req) }
+}
+
+func (m *runsModel) requestRefresh(forceList bool) tea.Cmd {
+	if m.refreshing {
+		m.refreshQueued = true
+		m.forceList = m.forceList || forceList
+		return nil
 	}
-	b.WriteString(title + "\n\n")
-	if e.Error != "" {
-		b.WriteString(sErrS.Render("Error") + "\n" + wrap(e.Error, w) + "\n\n")
+
+	includeList := forceList || m.pollsUntilList <= 0
+	if includeList {
+		m.pollsUntilList = runListPolls
+	} else {
+		m.pollsUntilList--
 	}
-	if e.Dir != "" {
-		b.WriteString(sWarnS.Render("kept worktree: "+e.Dir) + "\n\n")
+	req := runsRefreshRequest{
+		generation:         m.generation,
+		runID:              m.selectedID(),
+		eventOffset:        m.eventOffset,
+		journalOffset:      m.journalOffset,
+		agentID:            m.selectedAgentID(),
+		agentJournalOffset: m.agentJournalOffset,
+		includeList:        includeList,
+		pauseGeneration:    m.pauseGeneration,
 	}
-	b.WriteString(sPhase.Render("▮ Prompt") + "\n")
-	b.WriteString(wrap(e.Prompt, w) + "\n\n")
-	b.WriteString(sPhase.Render("▮ Response") + "\n")
-	b.WriteString(wrap(formatResult(e.Result), w) + "\n")
-	m.ivp.SetContent(b.String())
-	if resetScroll {
-		m.ivp.GotoTop()
+	if req.runID != "" {
+		req.readEvents = !m.eventsComplete
+		req.readResult = m.selectedStatus() != "running" && !m.resultLoaded
+		if m.inspecting {
+			req.readJournal = !m.journalComplete
+			req.readAgentJournal = req.agentID != 0 && !m.agentJournalComplete
+		}
 	}
+	if !req.includeList && !req.readEvents && !req.readJournal && !req.readAgentJournal && !req.readResult {
+		return nil
+	}
+	m.refreshing = true
+	return func() tea.Msg { return readRunsRefresh(req) }
+}
+
+func readRunsRefresh(req runsRefreshRequest) runsRefreshMsg {
+	msg := runsRefreshMsg{generation: req.generation, runID: req.runID, pauseGeneration: req.pauseGeneration}
+	if req.includeList {
+		if runs, err := runstore.List(); err == nil {
+			msg.runs = runs
+			msg.listLoaded = true
+			msg.paused = pausedRuns(runs)
+		}
+	}
+	if req.runID == "" {
+		return msg
+	}
+	if req.readEvents {
+		if events, next, err := runstore.ReadEventsFrom(req.runID, req.eventOffset); err == nil {
+			msg.events = events
+			msg.eventNext = next
+			msg.eventRead = true
+			msg.eventReset = next < req.eventOffset
+		}
+	}
+	if req.readJournal {
+		if entries, next, err := runstore.ReadJournalFrom(req.runID, req.journalOffset); err == nil {
+			msg.journal = entries
+			msg.journalNext = next
+			msg.journalRead = true
+			msg.journalReset = next < req.journalOffset
+		}
+	}
+	if req.readAgentJournal {
+		msg.agentID = req.agentID
+		entries, next, err := runstore.ReadAgentJournalFrom(req.runID, req.agentID, req.agentJournalOffset)
+		switch {
+		case err == nil:
+			msg.agentJournal = entries
+			msg.agentJournalNext = next
+			msg.agentJournalRead = true
+			msg.agentJournalReset = next < req.agentJournalOffset
+		case os.IsNotExist(err):
+			// A queued/running agent may not have written its first record yet.
+			// Treat absence as an empty read so terminal/cached agents can stop
+			// polling while active agents continue to be watched.
+			msg.agentJournalNext = req.agentJournalOffset
+			msg.agentJournalRead = true
+			msg.agentJournalMissing = true
+		}
+	}
+	if req.readResult {
+		msg.result, msg.resultFound = runstore.ReadResult(req.runID)
+		msg.resultRead = true
+	}
+	return msg
+}
+
+func pausedRuns(runs []runstore.Meta) map[string]bool {
+	paused := make(map[string]bool)
+	for _, r := range runs {
+		if r.Status == "running" && runstore.IsPaused(r.ID) {
+			paused[r.ID] = true
+		}
+	}
+	return paused
+}
+
+func (m *runsModel) refreshPaused(runs []runstore.Meta) {
+	m.paused = pausedRuns(runs)
+}
+
+// applyRefresh applies only data for the selection/mode generation that made
+// the request. It returns a coalesced follow-up command when input requested a
+// refresh while this one was still in flight.
+func (m *runsModel) applyRefresh(msg runsRefreshMsg, active bool) tea.Cmd {
+	m.refreshing = false
+	detailDirty := false
+	stickBottom := false
+
+	if msg.listLoaded {
+		m.catalogLoaded = true
+		m.pollsUntilList = runListPolls
+		oldID := m.selectedID()
+		oldMeta, hadOld := m.selectedMeta()
+		oldIndex := m.sel
+		m.runs = msg.runs
+		if msg.pauseGeneration == m.pauseGeneration {
+			m.paused = msg.paused
+		}
+		m.sel = indexRun(m.runs, oldID)
+		if m.sel < 0 {
+			m.sel = clamp(oldIndex, 0, max(0, len(m.runs)-1))
+		}
+		newID := m.selectedID()
+		metaFinal := newID != "" && m.selectedStatus() != "running"
+		// A catalog snapshot can race the final run_end append. Terminal state
+		// is monotonic, so never replace the event-derived status with an older
+		// "running" meta snapshot.
+		if newID == oldID && hadOld && oldMeta.Status != "running" && m.selectedStatus() == "running" {
+			m.runs[m.sel].Status = oldMeta.Status
+			m.runs[m.sel].EndedAt = oldMeta.EndedAt
+			m.runs[m.sel].Error = oldMeta.Error
+		}
+		if newID != oldID {
+			m.resetLoaded(newID)
+			if active && newID != "" {
+				m.refreshQueued = true
+			}
+		} else if newMeta, ok := m.selectedMeta(); ok && (!hadOld || !sameViewMeta(oldMeta, newMeta)) {
+			detailDirty = true
+		}
+		if m.confirm != "" && m.confirmID != newID {
+			m.confirm = ""
+			m.confirmID = ""
+			m.statusMsg = "confirmation canceled: selection changed"
+		}
+		m.metaFinal = metaFinal
+	}
+
+	current := msg.generation == m.generation && msg.runID != "" && msg.runID == m.selectedID()
+	selectedAgentID := m.selectedAgentID()
+	rosterDirty := false
+	inspectDirty := false
+	if current && msg.eventRead {
+		if msg.eventReset {
+			m.clearEvents()
+			m.result, m.resultLoaded = "", false
+			detailDirty = true
+			rosterDirty = m.inspecting
+		}
+		m.eventOffset = msg.eventNext
+		if len(msg.events) > 0 {
+			m.applyEvents(msg.events)
+			detailDirty = true
+			stickBottom = true
+			rosterDirty = m.inspecting
+		}
+		if m.selectedStatus() != "running" {
+			m.eventsComplete = true
+		}
+	}
+	if current && msg.resultRead {
+		m.result = msg.result
+		m.resultLoaded = msg.resultFound || m.metaFinal
+		if msg.resultFound {
+			detailDirty = true
+			stickBottom = true
+		}
+	}
+	if current && msg.journalRead && m.inspecting {
+		if msg.journalReset {
+			m.resetCompletions()
+			rosterDirty = true
+		}
+		m.journalOffset = msg.journalNext
+		m.journal = append(m.journal, msg.journal...)
+		if len(msg.journal) > 0 {
+			m.applyCompletions(msg.journal)
+			rosterDirty = true
+			inspectDirty = true
+		}
+		if m.selectedStatus() != "running" {
+			m.journalComplete = true
+		}
+	}
+
+	selectionChanged := false
+	if current && m.inspecting && rosterDirty {
+		selectionChanged = m.reconcileAgentSelection(selectedAgentID)
+		if selectionChanged {
+			m.resetAgentJournal()
+			m.generation++
+			m.refreshQueued = true
+		}
+		inspectDirty = true
+	}
+
+	agentCurrent := current && !selectionChanged && m.inspecting && msg.agentJournalRead &&
+		msg.agentID != 0 && msg.agentID == m.selectedAgentID()
+	if agentCurrent {
+		if msg.agentJournalReset {
+			m.resetAgentJournal()
+			m.agentJournalOffset = msg.agentJournalNext
+		}
+		m.agentJournalMissing = msg.agentJournalMissing
+		m.agentJournalLoaded = true
+		m.agentJournalOffset = msg.agentJournalNext
+		if len(msg.agentJournal) > 0 {
+			m.agentJournal = append(m.agentJournal, msg.agentJournal...)
+			m.agentJournalMissing = false
+			if m.inspectMode == inspectJournal && m.journalFollow {
+				m.journalUnseen = 0
+			} else {
+				m.journalUnseen += len(msg.agentJournal)
+			}
+			if a := m.selectedAgent(); a != nil {
+				applyAgentJournalSummary(a, m.agentJournal)
+			}
+		}
+		if a := m.selectedAgent(); a != nil && agentDone(a.status) {
+			m.agentJournalComplete = true
+		}
+		inspectDirty = true
+	}
+	if current && m.inspecting && inspectDirty {
+		m.loadInspect(false)
+	}
+
+	if detailDirty && !m.inspecting {
+		m.rebuildDetail(stickBottom)
+	}
+
+	if !active {
+		m.refreshQueued = false
+		m.forceList = false
+		return nil
+	}
+	if m.refreshQueued {
+		force := m.forceList
+		m.refreshQueued = false
+		m.forceList = false
+		return m.requestRefresh(force)
+	}
+	return nil
 }
 
 func formatResult(v any) string {
@@ -122,19 +461,201 @@ func formatResult(v any) string {
 	}
 }
 
-func (m *runsModel) loadSelected() {
+func (m *runsModel) selectedMeta() (runstore.Meta, bool) {
 	if m.sel < 0 || m.sel >= len(m.runs) {
-		m.events, m.result = nil, ""
-		return
+		return runstore.Meta{}, false
 	}
-	id := m.runs[m.sel].ID
-	m.events, _ = runstore.ReadEvents(id)
-	m.result, _ = runstore.ReadResult(id)
-	m.vp.SetContent(m.renderDetail())
-	if m.follow && m.runs[m.sel].Status == "running" {
-		m.vp.GotoBottom()
+	return m.runs[m.sel], true
+}
+
+func (m *runsModel) selectedID() string {
+	r, ok := m.selectedMeta()
+	if !ok {
+		return ""
+	}
+	return r.ID
+}
+
+func (m *runsModel) selectedStatus() string {
+	r, ok := m.selectedMeta()
+	if !ok {
+		return ""
+	}
+	return r.Status
+}
+
+func indexRun(runs []runstore.Meta, id string) int {
+	if id == "" {
+		return -1
+	}
+	for i := range runs {
+		if runs[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func sameViewMeta(a, b runstore.Meta) bool {
+	return a.ID == b.ID && a.Name == b.Name && a.Status == b.Status &&
+		a.StartedAt.Equal(b.StartedAt) && a.EndedAt.Equal(b.EndedAt) && a.Error == b.Error
+}
+
+func (m *runsModel) resetLoaded(id string) {
+	m.generation++
+	m.loadedID = id
+	m.eventOffset = 0
+	m.eventsComplete = false
+	m.result, m.resultLoaded = "", false
+	m.metaFinal = id != "" && m.selectedStatus() != "running"
+	m.journal = nil
+	m.journalOffset = 0
+	m.journalComplete = false
+	m.completionByID = make(map[int]*runstore.JournalEntry)
+	m.completionOrder = nil
+	m.agentSel = 0
+	m.inspectFocus = false
+	m.inspectMode = inspectJournal
+	m.resetAgentJournal()
+	m.clearEvents()
+	if id == "" {
+		m.vp.SetContent(sDim.Render("select a run"))
+	} else {
+		m.vp.SetContent(sDim.Render("loading run…"))
+	}
+	m.vp.GotoTop()
+	m.ivp.SetContent(sDim.Render("loading agent journal…"))
+	m.ivp.GotoTop()
+}
+
+func (m *runsModel) clearEvents() {
+	m.phases = nil
+	m.phaseByName = make(map[string]*phaseState)
+	m.agents = make(map[int]*agentState)
+	m.agentOrder = nil
+	m.legacyAgentOrder = nil
+	m.logs = nil
+	m.omittedLogs = 0
+	// A legacy run may have a completion ledger but no lifecycle events. Keep
+	// those records inspectable after an events-file reset.
+	for _, id := range m.completionOrder {
+		if completion := m.completionByID[id]; completion != nil {
+			m.addLegacyAgent(completion)
+		}
 	}
 }
+
+func (m *runsModel) ensurePhase(name string) *phaseState {
+	if ph := m.phaseByName[name]; ph != nil {
+		return ph
+	}
+	ph := &phaseState{name: name}
+	m.phaseByName[name] = ph
+	m.phases = append(m.phases, ph)
+	return ph
+}
+
+const maxVisibleLogs = 500
+
+func (m *runsModel) applyEvents(events []runstore.Event) {
+	var logBatch []string
+	logCount := 0
+	for _, e := range events {
+		switch e.T {
+		case "phase":
+			m.ensurePhase(e.Title)
+		case "agent_start":
+			a := m.agents[e.ID]
+			if a != nil && a.started {
+				continue
+			}
+			if a == nil {
+				a = &agentState{id: e.ID}
+				m.agents[e.ID] = a
+			} else {
+				m.removeLegacyAgent(e.ID)
+			}
+			a.label = e.Label
+			a.profile = e.Profile
+			a.phase = e.Phase
+			a.status = "queued"
+			a.preview = e.Preview
+			a.started = true
+			m.agentOrder = append(m.agentOrder, a)
+			ph := m.ensurePhase(a.phase)
+			ph.agents = append(ph.agents, a)
+		case "agent_run":
+			if a := m.agents[e.ID]; a != nil {
+				a.status = "running"
+			}
+		case "agent_end":
+			if a := m.agents[e.ID]; a != nil {
+				if !agentDone(a.status) && agentDone(e.Status) {
+					m.ensurePhase(a.phase).done++
+				}
+				a.status = e.Status
+				a.durMs = e.DurMs
+				if e.Preview != "" {
+					a.preview = e.Preview
+				}
+				a.errMsg = e.Error
+				a.cached = e.Cached
+			}
+		case "agent_journal":
+			if a := m.agents[e.ID]; a != nil {
+				a.journalCount++
+				a.journalKind = e.Kind
+				a.journalPreview = e.Preview
+				a.journalTS = e.TS
+			}
+		case "agent_nudge":
+			if a := m.agents[e.ID]; a != nil {
+				a.nudgeMsg = e.Msg
+				a.nudgeStatus = e.Status
+				a.nudgeTS = e.TS
+			}
+		case "log":
+			logCount++
+			if len(logBatch) < maxVisibleLogs {
+				logBatch = append(logBatch, e.Msg)
+			} else {
+				logBatch[(logCount-1)%maxVisibleLogs] = e.Msg
+			}
+		case "run_end":
+			if r, ok := m.selectedMeta(); ok && r.ID == m.loadedID {
+				m.runs[m.sel].Status = e.Status
+				m.runs[m.sel].Error = e.Error
+				if e.TS > 0 {
+					m.runs[m.sel].EndedAt = time.UnixMilli(e.TS)
+				}
+			}
+		}
+	}
+	m.appendLogs(logBatch, logCount)
+}
+
+func (m *runsModel) appendLogs(batch []string, total int) {
+	if total == 0 {
+		return
+	}
+	if total >= maxVisibleLogs {
+		start := total % maxVisibleLogs
+		ordered := make([]string, 0, maxVisibleLogs)
+		ordered = append(ordered, batch[start:]...)
+		ordered = append(ordered, batch[:start]...)
+		m.omittedLogs += len(m.logs) + total - maxVisibleLogs
+		m.logs = ordered
+		return
+	}
+	m.logs = append(m.logs, batch...)
+	if excess := len(m.logs) - maxVisibleLogs; excess > 0 {
+		m.omittedLogs += excess
+		copy(m.logs, m.logs[excess:])
+		m.logs = m.logs[:maxVisibleLogs]
+	}
+}
+
+func agentDone(status string) bool { return status == "ok" || status == "error" }
 
 func (m *runsModel) runningCount() int {
 	n := 0
@@ -148,33 +669,88 @@ func (m *runsModel) runningCount() int {
 
 func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 	if m.inspecting {
+		if m.inspectFocus {
+			switch msg.String() {
+			case "esc", "backspace":
+				m.inspectFocus = false
+			case "q":
+				m.inspecting = false
+				m.inspectFocus = false
+				m.generation++
+				return m, m.requestRefresh(false)
+			case "up", "k":
+				if m.inspectMode == inspectJournal {
+					m.journalFollow = false
+				}
+				m.ivp.ScrollUp(1)
+			case "down", "j":
+				m.ivp.ScrollDown(1)
+			case "left", "h":
+				m.setInspectMode(m.inspectMode - 1)
+			case "right", "l":
+				m.setInspectMode(m.inspectMode + 1)
+			case "f":
+				m.journalFollow = !m.journalFollow
+				if m.journalFollow {
+					m.journalUnseen = 0
+					if m.inspectMode == inspectJournal {
+						m.ivp.GotoBottom()
+					}
+				}
+			case "g":
+				if m.inspectMode == inspectJournal {
+					m.journalFollow = false
+				}
+				m.ivp.GotoTop()
+			case "G":
+				m.ivp.GotoBottom()
+			case "pgup", "u":
+				if m.inspectMode == inspectJournal {
+					m.journalFollow = false
+				}
+				m.ivp.HalfViewUp()
+			case "pgdown", "d", " ":
+				m.ivp.HalfViewDown()
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "esc", "backspace", "q":
 			m.inspecting = false
+			m.generation++
+			return m, m.requestRefresh(false)
 		case "up", "k":
 			if m.agentSel > 0 {
 				m.agentSel--
+				m.generation++
+				m.resetAgentJournal()
 				m.loadInspect(true)
+				return m, m.requestRefresh(false)
 			}
 		case "down", "j":
-			if m.agentSel < len(m.journal)-1 {
+			if m.agentSel < m.inspectorAgentCount()-1 {
 				m.agentSel++
+				m.generation++
+				m.resetAgentJournal()
 				m.loadInspect(true)
+				return m, m.requestRefresh(false)
 			}
-		case "g":
-			m.ivp.GotoTop()
-		case "G":
-			m.ivp.GotoBottom()
-		case "pgup", "u":
-			m.ivp.HalfViewUp()
-		case "pgdown", "d", " ":
-			m.ivp.HalfViewDown()
+		case "enter", "right":
+			if m.inspectorAgentCount() > 0 {
+				m.inspectFocus = true
+				if m.inspectMode == inspectJournal && m.journalFollow {
+					m.ivp.GotoBottom()
+				}
+			}
 		}
 		return m, nil
 	}
+
 	if m.confirm != "" {
-		if m.sel < len(m.runs) && (msg.String() == "y" || msg.String() == "Y") {
-			id := m.runs[m.sel].ID
+		forceRefresh := false
+		if m.confirmID != "" && m.confirmID == m.selectedID() && (msg.String() == "y" || msg.String() == "Y") {
+			id := m.confirmID
 			var err error
 			switch m.confirm {
 			case "delete":
@@ -187,56 +763,84 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 			if err != nil {
 				m.statusMsg = "✗ " + err.Error()
 			} else {
-				m.statusMsg = "✓ " + m.confirm + "d " + id
+				switch m.confirm {
+				case "delete":
+					m.statusMsg = "✓ deleted " + id
+				case "cancel":
+					m.statusMsg = "✓ cancel requested for " + id
+				case "pause":
+					m.paused[id] = true
+					m.pauseGeneration++
+					m.statusMsg = "⏸ paused " + id
+				}
+				forceRefresh = true
 			}
-			m.refresh()
 		}
 		m.confirm = ""
+		m.confirmID = ""
+		if forceRefresh {
+			return m, m.requestRefresh(true)
+		}
 		return m, nil
 	}
+
 	switch msg.String() {
 	case "up", "k":
 		if m.sel > 0 {
 			m.sel--
 			m.follow = true
-			m.loadSelected()
+			m.resetLoaded(m.selectedID())
+			return m, m.requestRefresh(false)
 		}
 	case "down", "j":
 		if m.sel < len(m.runs)-1 {
 			m.sel++
 			m.follow = true
-			m.loadSelected()
+			m.resetLoaded(m.selectedID())
+			return m, m.requestRefresh(false)
 		}
 	case "d":
 		if m.sel < len(m.runs) {
 			m.confirm = "delete"
+			m.confirmID = m.selectedID()
 			m.statusMsg = ""
 		}
 	case "x":
 		if m.sel < len(m.runs) && m.runs[m.sel].Status == "running" {
 			m.confirm = "cancel"
+			m.confirmID = m.selectedID()
 			m.statusMsg = ""
 		}
 	case "p":
 		if m.sel < len(m.runs) && m.runs[m.sel].Status == "running" {
 			id := m.runs[m.sel].ID
-			if runstore.IsPaused(id) {
-				runstore.SetPaused(id, false) // resuming needs no warning
-				m.statusMsg = "▶ resumed " + id
+			if m.paused[id] {
+				if err := runstore.SetPaused(id, false); err != nil {
+					m.statusMsg = "✗ " + err.Error()
+				} else {
+					delete(m.paused, id)
+					m.pauseGeneration++
+					m.statusMsg = "▶ resumed " + id
+				}
 			} else {
 				m.confirm = "pause"
+				m.confirmID = id
 				m.statusMsg = ""
 			}
 		}
-	case "enter":
+	case "enter", "right":
 		if m.sel < len(m.runs) {
 			m.inspecting = true
-			m.agentSel = 0
-			m.reloadJournal()
+			m.inspectFocus = false
+			m.inspectMode = inspectJournal
+			m.agentSel = clamp(m.agentSel, 0, max(0, m.inspectorAgentCount()-1))
+			m.resetAgentJournal()
+			m.generation++
 			m.loadInspect(true)
+			return m, m.requestRefresh(false)
 		}
 	case "r":
-		m.refresh()
+		return m, m.requestRefresh(true)
 	case "g":
 		m.vp.GotoTop()
 		m.follow = false
@@ -254,7 +858,12 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 
 func (m runsModel) view(frame int) string {
 	if m.inspecting {
-		right := sPaneR.Width(m.detailWidth()).Height(m.height - 2).Render(m.ivp.View())
+		rightStyle := sPaneL
+		if m.inspectFocus {
+			rightStyle = sPaneR
+		}
+		content := m.renderInspectHeader() + "\n\n" + m.ivp.View()
+		right := rightStyle.Width(m.detailWidth()).Height(m.height - 2).Render(content)
 		return lipgloss.JoinHorizontal(lipgloss.Top, m.viewAgentList(), right)
 	}
 	left := m.viewList(frame)
@@ -262,7 +871,9 @@ func (m runsModel) view(frame int) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
-// viewAgentList is the inspector's left pane: every agent call in the run.
+// viewAgentList is the inspector's left pane. Lifecycle starts define the
+// stable roster; the final completion ledger is joined by ID and never gets to
+// reorder active agents.
 func (m runsModel) viewAgentList() string {
 	w := m.listWidth()
 	var b strings.Builder
@@ -270,35 +881,59 @@ func (m runsModel) viewAgentList() string {
 	if m.sel < len(m.runs) {
 		name = m.runs[m.sel].Name
 	}
-	b.WriteString(sTitle.Render("Agents") + sDim.Render(" · "+name) + "\n")
-	if len(m.journal) == 0 {
-		b.WriteString(sDim.Render("\nno agent calls recorded yet"))
+	b.WriteString(sTitle.Render("Agent journals") + sDim.Render(" · "+name) + "\n")
+	if m.inspectorAgentCount() == 0 {
+		b.WriteString(sDim.Render("\nwaiting for agents to start…"))
 	}
-	maxRows := m.height - 4
+	maxRows := max(1, (m.height-4)/2)
 	start := 0
 	if m.agentSel >= maxRows {
 		start = m.agentSel - maxRows + 1
 	}
-	for i := start; i < len(m.journal) && i-start < maxRows; i++ {
-		e := m.journal[i]
-		icon := sOK.Render("✓")
-		if e.Error != "" {
-			icon = sErrS.Render("✗")
-		} else if e.Cached {
+	for i := start; i < m.inspectorAgentCount() && i-start < maxRows; i++ {
+		a := m.inspectorAgentAt(i)
+		icon := agentStatusIcon(a.status)
+		if a.cached {
 			icon = sWarnS.Render("⚡")
 		}
-		label := e.Label
-		if lipgloss.Width(label) > w-8 {
-			label = label[:w-9] + "…"
+		label := a.label
+		if label == "" {
+			label = fmt.Sprintf("agent #%d", a.id)
 		}
+		profile := ""
+		if a.profile != "" {
+			profile = "  " + sProfTag.Render(ansi.Truncate(a.profile, max(1, w/3), "…"))
+		}
+		label = ansi.Truncate(label, max(1, w-4-lipgloss.Width(profile)), "…")
 		row := icon + " " + label
 		if i == m.agentSel {
 			row = icon + " " + sSel.Render(label)
 		}
-		row += "  " + sDim.Render(e.Profile)
+		row += profile
 		b.WriteString(row + "\n")
+
+		meta := a.status + " · " + agentJournalSummary(a)
+		if a.phase != "" {
+			meta += " · " + a.phase
+		}
+		badgeText := ""
+		if a.nudgeMsg != "" || a.nudgeStatus != "" {
+			badge := sNudge
+			if nudgeUnavailable(a) {
+				badge = sNudgeUnavailable
+			}
+			badgeText = " " + badge.Render(nudgeLabel(a))
+		}
+		metaWidth := max(1, w-5-lipgloss.Width(badgeText))
+		meta = ansi.Truncate(meta, metaWidth, "…")
+		b.WriteString(sDim.Render("   "+meta) + badgeText)
+		b.WriteString("\n")
 	}
-	return sPaneL.Width(w).Height(m.height - 2).Render(b.String())
+	pane := sPaneL
+	if !m.inspectFocus {
+		pane = sPaneR
+	}
+	return pane.Width(w).Height(m.height - 2).Render(b.String())
 }
 
 func (m runsModel) viewList(frame int) string {
@@ -306,7 +941,11 @@ func (m runsModel) viewList(frame int) string {
 	var b strings.Builder
 	b.WriteString(sTitle.Render("Runs") + "\n")
 	if len(m.runs) == 0 {
-		b.WriteString(sDim.Render("\nno runs yet\n\nstart one:\n  dyna run script.js\n  dyna demo"))
+		if m.catalogLoaded {
+			b.WriteString(sDim.Render("\nno runs yet\n\nstart one:\n  dyna run script.js\n  dyna demo"))
+		} else {
+			b.WriteString(sDim.Render("\nloading runs…"))
+		}
 	}
 	maxRows := m.height - 4
 	start := 0
@@ -316,14 +955,11 @@ func (m runsModel) viewList(frame int) string {
 	for i := start; i < len(m.runs) && i-start < maxRows; i++ {
 		r := m.runs[i]
 		status := r.Status
-		if status == "running" && runstore.IsPaused(r.ID) {
+		if status == "running" && m.paused[r.ID] {
 			status = "paused"
 		}
 		icon := statusIcon(status, frame)
-		name := r.Name
-		if lipgloss.Width(name) > w-14 {
-			name = name[:w-15] + "…"
-		}
+		name := ansi.Truncate(r.Name, max(1, w-14), "…")
 		meta := sDim.Render("  " + r.StartedAt.Format("Jan 02 15:04"))
 		row := icon + " " + name + meta
 		if i == m.sel {
@@ -360,102 +996,97 @@ func statusIcon(status string, frame int) string {
 	return sDim.Render("·")
 }
 
-func (m *runsModel) viewDetailPane(frame int) string {
-	m.vp.SetContent(m.renderDetailFrame(frame))
-	return sPaneR.Width(m.detailWidth()).Height(m.height - 2).Render(m.vp.View())
+func (m runsModel) viewDetailPane(frame int) string {
+	header := m.renderDetailHeader(frame)
+	content := header
+	if header != "" {
+		content += "\n\n"
+	}
+	content += m.vp.View()
+	return sPaneR.Width(m.detailWidth()).Height(m.height - 2).Render(content)
 }
-
-func (m *runsModel) renderDetail() string { return m.renderDetailFrame(0) }
 
 // agentState tracks one agent's lifecycle assembled from events.
 type agentState struct {
-	id      int
-	label   string
-	profile string
-	phase   string
-	status  string // queued|running|ok|error
-	durMs   int64
-	preview string
-	errMsg  string
-	cached  bool
+	id               int
+	label            string
+	profile          string
+	phase            string
+	status           string // queued|running|ok|error
+	durMs            int64
+	preview          string
+	errMsg           string
+	cached           bool
+	started          bool
+	completion       *runstore.JournalEntry
+	journalCount     int
+	journalTailCount int
+	journalKind      string
+	journalPreview   string
+	journalTS        int64
+	nudgeMsg         string
+	nudgeStatus      string
+	nudgeTS          int64
 }
 
-func (m *runsModel) renderDetailFrame(frame int) string {
-	if m.sel < 0 || m.sel >= len(m.runs) {
-		return sDim.Render("select a run")
-	}
-	r := m.runs[m.sel]
-	w := m.detailWidth() - 4
+type phaseState struct {
+	name   string
+	agents []*agentState
+	done   int
+}
 
-	var b strings.Builder
-	title := sTitle.Render(r.Name) + "  " + sDim.Render(r.ID)
-	b.WriteString(title + "\n")
-	status := statusIcon(r.Status, frame) + " " + r.Status
+func (m runsModel) renderDetailHeader(frame int) string {
+	r, ok := m.selectedMeta()
+	if !ok {
+		return ""
+	}
+	w := max(1, m.detailWidth()-4)
+	title := ansi.Truncate(sTitle.Render(r.Name)+"  "+sDim.Render(r.ID), w, "…")
+	statusName := r.Status
+	if statusName == "running" && m.paused[r.ID] {
+		statusName = "paused"
+	}
+	status := statusIcon(statusName, frame) + " " + statusName
 	dur := ""
 	if !r.EndedAt.IsZero() {
 		dur = "  " + sDim.Render(r.EndedAt.Sub(r.StartedAt).Round(time.Second).String())
 	} else if r.Status == "running" {
 		dur = "  " + sDim.Render(time.Since(r.StartedAt).Round(time.Second).String())
 	}
-	b.WriteString(status + dur + "\n\n")
+	return title + "\n" + ansi.Truncate(status+dur, w, "…")
+}
 
-	// Assemble phases → agents, plus the log stream.
-	phaseOrder := []string{}
-	agentsByPhase := map[string][]*agentState{}
-	agents := map[int]*agentState{}
-	var logs []string
-	for _, e := range m.events {
-		switch e.T {
-		case "phase":
-			if _, seen := agentsByPhase[e.Title]; !seen {
-				agentsByPhase[e.Title] = nil
-				phaseOrder = append(phaseOrder, e.Title)
-			}
-		case "agent_start":
-			a := &agentState{id: e.ID, label: e.Label, profile: e.Profile, phase: e.Phase, status: "queued", preview: e.Preview}
-			agents[e.ID] = a
-			if _, seen := agentsByPhase[a.phase]; !seen {
-				phaseOrder = append(phaseOrder, a.phase)
-			}
-			agentsByPhase[a.phase] = append(agentsByPhase[a.phase], a)
-		case "agent_run":
-			if a := agents[e.ID]; a != nil {
-				a.status = "running"
-			}
-		case "agent_end":
-			if a := agents[e.ID]; a != nil {
-				a.status = e.Status
-				a.durMs = e.DurMs
-				if e.Preview != "" {
-					a.preview = e.Preview
-				}
-				a.errMsg = e.Error
-				a.cached = e.Cached
-			}
-		case "log":
-			logs = append(logs, e.Msg)
-		}
+func (m *runsModel) rebuildDetail(stickBottom bool) {
+	y := m.vp.YOffset
+	m.vp.SetContent(m.renderDetailBody())
+	if stickBottom && m.follow {
+		m.vp.GotoBottom()
+	} else {
+		m.vp.SetYOffset(y)
 	}
+}
 
-	for _, ph := range phaseOrder {
-		name := ph
+func (m *runsModel) renderDetailBody() string {
+	r, ok := m.selectedMeta()
+	if !ok {
+		return sDim.Render("select a run")
+	}
+	w := m.detailWidth() - 4
+	var b strings.Builder
+
+	for _, ph := range m.phases {
+		name := ph.name
 		if name == "" {
 			name = "(no phase)"
 		}
-		as := agentsByPhase[ph]
-		done := 0
-		for _, a := range as {
-			if a.status == "ok" || a.status == "error" {
-				done++
+		b.WriteString(sPhase.Render("▮ "+name) + sDim.Render(fmt.Sprintf("  %d/%d", ph.done, len(ph.agents))) + "\n")
+		for _, a := range ph.agents {
+			icon := agentStatusIcon(a.status)
+			line := fmt.Sprintf("  %s %s", icon, a.label)
+			if a.profile != "" {
+				line += " " + sProfTag.Render("["+a.profile+"]")
 			}
-		}
-		b.WriteString(sPhase.Render("▮ "+name) + sDim.Render(fmt.Sprintf("  %d/%d", done, len(as))) + "\n")
-		for _, a := range as {
-			icon := statusIcon(map[string]string{"queued": "queued", "running": "running", "ok": "ok", "error": "error"}[a.status], frame)
-			if a.status == "queued" {
-				icon = sDim.Render("◌")
-			}
-			line := fmt.Sprintf("  %s %s %s", icon, a.label, sProfTag.Render("["+a.profile+"]"))
+			line += " " + sDim.Render(a.status)
 			if a.cached {
 				line += sWarnS.Render("  ⚡cached")
 			} else if a.durMs > 0 {
@@ -464,16 +1095,37 @@ func (m *runsModel) renderDetailFrame(frame int) string {
 			b.WriteString(line + "\n")
 			if a.status == "error" && a.errMsg != "" {
 				b.WriteString(sErrS.Render("      "+truncLine(a.errMsg, w-8)) + "\n")
+			} else if journalEntryCount(a) > 0 {
+				kind := strings.TrimSpace(a.journalKind)
+				if kind == "" {
+					kind = "note"
+				}
+				progress := strings.ToUpper(kind)
+				if a.journalPreview != "" {
+					progress += "  " + truncLine(a.journalPreview, max(8, w-26))
+				}
+				progress += "  ·  " + agentJournalSummary(a)
+				b.WriteString("      " + sJournalKind.Render(progress) + "\n")
 			} else if a.preview != "" && a.status == "ok" {
 				b.WriteString(sDim.Render("      ↳ "+truncLine(a.preview, w-10)) + "\n")
+			}
+			if a.nudgeMsg != "" || a.nudgeStatus != "" {
+				badge := sNudge
+				if nudgeUnavailable(a) {
+					badge = sNudgeUnavailable
+				}
+				b.WriteString("      " + badge.Render(nudgeLabel(a)) + "\n")
 			}
 		}
 		b.WriteString("\n")
 	}
 
-	if len(logs) > 0 {
+	if len(m.logs) > 0 {
 		b.WriteString(sTitle.Render("Log") + "\n")
-		for _, l := range logs {
+		if m.omittedLogs > 0 {
+			b.WriteString(sDim.Render(fmt.Sprintf("… %d earlier log lines omitted from the dashboard\n", m.omittedLogs)))
+		}
+		for _, l := range m.logs {
 			b.WriteString(sDim.Render("› ") + truncLine(l, w-4) + "\n")
 		}
 		b.WriteString("\n")
@@ -485,12 +1137,22 @@ func (m *runsModel) renderDetailFrame(frame int) string {
 	if m.result != "" {
 		b.WriteString(sTitle.Render("Result") + "\n")
 		res := strings.TrimSpace(m.result)
-		if len(res) > 4000 {
-			res = res[:4000] + "…"
-		}
 		b.WriteString(wrap(res, w) + "\n")
 	}
 	return b.String()
+}
+
+func agentStatusIcon(status string) string {
+	switch status {
+	case "running":
+		return sWarnS.Render("●")
+	case "ok":
+		return sOK.Render("✓")
+	case "error":
+		return sErrS.Render("✗")
+	default:
+		return sDim.Render("◌")
+	}
 }
 
 func truncLine(s string, n int) string {
@@ -498,23 +1160,12 @@ func truncLine(s string, n int) string {
 	if n < 8 {
 		n = 8
 	}
-	if len(s) > n {
-		return s[:n] + "…"
-	}
-	return s
+	return ansi.Truncate(s, n, "…")
 }
 
 func wrap(s string, w int) string {
 	if w < 20 {
 		w = 20
 	}
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		for len(line) > w {
-			out = append(out, line[:w])
-			line = line[w:]
-		}
-		out = append(out, line)
-	}
-	return strings.Join(out, "\n")
+	return ansi.Hardwrap(s, w, true)
 }

@@ -2,7 +2,7 @@
   "profiles": [
     {
       "name": "fable",
-      "description": "PICK for the stages where a wrong answer is costly: judge panels, final synthesis, high-stakes code review, planning and architecture, subtle correctness work (concurrency, tricky invariants), long autonomous implementation, and frontend work needing real design taste. It is the premium worker ($10/$50 per 1M, ~2x sol) with deliberate multi-minute turns, so it shines on digests and decisions rather than raw fan-out \u2014 let luna/terra gather, then hand fable the synthesis. For the most important verdicts, pair it with sol-max: two frontier models from different families with uncorrelated errors beat either alone. For security-focused analysis, defer to sol, the specialist. Capped at 3 concurrent / 6 calls per run \u2014 budget it for the verify/judge/synthesize stages.",
+      "description": "Pick for the stages where a wrong answer is costly: judge panels, final synthesis, high-stakes code review, planning and architecture, subtle correctness work (concurrency, tricky invariants), long autonomous implementation, and frontend work that needs real design taste. It is the premium worker ($10/$50 per 1M tokens, about twice sol) with deliberate multi-minute turns, so it shines on digests and decisions rather than raw fan-out; let luna or terra gather, then hand fable the synthesis. For the most important verdicts, pair it with sol-max: two frontier models from different families with uncorrelated errors beat either alone. For security-focused analysis, prefer sol, the specialist. Capped at 3 concurrent and 6 calls per run, so budget it for the verify, judge, and synthesize stages.",
       "harness": "claude-code",
       "model": "fable",
       "taste": 10,
@@ -16,7 +16,7 @@
     },
     {
       "name": "luna",
-      "description": "PICK for the wide cheap tier: fan-out sweeps, scouting, exploration, inventory/grep-style tasks, first-pass bug finding, mechanical broad changes, and high-volume classification \u2014 the cheapest and fastest worker ($1/$6 per 1M) with real capability for routine coding. Ideal as the gathering layer of any workflow: sweep wide with luna, then route the digest to a stronger model for depth. Keep its tasks scoped and self-contained; for long multi-file grinds, deep architectural reasoning, or visual polish, hand off to terra or sol, and double-check fast-moving factual claims against a source.",
+      "description": "Pick for the wide cheap tier: fan-out sweeps, scouting, exploration, inventory and grep-style tasks, first-pass bug finding, mechanical broad changes, and high-volume classification. The cheapest and fastest worker ($1/$6 per 1M tokens), with real capability for routine coding. Ideal as the gathering layer of any workflow: sweep wide with luna, then route the digest to a stronger model for depth. Keep its tasks scoped and self-contained; for long multi-file work, deep architectural reasoning, or visual polish, hand off to terra or sol, and double-check fast-moving factual claims against a source.",
       "harness": "codex",
       "model": "gpt-5.6-luna",
       "taste": 5,
@@ -29,7 +29,7 @@
     },
     {
       "name": "sol",
-      "description": "THE worker for the hardest jobs: complex implementation grinds, deep debugging, migrations, repo-wide changes, root-cause analysis, and security-focused work where it specializes ($5/$30 per 1M). Also a first-rate adversarial reviewer and verification panelist \u2014 token-efficient, uncapped concurrency, so it scales beautifully for parallel review panels and multi-voter verification. It works boldly and thoroughly: on legacy code, pin the scope explicitly, and skim the diff after long autonomous runs. Route trivial edits and wide fan-out to luna/terra to save budget for what sol does best.",
+      "description": "The workhorse for the hardest jobs: complex implementation, deep debugging, migrations, repo-wide changes, root-cause analysis, and security-focused work where it specializes ($5/$30 per 1M tokens). Also a first-rate adversarial reviewer and verification panelist; token-efficient with no concurrency cap, so it scales well for parallel review panels and multi-voter verification. It works boldly and thoroughly: on legacy code, pin the scope explicitly, and skim the diff after long autonomous runs. Route trivial edits and wide fan-outs to luna or terra to save budget for what sol does best.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -42,7 +42,7 @@
     },
     {
       "name": "sol-max",
-      "description": "Fable's peer from a different model family \u2014 the same gpt-5.6-sol as 'sol' pushed to max effort, putting it at the very top tier alongside fable. Its value is the alternate angle: uncorrelated errors make it the ideal cross-check on fable's verdicts (and fable on its), the tie-breaker in judge panels, and the second opinion on decisions too important for one frontier model. Also the closer when sol-high needs backup on an open-ended brutal problem \u2014 give it constraints and a definition of done and it will not give up. Reserve it for top-tier work; sol-high covers most hard jobs at lower cost. Capped at 4 concurrent / 8 calls per run.",
+      "description": "Fable's peer from a different model family: the same gpt-5.6-sol as 'sol' pushed to max effort, putting it in the top tier alongside fable. Its value is the alternate angle: uncorrelated errors make it the ideal cross-check on fable's verdicts (and fable on its), the tie-breaker in judge panels, and the second opinion on decisions too important for one frontier model. Also the closer when sol needs backup on an open-ended hard problem: give it constraints and a definition of done and it will not give up. Reserve it for top-tier work; sol covers most hard jobs at lower cost. Capped at 4 concurrent and 8 calls per run.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -57,7 +57,7 @@
     },
     {
       "name": "terra",
-      "description": "DEFAULT generalist and the right first choice for most standard work: multi-file implementation, bug diagnosis with verified fixes, code review, refactoring plans, and technical research \u2014 reliable, production-oriented, and cheap ($2.50/$15 per 1M) with no concurrency cap, so it also scales for parallel mid-weight work. Thorough by nature: it verifies before it answers, which is exactly what you want on real changes (nudge it toward brevity for quick lookups). Step down to luna for high-volume trivial edits, and escalate the very hardest reasoning, verification, or taste-critical frontend work to sol-max or fable. When routing is uncertain and stakes are moderate, pick terra.",
+      "description": "Default generalist and the right first choice for most standard work: multi-file implementation, bug diagnosis with verified fixes, code review, refactoring plans, and technical research. Reliable, production-oriented, and cheap ($2.50/$15 per 1M tokens), with no concurrency cap, so it also scales for parallel mid-weight work. Thorough by nature: it verifies before it answers, which is what you want on real changes (nudge it toward brevity for quick lookups). Step down to luna for high-volume trivial edits, and escalate the hardest reasoning, verification, or taste-critical frontend work to sol-max or fable. When routing is uncertain and stakes are moderate, pick terra.",
       "harness": "codex",
       "model": "gpt-5.6-terra",
       "taste": 6,

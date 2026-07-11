@@ -1,6 +1,6 @@
 // Package profile manages worker profiles: registered model+harness combos
 // with human-authored descriptions and standardized stats (taste,
-// intelligence, cost — all 1..10, higher is better; for cost, higher means
+// intelligence, cost, all 1..10, higher is better; for cost, higher means
 // cheaper / better value).
 package profile
 

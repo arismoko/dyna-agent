@@ -1,4 +1,4 @@
-// dyna — harness-agnostic dynamic multi-agent workflows.
+// dyna: harness-agnostic dynamic multi-agent workflows.
 // CLI for agents (codex, claude-code, pi, opencode) + TUI for humans.
 package main
 
@@ -40,10 +40,27 @@ func main() {
 			"humans use `dyna tui` to configure profiles and watch runs live.",
 		SilenceUsage: true,
 	}
-	root.AddCommand(profilesCmd(), runCmd(), runsCmd(), guideCmd(), tuiCmd(), demoCmd(), skillCmd())
+	root.AddCommand(profilesCmd(), runCmd(), runsCmd(), journalCmd(), guideCmd(), tuiCmd(), demoCmd(), skillCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// ---------- worker journal ----------
+
+func journalCmd() *cobra.Command {
+	var kind, next string
+	cmd := &cobra.Command{
+		Use:   "journal <message>",
+		Short: "Append a progress entry to this worker's journal",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			return runstore.AppendAgentJournalFromEnv(kind, args[0], next)
+		},
+	}
+	cmd.Flags().StringVar(&kind, "kind", "update", "entry kind (for example: update, finding, decision, verification, blocker)")
+	cmd.Flags().StringVar(&next, "next", "", "concise next step")
+	return cmd
 }
 
 func loadStore() (*profile.Store, error) {
@@ -244,7 +261,7 @@ func profilesCmd() *cobra.Command {
 			_, hasDefault := s.DefaultProfile()
 			for _, p := range bundle.Profiles {
 				if _, exists := s.Get(p.Name); exists && !force {
-					fmt.Printf("  – %-8s exists, kept (overwrite with --force)\n", p.Name)
+					fmt.Printf("  - %-8s exists, kept (overwrite with --force)\n", p.Name)
 					continue
 				}
 				if p.Default && hasDefault && !force {
@@ -284,7 +301,7 @@ func runCmd() *cobra.Command {
 	var maxConc, maxAgents int
 	cmd := &cobra.Command{
 		Use:   "run <script.js>",
-		Short: "Execute a workflow script (progress → stderr, result JSON → stdout)",
+		Short: "Execute a workflow script (progress on stderr, result JSON on stdout)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, a []string) error {
 			if detach {
@@ -305,7 +322,7 @@ func runCmd() *cobra.Command {
 				return err
 			}
 			if len(store.Profiles) == 0 {
-				return fmt.Errorf("no worker profiles registered — run `dyna profiles add` or `dyna demo` first")
+				return fmt.Errorf("no worker profiles registered; run `dyna profiles add` or `dyna demo` first")
 			}
 			if name == "" {
 				name = metaName(string(src), a[0])
@@ -415,7 +432,7 @@ func detachRun(script string) error {
 	}
 	_ = script
 	fmt.Println(id)
-	fmt.Fprintln(os.Stderr, stDim.Render("running in background — `dyna runs wait "+id+"` blocks until done; watch live with `dyna tui`"))
+	fmt.Fprintln(os.Stderr, stDim.Render("running in background; `dyna runs wait "+id+"` blocks until done, watch live with `dyna tui`"))
 	return nil
 }
 
@@ -564,7 +581,7 @@ func runsCmd() *cobra.Command {
 			if err := runstore.SetPaused(a[0], true); err != nil {
 				return err
 			}
-			fmt.Println("paused " + a[0] + " — resume with `dyna runs unpause " + a[0] + "`")
+			fmt.Println("paused " + a[0] + "; resume with `dyna runs unpause " + a[0] + "`")
 			return nil
 		},
 	}
@@ -750,7 +767,7 @@ func isTTY() bool {
 
 func orDash(s string) string {
 	if s == "" {
-		return "—"
+		return "-"
 	}
 	return s
 }

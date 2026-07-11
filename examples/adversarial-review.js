@@ -1,4 +1,4 @@
-// Adversarial code review: cheap wide sweep → expensive verification.
+// Adversarial code review: cheap wide sweep, then expensive verification.
 // Usage: dyna run examples/adversarial-review.js --args '{"target":"src/", "dimensions":["bugs","perf","security"]}'
 // Expects profiles: a cheap high-cost-stat sweeper and a high-taste reviewer.
 export const meta = {
@@ -36,7 +36,7 @@ const results = await pipeline(
     { profile: sweeper, label: `find:${d}`, phase: 'Find', schema: FINDINGS }),
   (review, d) => parallel((review.findings || []).map((f) => () =>
     agent(
-      `Adversarially verify this ${d} finding — try hard to REFUTE it by reading the code. Finding: ${f.title} in ${f.file}. ${f.detail || ''}`,
+      `Adversarially verify this ${d} finding (try hard to REFUTE it) by reading the code. Finding: ${f.title} in ${f.file}. ${f.detail || ''}`,
       { profile: reviewer, label: `verify:${f.title.slice(0, 30)}`, phase: 'Verify', schema: VERDICT }
     ).then((v) => ({ ...f, dimension: d, verdict: v }))
   ))
