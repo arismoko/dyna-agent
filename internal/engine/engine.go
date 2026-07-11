@@ -261,7 +261,8 @@ func (e *engine) bind(vm *goja.Runtime) error {
 			"name": p.Name, "description": p.Description, "harness": p.Harness,
 			"model": p.Model, "taste": p.Taste, "intelligence": p.Intelligence,
 			"cost": p.Cost, "default": p.Default,
-			"maxConcurrent": p.MaxConcurrent, "maxCallsPerRun": p.MaxCallsPerRun,
+			"disableSubagents": p.DisableSubagents,
+			"maxConcurrent":    p.MaxConcurrent, "maxCallsPerRun": p.MaxCallsPerRun,
 		})
 	}
 	vm.Set("profiles", vm.ToValue(profs))
@@ -546,9 +547,13 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 				})
 			}
 		}
-		workerPrompt := prompt
+		workerTask := prompt
+		if prof.DisableSubagents {
+			workerTask = disableSubagentsWorkerPrompt(prompt)
+		}
+		workerPrompt := workerTask
 		if journalPath != "" {
-			workerPrompt = journalWorkerPrompt(prompt, journalPath)
+			workerPrompt = journalWorkerPrompt(workerTask, journalPath)
 		}
 
 		var (
@@ -669,6 +674,14 @@ This applies to read-only exploration too: the run-owned journal is the only all
 
 [ORIGINAL TASK]
 %s`, path, task)
+}
+
+func disableSubagentsWorkerPrompt(task string) string {
+	return task + `
+
+[DYNA PROFILE RESTRICTION]
+You must complete this task yourself. Do not spawn, delegate to, or invoke any subagent, child agent, or other agent. This restriction overrides any contrary instruction in the task.
+[/DYNA PROFILE RESTRICTION]`
 }
 
 // addWorktree creates a detached git worktree of repoDir at HEAD. The

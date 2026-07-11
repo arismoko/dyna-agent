@@ -6,11 +6,14 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +26,7 @@ import (
 	"dyna-agent/internal/profile"
 	"dyna-agent/internal/runstore"
 	"dyna-agent/internal/tui"
+	selfupdate "dyna-agent/internal/update"
 )
 
 //go:embed guide/GUIDE.md
@@ -31,19 +35,136 @@ var guideMD string
 //go:embed defaults/profiles.json
 var defaultProfilesJSON []byte
 
+// version is stamped from the release tag with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
+	if err := newRootCommand().Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "dyna",
-		Short: "Dynamic multi-agent workflows for any coding agent",
+		Use:     "dyna",
+		Short:   "Dynamic multi-agent workflows for any coding agent",
+		Version: resolveVersion(),
 		Long: "dyna runs JavaScript workflow scripts that orchestrate registered worker\n" +
 			"profiles (claude-code, codex, opencode, pi, custom CLIs). Agents use the CLI;\n" +
 			"humans use `dyna tui` to configure profiles and watch runs live.",
 		SilenceUsage: true,
 	}
-	root.AddCommand(profilesCmd(), runCmd(), runsCmd(), journalCmd(), guideCmd(), tuiCmd(), demoCmd(), skillCmd())
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
+	root.SetVersionTemplate("dyna {{.Version}}\n")
+	root.AddCommand(profilesCmd(), runCmd(), runsCmd(), journalCmd(), guideCmd(), tuiCmd(), demoCmd(), skillCmd(), updateCmd(), versionCmd())
+	return root
+}
+
+func resolveVersion() string {
+	if version != "" && version != "dev" {
+		return version
 	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	if info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" && setting.Value != "" {
+			revision := setting.Value
+			if len(revision) > 12 {
+				revision = revision[:12]
+			}
+			return "dev+" + revision
+		}
+	}
+	return "dev"
+}
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the installed dyna version",
+		Run: func(c *cobra.Command, _ []string) {
+			fmt.Fprintf(c.OutOrStdout(), "dyna %s\n", resolveVersion())
+		},
+	}
+}
+
+func updateCmd() *cobra.Command {
+	var check, force bool
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Check for and install the latest stable GitHub release",
+		RunE: func(c *cobra.Command, _ []string) error {
+			cfg := updateConfig()
+			if check {
+				result, err := cfg.Check(c.Context(), false)
+				if err != nil {
+					return err
+				}
+				printUpdateStatus(c.OutOrStdout(), result)
+				return nil
+			}
+			result, err := cfg.Apply(c.Context(), force, false)
+			if errors.Is(err, selfupdate.ErrDevelopmentBuild) {
+				return fmt.Errorf("%w; release builds self-update, or use `dyna update --force` to replace this build", err)
+			}
+			if err != nil {
+				return err
+			}
+			if !result.Updated {
+				printUpdateStatus(c.OutOrStdout(), result)
+				return nil
+			}
+			fmt.Fprintf(c.OutOrStdout(), "updated dyna %s -> %s; running processes continue safely on %s\n", result.Current, result.Latest, result.Current)
+			if err := refreshInstalledSkills(c.Context(), result.Target, c.OutOrStdout()); err != nil {
+				fmt.Fprintf(c.ErrOrStderr(), "warning: dyna updated, but skill refresh failed: %v\n", err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&check, "check", false, "check the latest release without installing it")
+	cmd.Flags().BoolVar(&force, "force", false, "replace a development, equal, or newer local build")
+	cmd.MarkFlagsMutuallyExclusive("check", "force")
+	return cmd
+}
+
+func updateConfig() selfupdate.Config {
+	return selfupdate.Config{
+		Version:   releaseVersion(),
+		Repo:      selfupdate.DefaultRepo,
+		StatePath: filepath.Join(runstore.DataDir(), "update-check.json"),
+	}
+}
+
+func releaseVersion() string {
+	if version == "" || version == "dev" {
+		return "dev"
+	}
+	return version
+}
+
+func printUpdateStatus(w io.Writer, result selfupdate.Result) {
+	switch {
+	case result.Latest == "":
+		fmt.Fprintln(w, "no stable GitHub release is published yet")
+	case result.Available:
+		fmt.Fprintf(w, "dyna %s is available (installed: %s)\n", result.Latest, result.Current)
+	case result.Current == "" || strings.HasPrefix(result.Current, "dev"):
+		fmt.Fprintf(w, "latest stable release: %s (installed build: %s)\n", result.Latest, result.Current)
+	default:
+		fmt.Fprintf(w, "dyna %s is up to date\n", result.Current)
+	}
+}
+
+func refreshInstalledSkills(ctx context.Context, executable string, output io.Writer) error {
+	cmd := exec.CommandContext(ctx, executable, "skill", "install")
+	cmd.Env = append(os.Environ(), "DYNA_NO_AUTO_UPDATE=1")
+	cmd.Stdout = output
+	cmd.Stderr = output
+	return cmd.Run()
 }
 
 // ---------- worker journal ----------
@@ -104,6 +225,9 @@ func profilesCmd() *cobra.Command {
 				}
 				if p.MaxCallsPerRun > 0 {
 					limits += fmt.Sprintf("  max-calls/run: %d", p.MaxCallsPerRun)
+				}
+				if p.DisableSubagents {
+					limits += "  subagents: blocked"
 				}
 				fmt.Printf("%s%s\n  harness: %s  model: %s%s\n  taste: %d/10  intelligence: %d/10  cost-efficiency: %d/10\n  %s\n\n",
 					p.Name, def, p.Harness, orDash(p.Model), limits, p.Taste, p.Intelligence, p.Cost, p.Description)
@@ -166,6 +290,7 @@ func profilesCmd() *cobra.Command {
 	f.IntVar(&p.TimeoutSec, "timeout", 0, "default per-call timeout in seconds (minimum 1800)")
 	f.BoolVar(&p.Default, "default", false, "make this the default profile")
 	f.BoolVar(&p.SafeMode, "safe-mode", false, "keep the harness's own permission prompts/sandbox (default: bypassed)")
+	f.BoolVar(&p.DisableSubagents, "disable-subagents", false, "prevent this worker from spawning or delegating to child agents")
 	f.IntVar(&p.MaxConcurrent, "limit-concurrent", 0, "max simultaneous workers of this profile per run (0 = unlimited)")
 	f.IntVar(&p.MaxCallsPerRun, "limit-calls", 0, "max total calls to this profile per run (0 = unlimited)")
 	add.MarkFlagRequired("name")
@@ -662,9 +787,24 @@ func tuiCmd() *cobra.Command {
 		Use:   "tui",
 		Short: "Open the dashboard: configure profiles, watch workflows live",
 		RunE: func(c *cobra.Command, _ []string) error {
+			maybeAutoUpdateForTUI(c)
 			return tui.Run(guideMD)
 		},
 	}
+}
+
+func maybeAutoUpdateForTUI(c *cobra.Command) {
+	if os.Getenv("DYNA_NO_AUTO_UPDATE") == "1" || !isTTY() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Context(), 2*time.Minute)
+	defer cancel()
+	result, err := updateConfig().Apply(ctx, false, true)
+	if err != nil || !result.Updated {
+		return // Automatic checks are best effort and never block normal use on errors.
+	}
+	fmt.Fprintln(c.ErrOrStderr(), stOK.Render(fmt.Sprintf("updated dyna %s -> %s; this TUI session will finish on %s", result.Current, result.Latest, result.Current)))
+	_ = refreshInstalledSkills(ctx, result.Target, io.Discard)
 }
 
 func demoCmd() *cobra.Command {

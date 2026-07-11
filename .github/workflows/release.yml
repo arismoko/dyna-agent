@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$GITHUB_REF_NAME"
+          if [[ ! "$version" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "release tag must be semantic version vMAJOR.MINOR.PATCH[-PRERELEASE], got $version" >&2
+            exit 1
+          fi
+          git fetch origin main --no-tags
+          tag_commit="$(git rev-list -n 1 "$version")"
+          git merge-base --is-ancestor "$tag_commit" origin/main || {
+            echo "$version does not point to a commit on main" >&2
+            exit 1
+          }
+
+      - name: Verify source
+        run: |
+          go mod verify
+          go test -race ./...
+          go vet ./...
+          shellcheck install.sh
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          version="$GITHUB_REF_NAME"
+          ldflags="-s -w -X main.version=$version"
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            name="dyna_${goos}_${goarch}"
+            echo "building $name"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags "$ldflags" -o "dist/$name" .
+          done
+          (cd dist && sha256sum dyna_* > checksums.txt)
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$GITHUB_REF_NAME"
+          release_flags=()
+          if [[ "$version" == *-* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$version" dist/* \
+            --verify-tag \
+            --generate-notes \
+            --title "$version" \
+            "${release_flags[@]}"

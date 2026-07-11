@@ -31,6 +31,8 @@ The installer downloads a release binary, falls back to building from source,
 and installs the agent skill into every detected harness. From a checkout,
 `./install.sh` does the same (builds locally into `~/.local/bin`). Overrides:
 `DYNA_INSTALL_DIR`, `DYNA_REPO`, `DYNA_VERSION`, `DYNA_NO_SKILLS=1`.
+Release downloads are verified against the published `checksums.txt` before
+the existing binary is replaced.
 
 Then:
 
@@ -39,6 +41,30 @@ dyna profiles init        # register the curated default worker fleet
 dyna demo                 # register mock workers and run a sample workflow
 dyna tui                  # open the dashboard
 ```
+
+## Updating
+
+Release builds can update themselves from the latest stable GitHub release:
+
+```bash
+dyna --version
+dyna update --check       # report only
+dyna update               # verify and install now
+```
+
+`dyna tui` performs the same update automatically at most once every 24 hours.
+The check is best effort: an offline GitHub API or a read-only install
+directory never prevents the dashboard from opening. Set
+`DYNA_NO_AUTO_UPDATE=1` to disable automatic checks. Development builds are
+not replaced automatically; `dyna update --force` is the explicit escape
+hatch when replacing one is intentional.
+
+Updates are downloaded beside the installed executable, verified with the
+release's SHA-256 checksum, smoke-tested with `--version`, and moved into
+place atomically. Already-running workflows keep their current executable
+inode and are never restarted or killed; the new version is used by future
+invocations. A successful update also refreshes the embedded dyna skill in
+detected agent harnesses.
 
 ## Teaching your agents about dyna
 
@@ -85,7 +111,8 @@ Profiles tab), six multiple-choice steps:
    to the right flags and env vars on save
 4. **Stats**: taste, intelligence, cost efficiency
 5. **Description**: the blurb agents read when picking workers
-6. **Finish**: name (auto-suggested), limits, enabled, default, save
+6. **Finish**: name (auto-suggested), limits, subagent policy, enabled,
+   default, save
 
 Or register by hand:
 
@@ -108,6 +135,14 @@ Profiles can be toggled on and off without losing anything:
 `dyna profiles disable <name>` / `enable <name>` (TUI: `t`). A disabled
 profile keeps its stats and description and stays editable, but disappears
 from the agents' view, and any `agent()` call to it fails.
+
+Add `--disable-subagents` (or choose **block** for subagents in the TUI) when
+the selected worker must complete each task itself instead of spawning or
+delegating to child agents. This does not stop Dyna from launching that
+worker. Claude Code and Codex profiles receive their verified native
+delegation controls, and every harness receives the same final worker-prompt
+restriction. This is a strong policy guard, not a security boundary: workers
+with shell access can still launch another CLI if they deliberately disobey.
 
 Supported harnesses: `claude-code`, `codex`, `opencode`, `pi`, `custom` (any
 argv with `{{prompt}}`/`{{model}}` placeholders; the prompt goes to stdin if
@@ -296,10 +331,29 @@ return { verdict }
 See `examples/` for adversarial-review and judge-panel workflows, and
 `dyna guide` for the full API.
 
+## Releasing
+
+The GitHub release tag is the canonical version. Create an annotated semantic
+version tag on `main` and push it:
+
+```bash
+git switch main
+git pull --ff-only
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+The release workflow verifies the tag is on `main`, runs the race-enabled
+test suite, vet, and installer checks, then builds static Linux and macOS
+binaries for amd64 and arm64. It stamps `dyna --version`, publishes the four
+assets plus `checksums.txt`, and generates GitHub release notes. A tag with a
+prerelease suffix such as `v0.2.0-rc.1` is published as a prerelease and is
+never offered by the stable updater.
+
 ## Layout
 
 - `main.go`: CLI (cobra): `profiles`, `run`, `runs`, `journal`, `guide`,
-  `tui`, `demo`, `skill`
+  `tui`, `demo`, `skill`, `update`, `version`
 - `internal/engine`: embedded JS runtime (goja plus an event loop),
   concurrency semaphore, JSON-schema-validated structured output with
   auto-retry
@@ -309,6 +363,8 @@ See `examples/` for adversarial-review and judge-panel workflows, and
 - `internal/runstore`: run persistence, event stream, completed-call ledger,
   and per-agent journals
 - `internal/tui`: Bubble Tea dashboard
+- `internal/update`: cached GitHub release lookup, checksum verification, and
+  atomic executable replacement
 - `guide/GUIDE.md`: the agent-facing scripting guide (embedded in the binary)
 
 ## License

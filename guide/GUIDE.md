@@ -83,6 +83,14 @@ money). Before writing a script, check `maxCallsPerRun` for each profile you
 use and size fan-outs within it. Route bulk work to unlimited or cheap
 profiles and reserve capped profiles for the few calls that need them.
 
+A profile registered with `dyna profiles add --disable-subagents` requires
+that selected worker to complete tasks itself without spawning or delegating
+to child agents. It does not prevent Dyna's own `agent()` call from launching
+the worker. Claude Code and Codex use verified native delegation controls,
+and every harness receives a final worker-prompt restriction. This is a
+strong policy guard, not a security boundary for workers that can invoke
+other CLIs through a shell.
+
 ## Script API
 
 Scripts are plain JavaScript (NOT TypeScript) running in an async context;
@@ -111,7 +119,7 @@ at the top is encouraged; `meta.name` labels the run.
 - `log(msg)`: narrator line shown to the user and stored in the run.
 - `sleep(ms)`: pacing for polling loops.
 - `args`: the value of `--args` (JSON), verbatim.
-- `profiles`: registered worker profiles: `{name, description, harness, model, taste, intelligence, cost, default}[]`.
+- `profiles`: registered worker profiles: `{name, description, harness, model, taste, intelligence, cost, default, disableSubagents}[]`.
 
 Workers are told (when you pass `schema`) to return raw JSON; otherwise you
 get their final message as a string. Concurrency is capped (default

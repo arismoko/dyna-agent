@@ -1114,6 +1114,107 @@ func TestAssignedSessionIDsAreUnique(t *testing.T) {
 	}
 }
 
+func TestDisableSubagentsNativeControlsInitialAndResume(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile profile.Profile
+		option  string
+		value   string
+	}{
+		{"claude", profile.Profile{Harness: profile.HarnessClaudeCode, ExtraArgs: []string{"--verbose"}, DisableSubagents: true}, "--disallowedTools", "Agent"},
+		{"codex", profile.Profile{Harness: profile.HarnessCodex, ExtraArgs: []string{"-c", "model_reasoning_effort=high"}, DisableSubagents: true}, "--disable", "multi_agent"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inv, err := buildInvocation(tt.profile, "task")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if inv.cleanup != nil {
+				defer inv.cleanup()
+			}
+			if !hasOptionValue(inv.initial.argv, tt.option, tt.value) || inv.resume == nil {
+				t.Fatalf("initial argv/control or resume missing: %#v", inv.initial.argv)
+			}
+			resumed := inv.resume("session-1", "continue")
+			if !hasOptionValue(resumed.argv, tt.option, tt.value) {
+				t.Fatalf("resume argv missing control: %#v", resumed.argv)
+			}
+			if optionIndex(inv.initial.argv, tt.option) <= optionIndex(inv.initial.argv, tt.profile.ExtraArgs[0]) {
+				t.Fatalf("native control must follow extra args: %#v", inv.initial.argv)
+			}
+		})
+	}
+}
+
+func TestDisableSubagentsNativeControlsAreOptInAndNarrow(t *testing.T) {
+	for _, p := range []profile.Profile{
+		{Harness: profile.HarnessClaudeCode},
+		{Harness: profile.HarnessCodex},
+		{Harness: profile.HarnessOpenCode, DisableSubagents: true},
+		{Harness: profile.HarnessPi, DisableSubagents: true},
+		{Harness: profile.HarnessCustom, Command: []string{"worker"}, DisableSubagents: true},
+	} {
+		inv, err := buildInvocation(p, "task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inv.cleanup != nil {
+			defer inv.cleanup()
+		}
+		joined := strings.Join(inv.initial.argv, " ")
+		if strings.Contains(joined, "--disallowedTools Agent") || strings.Contains(joined, "--disable multi_agent") {
+			t.Fatalf("profile %#v received an unrequested or unsupported native control: %s", p, joined)
+		}
+	}
+}
+
+func TestDisableSubagentsRejectsExplicitConflicts(t *testing.T) {
+	for _, p := range []profile.Profile{
+		{Harness: profile.HarnessClaudeCode, DisableSubagents: true, ExtraArgs: []string{"--allowedTools", "Read,Agent"}},
+		{Harness: profile.HarnessClaudeCode, DisableSubagents: true, ExtraArgs: []string{"--allowedTools", "Read", "Agent(reviewer)"}},
+		{Harness: profile.HarnessCodex, DisableSubagents: true, ExtraArgs: []string{"--enable", "multi_agent"}},
+		{Harness: profile.HarnessCodex, DisableSubagents: true, ExtraArgs: []string{"-c", "features.multi_agent=true"}},
+	} {
+		if inv, err := buildInvocation(p, "task"); err == nil {
+			if inv.cleanup != nil {
+				inv.cleanup()
+			}
+			t.Fatalf("accepted conflicting profile: %#v", p)
+		}
+	}
+}
+
+func TestDisableSubagentsMergesClaudeDenyLists(t *testing.T) {
+	p := profile.Profile{
+		Harness: profile.HarnessClaudeCode, DisableSubagents: true,
+		ExtraArgs: []string{"--disallowedTools", "Bash(git *)", "--disallowed-tools=WebFetch"},
+	}
+	inv, err := buildInvocation(p, "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct{ option, value string }{
+		{"--disallowedTools", "Bash"},
+		{"--disallowedTools", "Agent"},
+		{"--disallowed-tools", "WebFetch"},
+		{"--disallowed-tools", "Agent"},
+	} {
+		if !hasOptionValue(inv.initial.argv, check.option, check.value) {
+			t.Fatalf("merged argv missing %s=%s: %#v", check.option, check.value, inv.initial.argv)
+		}
+	}
+}
+
+func optionIndex(args []string, option string) int {
+	for i, arg := range args {
+		if arg == option || strings.HasPrefix(arg, option+"=") {
+			return i
+		}
+	}
+	return -1
+}
+
 func createHarnessJournal(t *testing.T, agentID int) string {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())

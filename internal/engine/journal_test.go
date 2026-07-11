@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -122,6 +123,52 @@ return result;
 	}
 	if complete := agentEntries[2]; complete.Kind != "complete" || complete.Source != "system" || complete.Message == "" {
 		t.Fatalf("completion entry = %#v", complete)
+	}
+}
+
+func TestDisableSubagentsPromptFollowsTaskAndPrecedesSchema(t *testing.T) {
+	const task = "Complete the caller task."
+	workerTask := disableSubagentsWorkerPrompt(task)
+	restriction := "[DYNA PROFILE RESTRICTION]"
+	if !strings.HasPrefix(workerTask, task) || strings.Index(workerTask, restriction) <= strings.Index(workerTask, task) {
+		t.Fatalf("worker task = %q", workerTask)
+	}
+	wrapped := journalWorkerPrompt(workerTask, "/tmp/journal.jsonl")
+	if strings.Index(wrapped, "DYNA WORK JOURNAL") > strings.Index(wrapped, task) || strings.Index(wrapped, task) > strings.Index(wrapped, restriction) {
+		t.Fatalf("prompt wrappers are out of order:\n%s", wrapped)
+	}
+	base := wrapped + "\n\n---\nOUTPUT FORMAT: schema"
+	if strings.Index(base, restriction) > strings.Index(base, "OUTPUT FORMAT") {
+		t.Fatalf("schema wrapper did not remain last:\n%s", base)
+	}
+}
+
+func TestDisableSubagentsPromptReachesUnsupportedHarnessOnlyWhenEnabled(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disabled=%v", disabled), func(t *testing.T) {
+			capture := filepath.Join(t.TempDir(), "prompt.txt")
+			store := &profile.Store{Profiles: []profile.Profile{{
+				Name: "custom", Harness: profile.HarnessCustom, Default: true,
+				Taste: 5, Intelligence: 5, Cost: 5, DisableSubagents: disabled,
+				Command: []string{"/bin/sh", "-c", `cat > "$CAPTURE"; printf done`},
+				Env:     map[string]string{"CAPTURE": capture},
+			}}}
+			result, err := Execute(context.Background(), Options{
+				ScriptSrc: `return await agent("caller task", {profile: "custom"});`,
+				Store:     store, WorkDir: t.TempDir(),
+			})
+			if err != nil || result != `"done"` {
+				t.Fatalf("Execute() = %s, %v", result, err)
+			}
+			prompt, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hasRestriction := strings.Contains(string(prompt), "DYNA PROFILE RESTRICTION")
+			if hasRestriction != disabled || !strings.HasPrefix(string(prompt), "caller task") {
+				t.Fatalf("captured prompt = %q, disableSubagents=%v", prompt, disabled)
+			}
+		})
 	}
 }
 

@@ -869,12 +869,103 @@ func claudeHasExplicitPermissions(args []string) bool {
 	)
 }
 
+func hasOptionValue(args []string, option, want string) bool {
+	for i, arg := range args {
+		switch {
+		case arg == option:
+			for j := i + 1; j < len(args) && !strings.HasPrefix(args[j], "-"); j++ {
+				if optionValueContains(args[j], want) {
+					return true
+				}
+			}
+		case strings.HasPrefix(arg, option+"="):
+			if optionValueContains(strings.TrimPrefix(arg, option+"="), want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func optionValueContains(value, want string) bool {
+	for _, item := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	}) {
+		if item == want || strings.HasPrefix(item, want+"(") {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeArgsDenyingAgent folds Agent into every existing deny flag. This
+// preserves user denials even if Claude treats repeated variadic flags as
+// last-one-wins rather than cumulative.
+func claudeArgsDenyingAgent(args []string) []string {
+	out := make([]string, 0, len(args)+2)
+	found := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--disallowedTools" || arg == "--disallowed-tools":
+			found = true
+			out = append(out, arg)
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				out = append(out, addOptionValue(args[i], "Agent"))
+			} else {
+				out = append(out, "Agent")
+			}
+		case strings.HasPrefix(arg, "--disallowedTools=") || strings.HasPrefix(arg, "--disallowed-tools="):
+			found = true
+			option, value, _ := strings.Cut(arg, "=")
+			out = append(out, option+"="+addOptionValue(value, "Agent"))
+		default:
+			out = append(out, arg)
+		}
+	}
+	if !found {
+		out = append(out, "--disallowedTools", "Agent")
+	}
+	return out
+}
+
+func addOptionValue(value, add string) string {
+	if optionValueContains(value, add) {
+		return value
+	}
+	if strings.TrimSpace(value) == "" {
+		return add
+	}
+	return value + "," + add
+}
+
+func codexExplicitlyEnablesMultiAgent(args []string) bool {
+	if hasOptionValue(args, "--enable", "multi_agent") {
+		return true
+	}
+	for _, config := range codexConfigArgs(args) {
+		key, value, ok := strings.Cut(config, "=")
+		if ok && strings.TrimSpace(key) == "features.multi_agent" && !strings.EqualFold(strings.Trim(strings.TrimSpace(value), "\"'"), "false") {
+			return true
+		}
+	}
+	return false
+}
+
 // buildInvocation returns the initial worker command plus an optional exact-
 // session continuation. Harnesses without a safe session contract remain
 // single-shot rather than risking a duplicate fresh invocation.
 func buildInvocation(p profile.Profile, prompt string) (inv invocation, err error) {
 	switch p.Harness {
 	case profile.HarnessClaudeCode:
+		if p.DisableSubagents && (hasOptionValue(p.ExtraArgs, "--allowedTools", "Agent") || hasOptionValue(p.ExtraArgs, "--allowed-tools", "Agent")) {
+			return invocation{}, fmt.Errorf("claude profile cannot allow the Agent tool when disableSubagents is enabled")
+		}
+		claudeExtraArgs := p.ExtraArgs
+		if p.DisableSubagents {
+			claudeExtraArgs = claudeArgsDenyingAgent(p.ExtraArgs)
+		}
 		argv := []string{"claude", "-p"}
 		// Workers run headless and must act autonomously; permission prompts
 		// would hang forever. SafeMode or explicit permission flags opt out.
@@ -893,7 +984,7 @@ func buildInvocation(p profile.Profile, prompt string) (inv invocation, err erro
 			}
 			argv = append(argv, "--session-id", sessionID)
 		}
-		argv = append(argv, p.ExtraArgs...)
+		argv = append(argv, claudeExtraArgs...)
 		inv.initial = commandSpec{argv: argv, stdinPrompt: true, prompt: prompt}
 		if resumable {
 			inv.sessionID = func(string) string { return sessionID }
@@ -905,13 +996,16 @@ func buildInvocation(p profile.Profile, prompt string) (inv invocation, err erro
 				if p.Model != "" {
 					args = append(args, "--model", p.Model)
 				}
-				args = append(args, p.ExtraArgs...)
+				args = append(args, claudeExtraArgs...)
 				return commandSpec{argv: args, stdinPrompt: true, prompt: nudge}
 			}
 		}
 		return inv, nil
 
 	case profile.HarnessCodex:
+		if p.DisableSubagents && codexExplicitlyEnablesMultiAgent(p.ExtraArgs) {
+			return invocation{}, fmt.Errorf("codex profile cannot enable multi_agent when disableSubagents is enabled")
+		}
 		if hasCodexOutputArg(p.ExtraArgs) {
 			return invocation{}, fmt.Errorf("codex profile extraArgs may not set -o/--output-last-message; dyna reserves it to capture the worker's final response")
 		}
@@ -934,6 +1028,9 @@ func buildInvocation(p profile.Profile, prompt string) (inv invocation, err erro
 			argv = append(argv, "--model", p.Model)
 		}
 		argv = append(argv, p.ExtraArgs...)
+		if p.DisableSubagents && !hasOptionValue(p.ExtraArgs, "--disable", "multi_agent") {
+			argv = append(argv, "--disable", "multi_agent")
+		}
 		argv = append(argv, "-") // read prompt from stdin
 		inv.initial = commandSpec{argv: argv, stdinPrompt: true, prompt: prompt, outFile: outFile}
 		if !hasAnyOption(p.ExtraArgs, "--ephemeral") && codexResumeCompatible(p.ExtraArgs) {
@@ -951,6 +1048,9 @@ func buildInvocation(p profile.Profile, prompt string) (inv invocation, err erro
 					args = append(args, "--model", p.Model)
 				}
 				args = append(args, p.ExtraArgs...)
+				if p.DisableSubagents && !hasOptionValue(p.ExtraArgs, "--disable", "multi_agent") {
+					args = append(args, "--disable", "multi_agent")
+				}
 				args = append(args, id, "-")
 				return commandSpec{argv: args, stdinPrompt: true, prompt: nudge, outFile: outFile}
 			}

@@ -59,13 +59,14 @@ type wizModel struct {
 	desc textinput.Model
 
 	// final slide
-	finSel   int
-	name     textinput.Model
-	limConc  textinput.Model
-	limCalls textinput.Model
-	enabled  bool
-	def      bool
-	errMsg   string
+	finSel           int
+	name             textinput.Model
+	limConc          textinput.Model
+	limCalls         textinput.Model
+	disableSubagents bool
+	enabled          bool
+	def              bool
+	errMsg           string
 }
 
 func newWizard() *wizModel {
@@ -244,7 +245,7 @@ func (w *wizModel) update(msg tea.KeyMsg, store *profile.Store) (bool, *profile.
 		return false, nil, cmd
 
 	case stepFinal:
-		const rows = 6 // name, limConc, limCalls, enabled, default, save
+		const rows = 7 // name, limConc, limCalls, subagents, enabled, default, save
 		switch key {
 		case "up", "shift+tab":
 			w.finSel = clamp(w.finSel-1, 0, rows-1)
@@ -266,9 +267,12 @@ func (w *wizModel) update(msg tea.KeyMsg, store *profile.Store) (bool, *profile.
 		case "left", "right", " ":
 			switch w.finSel {
 			case 3:
-				w.enabled = !w.enabled
+				w.disableSubagents = !w.disableSubagents
 				return false, nil, nil
 			case 4:
+				w.enabled = !w.enabled
+				return false, nil, nil
+			case 5:
 				w.def = !w.def
 				return false, nil, nil
 			}
@@ -341,20 +345,21 @@ func (w *wizModel) focusFinal() {
 func (w *wizModel) save(store *profile.Store) (bool, *profile.Profile, tea.Cmd) {
 	extraArgs, env := detect.ApplyEffort(w.harness, w.effort)
 	p := profile.Profile{
-		Name:           strings.TrimSpace(w.name.Value()),
-		Description:    strings.TrimSpace(w.desc.Value()),
-		Harness:        w.harness,
-		Model:          w.model,
-		Command:        w.command,
-		ExtraArgs:      extraArgs,
-		Env:            env,
-		Taste:          w.stats[0],
-		Intelligence:   w.stats[1],
-		Cost:           w.stats[2],
-		MaxConcurrent:  atoiOr0(w.limConc.Value()),
-		MaxCallsPerRun: atoiOr0(w.limCalls.Value()),
-		Disabled:       !w.enabled,
-		Default:        w.def,
+		Name:             strings.TrimSpace(w.name.Value()),
+		Description:      strings.TrimSpace(w.desc.Value()),
+		Harness:          w.harness,
+		Model:            w.model,
+		Command:          w.command,
+		ExtraArgs:        extraArgs,
+		Env:              env,
+		Taste:            w.stats[0],
+		Intelligence:     w.stats[1],
+		Cost:             w.stats[2],
+		MaxConcurrent:    atoiOr0(w.limConc.Value()),
+		MaxCallsPerRun:   atoiOr0(w.limCalls.Value()),
+		DisableSubagents: w.disableSubagents,
+		Disabled:         !w.enabled,
+		Default:          w.def,
 	}
 	if err := store.Upsert(p); err != nil {
 		w.errMsg = err.Error()
@@ -474,10 +479,11 @@ func (w *wizModel) view(width, height int) string {
 		row(0, "name", w.name.View())
 		row(1, "limit conc.", w.limConc.View())
 		row(2, "limit calls", w.limCalls.View())
-		row(3, "enabled", "◂ "+sProfTag.Render(yesNo(w.enabled))+" ▸")
-		row(4, "default", "◂ "+sProfTag.Render(yesNo(w.def))+" ▸")
+		row(3, "subagents", "◂ "+sProfTag.Render(allowBlock(w.disableSubagents))+" ▸")
+		row(4, "enabled", "◂ "+sProfTag.Render(yesNo(w.enabled))+" ▸")
+		row(5, "default", "◂ "+sProfTag.Render(yesNo(w.def))+" ▸")
 		save := "  Save profile"
-		if w.finSel == 5 {
+		if w.finSel == 6 {
 			save = sHelpKey.Render("▸ ") + sBadge.Render(" Save profile ")
 		}
 		b.WriteString("\n" + save + "\n")
@@ -511,6 +517,13 @@ func yesNo(b bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+func allowBlock(disabled bool) string {
+	if disabled {
+		return "block"
+	}
+	return "allow"
 }
 
 func orDefault(s, fallback string) string {

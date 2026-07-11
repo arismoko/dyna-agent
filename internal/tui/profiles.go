@@ -223,6 +223,9 @@ func (m profilesModel) viewCard(w int) string {
 		}
 		b.WriteString(sWarnS.Render(lim) + "\n\n")
 	}
+	if p.DisableSubagents {
+		b.WriteString(sWarnS.Render("subagents blocked") + sDim.Render(" · this worker must complete tasks itself") + "\n\n")
+	}
 
 	if p.Description != "" {
 		b.WriteString(sTitle.Render("Description") + "\n")
@@ -296,6 +299,7 @@ func newForm(v profile.Profile, origPk string) formModel {
 		textField("extra args", "--browser …", strings.Join(v.ExtraArgs, " "), "extra CLI args, space-separated"),
 		textField("limit conc.", "0 = unlimited", intStr(v.MaxConcurrent), "max simultaneous workers of this profile"),
 		textField("limit calls", "0 = unlimited", intStr(v.MaxCallsPerRun), "max total calls per run"),
+		{label: "subagents", kind: fCycle, cycle: []string{"allow", "block"}, cycleI: boolIdx(v.DisableSubagents), note: "prevent this worker from delegating to child agents"},
 		{label: "enabled", kind: fCycle, cycle: []string{"yes", "no"}, cycleI: boolIdx(v.Disabled), note: "disabled profiles keep their stats but can't be used"},
 		{label: "default", kind: fCycle, cycle: []string{"no", "yes"}, cycleI: boolIdx(v.Default), note: "used when a script omits profile"},
 	}
@@ -312,17 +316,18 @@ func boolIdx(b bool) int {
 
 func (f *formModel) toProfile() profile.Profile {
 	p := profile.Profile{
-		Name:           strings.TrimSpace(f.fields[0].input.Value()),
-		Description:    strings.TrimSpace(f.fields[1].input.Value()),
-		Harness:        f.fields[2].cycle[f.fields[2].cycleI],
-		Model:          strings.TrimSpace(f.fields[3].input.Value()),
-		Taste:          f.fields[4].stat,
-		Intelligence:   f.fields[5].stat,
-		Cost:           f.fields[6].stat,
-		MaxConcurrent:  atoiOr0(f.fields[8].input.Value()),
-		MaxCallsPerRun: atoiOr0(f.fields[9].input.Value()),
-		Disabled:       f.fields[10].cycleI == 1,
-		Default:        f.fields[11].cycleI == 1,
+		Name:             strings.TrimSpace(f.fields[0].input.Value()),
+		Description:      strings.TrimSpace(f.fields[1].input.Value()),
+		Harness:          f.fields[2].cycle[f.fields[2].cycleI],
+		Model:            strings.TrimSpace(f.fields[3].input.Value()),
+		Taste:            f.fields[4].stat,
+		Intelligence:     f.fields[5].stat,
+		Cost:             f.fields[6].stat,
+		MaxConcurrent:    atoiOr0(f.fields[8].input.Value()),
+		MaxCallsPerRun:   atoiOr0(f.fields[9].input.Value()),
+		DisableSubagents: f.fields[10].cycleI == 1,
+		Disabled:         f.fields[11].cycleI == 1,
+		Default:          f.fields[12].cycleI == 1,
 	}
 	if ea := strings.TrimSpace(f.fields[7].input.Value()); ea != "" {
 		p.ExtraArgs = strings.Fields(ea)
