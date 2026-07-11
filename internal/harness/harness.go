@@ -104,6 +104,7 @@ type attempt struct {
 	stderr             string
 	runErr             error
 	started            bool
+	contextDone        bool
 	journalInterrupted bool
 }
 
@@ -311,7 +312,7 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
-		return finishAttempt(spec, stdout.String(), stderr.String(), err, false, false)
+		return finishAttempt(spec, stdout.String(), stderr.String(), err, false, false, false)
 	}
 	if spec.journalReminderReason != "" && journal != nil {
 		journal.markNudged(true, spec.journalReminderReason)
@@ -333,13 +334,13 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 			if journal != nil {
 				journal.poll()
 			}
-			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false)
+			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, false)
 		case <-ctx.Done():
 			runErr := stopCanceledProcess(cmd, done)
 			if journal != nil {
 				journal.poll()
 			}
-			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false)
+			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false)
 		case <-tick:
 			journal.poll()
 			if !journal.reminderDue() {
@@ -352,9 +353,9 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 				runErr, interrupted := interruptForJournal(ctx, cmd, done)
 				journal.poll()
 				if ctx.Err() != nil {
-					return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false)
+					return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false)
 				}
-				return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, interrupted)
+				return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, interrupted)
 			}
 			journal.markNudged(false, JournalNudgeIdle)
 		}
@@ -474,7 +475,7 @@ func mergeEnv(base []string, overrides map[string]string) []string {
 	return out
 }
 
-func finishAttempt(spec commandSpec, stdout, stderr string, runErr error, started, journalInterrupted bool) attempt {
+func finishAttempt(spec commandSpec, stdout, stderr string, runErr error, started, contextDone, journalInterrupted bool) attempt {
 	var out string
 	if spec.outFile != "" {
 		// stdout may be a JSON event stream used only to discover the session.
@@ -489,7 +490,7 @@ func finishAttempt(spec commandSpec, stdout, stderr string, runErr error, starte
 	}
 	return attempt{
 		output: out, stdout: stdout, stderr: stderr, runErr: runErr,
-		started: started, journalInterrupted: journalInterrupted,
+		started: started, contextDone: contextDone, journalInterrupted: journalInterrupted,
 	}
 }
 
@@ -728,10 +729,14 @@ func (j *journalSupervisor) markNudged(delivered bool, reason string) {
 }
 
 func attemptError(ctx context.Context, p profile.Profile, argv []string, a attempt) error {
-	if a.runErr != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("worker %s canceled/timed out: %w", p.Name, ctx.Err())
+	if a.contextDone {
+		err := ctx.Err()
+		if err == nil {
+			err = context.Canceled
 		}
+		return fmt.Errorf("worker %s canceled/timed out: %w", p.Name, err)
+	}
+	if a.runErr != nil {
 		errTail := tail(strings.TrimSpace(a.stderr), 2000)
 		if errTail == "" {
 			errTail = tail(strings.TrimSpace(a.stdout), 2000)

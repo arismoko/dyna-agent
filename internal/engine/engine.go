@@ -31,7 +31,8 @@ import (
 )
 
 const (
-	defaultAgentTimeout = 30 * time.Minute
+	minimumAgentTimeout = 30 * time.Minute
+	defaultAgentTimeout = minimumAgentTimeout
 	defaultJournalIdle  = 5 * time.Minute
 )
 
@@ -286,6 +287,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 
 	profName, label, phase, cwd := "", "", "", e.opts.WorkDir
 	timeout := defaultAgentTimeout
+	timeoutSet := false
 	var schemaJSON, isolation string
 	if o, ok := opts.Export().(map[string]any); ok && o != nil {
 		if v, ok := o["profile"].(string); ok {
@@ -306,6 +308,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		if v, ok := o["timeout"]; ok {
 			if f, ok := toFloat(v); ok && f > 0 {
 				timeout = time.Duration(f * float64(time.Second))
+				timeoutSet = true
 			}
 		}
 		if v, ok := o["schema"]; ok && v != nil {
@@ -336,9 +339,10 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		}
 		prof = *p
 	}
-	if prof.TimeoutSec > 0 && timeout == defaultAgentTimeout {
+	if prof.TimeoutSec > 0 && !timeoutSet {
 		timeout = time.Duration(prof.TimeoutSec) * time.Second
 	}
+	timeout = clampAgentTimeout(timeout)
 
 	if isolation != "" && isolation != "worktree" {
 		reject(fmt.Errorf("unknown isolation %q (only \"worktree\" is supported)", isolation))
@@ -598,6 +602,13 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 	}()
 
 	return vm.ToValue(promise)
+}
+
+func clampAgentTimeout(timeout time.Duration) time.Duration {
+	if timeout < minimumAgentTimeout {
+		return minimumAgentTimeout
+	}
+	return timeout
 }
 
 // runWithSchema wraps the prompt with JSON-output instructions, extracts and

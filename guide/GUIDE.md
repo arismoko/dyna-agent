@@ -93,7 +93,8 @@ at the top is encouraged; `meta.name` labels the run.
   opts: `profile` (registered profile name), `label` (display name),
   `phase` (progress group), `schema` (JSON Schema; output is parsed,
   validated, retried up to 2 times, and returned as an object),
-  `cwd` (working directory for the worker), `timeout` (seconds),
+  `cwd` (working directory for the worker), `timeout` (seconds, with a
+  30-minute minimum),
   `isolation: 'worktree'` (run the worker in a fresh detached git worktree;
   use when parallel workers mutate files. The tree is auto-removed if
   unchanged, kept and reported via `log` if the worker changed files).

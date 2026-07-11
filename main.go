@@ -163,7 +163,7 @@ func profilesCmd() *cobra.Command {
 	f.IntVar(&p.Cost, "cost", 5, "cost efficiency 1..10, higher better (10 = very cheap)")
 	f.StringArrayVar(&p.ExtraArgs, "extra-arg", nil, "extra CLI arg for the harness (repeatable)")
 	f.StringArrayVar(&command, "command", nil, "custom harness argv (repeatable; {{prompt}}/{{model}} placeholders)")
-	f.IntVar(&p.TimeoutSec, "timeout", 0, "default per-call timeout in seconds")
+	f.IntVar(&p.TimeoutSec, "timeout", 0, "default per-call timeout in seconds (minimum 1800)")
 	f.BoolVar(&p.Default, "default", false, "make this the default profile")
 	f.BoolVar(&p.SafeMode, "safe-mode", false, "keep the harness's own permission prompts/sandbox (default: bypassed)")
 	f.IntVar(&p.MaxConcurrent, "limit-concurrent", 0, "max simultaneous workers of this profile per run (0 = unlimited)")

@@ -32,7 +32,8 @@ patterns). Quick reference:
 2. Write the script: ` + "`agent(prompt, {profile, label, phase, schema})`" + `,
    ` + "`parallel(thunks)`" + `, ` + "`pipeline(items, ...stages)`" + `, ` + "`phase(title)`" + `, ` + "`log(msg)`" + `,
    plus ` + "`args`" + ` and ` + "`profiles`" + ` globals. Plain JS, top-level await, return value
-   becomes the result. ` + "`schema`" + ` gives validated JSON output back.
+   becomes the result. ` + "`schema`" + ` gives validated JSON output back. Every call has a
+   30-minute minimum timeout; shorter script or profile values are clamped.
 3. ` + "`dyna run script.js --args '{...}'`" + `: progress streams to stderr, the
    result JSON prints to stdout. Add ` + "`--detach`" + ` to run in the background
    (prints run id; collect later with ` + "`dyna runs wait <id>`" + `), and

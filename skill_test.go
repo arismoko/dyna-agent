@@ -30,6 +30,8 @@ func TestSkillDocumentsAgentJournalContract(t *testing.T) {
 		"Non-resumable/custom sessions are only marked",
 		"progress side channel",
 		"not the worker's final response or schema output",
+		"30-minute minimum timeout",
+		"shorter script or profile values are clamped",
 		"watch them appear live",
 	}
 	for _, contract := range required {

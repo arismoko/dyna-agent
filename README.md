@@ -131,6 +131,10 @@ explicit persistence, session, budget, or resume-incompatible flags (and
 custom harnesses) stay single-shot so recovery cannot silently change those
 controls.
 
+Every `agent()` call gets at least 30 minutes. A shorter `timeout` option or
+profile default is clamped to 30 minutes; larger values are preserved. Parent
+workflow cancellation can still stop a worker earlier.
+
 Agents discover the fleet with `dyna profiles list --json` and pick workers
 by description and stats, or dynamically inside scripts via the `profiles`
 global.

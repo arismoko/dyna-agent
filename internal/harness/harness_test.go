@@ -837,6 +837,21 @@ sleep 30
 	}
 }
 
+func TestContextTerminationDoesNotLookLikeEmptyOutput(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := attemptError(ctx, profile.Profile{Name: "luna"}, []string{"codex"}, attempt{
+		started: true, contextDone: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "canceled/timed out") {
+		t.Fatalf("attemptError() = %v, want cancellation/timeout", err)
+	}
+	if strings.Contains(err.Error(), "empty output") {
+		t.Fatalf("attemptError() hid context termination as an empty response: %v", err)
+	}
+}
+
 func TestCodexReportsBothFailures(t *testing.T) {
 	logPath := installFakeCLI(t, "codex", `#!/bin/sh
 set -eu
