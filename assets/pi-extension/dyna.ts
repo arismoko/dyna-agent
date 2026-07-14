@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
@@ -12,6 +13,8 @@ const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_TOOL_OUTPUT = 1024 * 1024;
 const MAX_WORKFLOW_SOURCE = 512 * 1024;
 const MAX_ERROR_DETAIL = 16 * 1024;
+const DETACHED_REGISTRATION_GRACE_MS = 15 * 1000;
+const DETACHED_REGISTRATION_POLL_MS = 300;
 const MAX_EVENT_READ = 4 * 1024 * 1024;
 const MAX_JOURNAL_TAIL = 256 * 1024;
 const LIST_POLL_TICKS = 5;
@@ -343,14 +346,14 @@ function failedCLI(operation: string, result: CLIResult): Error {
 	return new Error(`${operation} failed (${status}): ${detail}`);
 }
 
-async function dyna(args: string[], cwd?: string): Promise<string> {
-	const result = await runDyna(args, cwd);
+async function dyna(args: string[], cwd?: string, signal?: AbortSignal): Promise<string> {
+	const result = await runDyna(args, cwd, signal);
 	if (!result.ok) throw failedCLI(`dyna ${args.slice(0, 2).join(" ")}`, result);
 	return result.stdout;
 }
 
 function toolResult(result: CLIResult, extra: Record<string, unknown> = {}) {
-	const stdout = clipped(result.stdout, MAX_TOOL_OUTPUT / 4);
+	const stdout = clipped(redactSecrets(result.stdout), MAX_TOOL_OUTPUT / 4);
 	const stderr = clipped(result.stderr, MAX_TOOL_OUTPUT / 4);
 	const details = {
 		...extra,
@@ -367,9 +370,9 @@ function toolResult(result: CLIResult, extra: Record<string, unknown> = {}) {
 	};
 }
 
-async function listRuns(): Promise<Run[]> {
+async function listRuns(signal?: AbortSignal): Promise<Run[]> {
 	if (!SESSION) return [];
-	const raw = await dyna(["runs", "list", "--json", "--session", SESSION]);
+	const raw = await dyna(["runs", "list", "--json", "--session", SESSION], undefined, signal);
 	const parsed: unknown = JSON.parse(raw);
 	if (parsed === null) return [];
 	if (!Array.isArray(parsed)) throw new Error("dyna returned an invalid run list");
@@ -406,12 +409,33 @@ async function enabledProfiles(): Promise<Record<string, unknown>[]> {
 		}));
 }
 
-async function requireSessionRun(id: string): Promise<Run> {
-	requireSession();
+function checkRunID(id: string): void {
 	if (!/^wf_[A-Za-z0-9_-]+$/.test(id) || id.length > 128) throw new Error("run_id must be a valid Dyna workflow id (wf_...)");
-	const run = (await listRuns()).find((candidate) => candidate.id === id);
+}
+
+async function requireSessionRun(id: string, signal?: AbortSignal): Promise<Run> {
+	const session = requireSession();
+	checkRunID(id);
+	const run = (await listRuns(signal)).find((candidate) => candidate.id === id && candidate.session === session);
 	if (!run) throw new Error(`run ${id} does not belong to this Pi session`);
 	return run;
+}
+
+async function waitForSessionRunRegistration(id: string, signal?: AbortSignal): Promise<Run> {
+	const session = requireSession();
+	checkRunID(id);
+	const timeoutSignal = AbortSignal.timeout(DETACHED_REGISTRATION_GRACE_MS);
+	const registrationSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	try {
+		for (;;) {
+			const run = (await listRuns(registrationSignal)).find((candidate) => candidate.id === id && candidate.session === session);
+			if (run) return run;
+			await sleep(DETACHED_REGISTRATION_POLL_MS, undefined, { signal: registrationSignal });
+		}
+	} catch (error) {
+		if (!timeoutSignal.aborted || signal?.aborted) throw error;
+	}
+	throw new Error(`detached Dyna run ${id} started but did not register in Pi session ${session} within 15 seconds; keep run ID ${id} and inspect it with dyna runs show ${id}`);
 }
 
 function checkedString(value: string | undefined, name: string, maxBytes: number): string | undefined {
@@ -804,7 +828,7 @@ export default function (pi: ExtensionAPI) {
 			checkedString(params.workflow, "workflow", MAX_WORKFLOW_SOURCE);
 			const cwd = checkedString(params.cwd, "cwd", 4096);
 			const name = checkedString(params.name, "name", 1024);
-			if (params.resume) await requireSessionRun(params.resume);
+			if (params.resume) await requireSessionRun(params.resume, signal);
 
 			let argsJSON: string | undefined;
 			if (params.args !== undefined) {
@@ -827,14 +851,25 @@ export default function (pi: ExtensionAPI) {
 
 				const result = await runDyna(cliArgs, undefined, signal);
 				if (!result.ok) throw failedCLI("dyna run", result);
-				const runID = params.detach ? result.stdout.trim() : (() => {
+				let runID: string | undefined;
+				if (params.detach) {
+					const detachedRunID = result.stdout.trim();
+					try {
+						checkRunID(detachedRunID);
+					} catch {
+						const safeOutput = clipped(redactSecrets(detachedRunID), MAX_ERROR_DETAIL).text;
+						throw new Error(`dyna run --detach returned an invalid run ID ${JSON.stringify(safeOutput)}; the detached child may still be running`);
+					}
+					await waitForSessionRunRegistration(detachedRunID, signal);
+					runID = detachedRunID;
+				} else {
 					try {
 						const value = JSON.parse(result.stdout) as Record<string, unknown>;
-						return typeof value.runId === "string" ? value.runId : undefined;
+						runID = typeof value.runId === "string" ? value.runId : undefined;
 					} catch {
-						return undefined;
+						// Non-detached output may not carry a run ID; preserve the successful result.
 					}
-				})();
+				}
 				return toolResult(result, { runId: runID, detached: params.detach === true });
 			} finally {
 				await rm(tempDir, { recursive: true, force: true });
@@ -863,7 +898,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (!params.run_id) throw new Error(`run_id is required for dyna_runs ${params.action}`);
 			if (params.action !== "wait" && params.timeout_seconds !== undefined) throw new Error(`timeout_seconds is only valid for dyna_runs wait`);
-			const run = await requireSessionRun(params.run_id);
+			const run = await requireSessionRun(params.run_id, signal);
 			const cliArgs = ["runs", params.action, params.run_id];
 			if (params.action === "show") cliArgs.push("--json");
 			if (params.action === "wait" && params.timeout_seconds !== undefined) cliArgs.push("--timeout", String(params.timeout_seconds));
@@ -887,11 +922,11 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal) {
 			requireSession();
 			checkedString(params.message, "message", 2000);
-			const run = await requireSessionRun(params.run_id);
+			const run = await requireSessionRun(params.run_id, signal);
 			if (run.status !== "running") throw new Error(`run ${params.run_id} is not running (status ${run.status})`);
 			const result = await runDyna(["runs", "steer", params.run_id, String(params.agent_id), params.message], undefined, signal);
 			if (!result.ok) throw failedCLI("dyna runs steer", result);
-			const output = result.stdout.trim();
+			const output = redactSecrets(result.stdout.trim());
 			return {
 				content: [{ type: "text", text: output || `Queued steering for ${params.run_id} agent ${params.agent_id}.` }],
 				details: { runId: params.run_id, agentId: params.agent_id, queued: true },

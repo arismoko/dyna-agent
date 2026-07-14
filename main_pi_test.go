@@ -252,7 +252,7 @@ func TestPiExtensionRegistersModelVisibleSteeringTool(t *testing.T) {
 		`agent_id: Type.Integer`,
 		`message: Type.String`,
 		`maxLength: 2000`,
-		`const run = await requireSessionRun(params.run_id)`,
+		`const run = await requireSessionRun(params.run_id, signal)`,
 		`["runs", "steer", params.run_id, String(params.agent_id), params.message]`,
 		`never starts a replacement`,
 	} {
@@ -279,8 +279,10 @@ func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 		`await writeFile(scriptPath, params.workflow, { mode: 0o600, flag: "wx" })`,
 		`await rm(tempDir, { recursive: true, force: true })`,
 		`execFile(DYNA, args`,
-		`await requireSessionRun(params.resume)`,
-		`await requireSessionRun(params.run_id)`,
+		`await requireSessionRun(params.resume, signal)`,
+		`await requireSessionRun(params.run_id, signal)`,
+		`DETACHED_REGISTRATION_GRACE_MS = 15 * 1000`,
+		`await waitForSessionRunRegistration(detachedRunID, signal)`,
 		`Type.Literal("cancel")`,
 		`redactSecrets`,
 		`function requireSession(): string`,
@@ -416,6 +418,181 @@ export default function (pi: any) {
 	}
 	if len(withoutSession) != 0 {
 		t.Fatalf("Pi exposed session-scoped Dyna tools without DYNA_SESSION: %#v", withoutSession)
+	}
+}
+
+func TestInstalledPiExecutesNativeToolsWithRegistrationGraceAndRedaction(t *testing.T) {
+	piPath, err := exec.LookPath("pi")
+	if err != nil {
+		t.Skip("pi is not installed")
+	}
+	home := t.TempDir()
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	extensionPath, err := provisionPiExtension()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixtureDir := t.TempDir()
+	fakeDyna := filepath.Join(fixtureDir, "dyna")
+	listCount := filepath.Join(fixtureDir, "list-count")
+	runCount := filepath.Join(fixtureDir, "run-count")
+	secret := "fixture-success-secret"
+	writeExecutable(t, fakeDyna, `#!/bin/sh
+case "$1:$2" in
+	run:*)
+		count=0
+		if [ -f "$PI_RUN_COUNT" ]; then count=$(cat "$PI_RUN_COUNT"); fi
+		count=$((count + 1))
+		printf '%s\n' "$count" > "$PI_RUN_COUNT"
+		if [ "$count" -eq 1 ]; then
+			printf '%s\n' 'wf_fixture_detached'
+		else
+			printf 'malformed-%s\n' "$PI_RUNTIME_SECRET"
+		fi
+		;;
+	runs:list)
+		if [ "$3" != "--json" ] || [ "$4" != "--session" ] || [ "$5" != "fixture-session" ]; then
+			printf '%s\n' 'missing exact session filter' >&2
+			exit 97
+		fi
+		count=0
+		if [ -f "$PI_LIST_COUNT" ]; then count=$(cat "$PI_LIST_COUNT"); fi
+		count=$((count + 1))
+		printf '%s\n' "$count" > "$PI_LIST_COUNT"
+		if [ "$count" -eq 1 ]; then
+			printf '%s\n' '[{"id":"wf_fixture_detached","name":"foreign","status":"running","session":"other-session","startedAt":"2026-07-14T00:00:00Z"}]'
+		elif [ "$count" -eq 2 ]; then
+			printf '%s\n' '[]'
+		else
+			printf '%s\n' '[{"id":"wf_fixture_detached","name":"owned","status":"running","session":"fixture-session","startedAt":"2026-07-14T00:00:00Z"}]'
+		fi
+		;;
+	runs:show)
+		printf '{"output":"%s"}\n' "$PI_RUNTIME_SECRET"
+		;;
+	runs:steer)
+		printf 'queued %s\n' "$PI_RUNTIME_SECRET"
+		;;
+	*)
+		printf 'unexpected fixture invocation: %s\n' "$*" >&2
+		exit 98
+		;;
+esac
+`)
+
+	marker := filepath.Join(fixtureDir, "probe.json")
+	probePath := filepath.Join(fixtureDir, "probe.ts")
+	extensionJSON, err := json.Marshal(extensionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeSource := `import { readFile, writeFile } from "node:fs/promises";
+import dynaExtension from ` + string(extensionJSON) + `;
+
+const tools = new Map<string, any>();
+dynaExtension({
+	on: () => {},
+	registerTool: (tool: any) => tools.set(tool.name, tool),
+	registerCommand: () => {},
+} as any);
+
+export default function (pi: any) {
+	pi.on("input", async () => {
+		try {
+			const signal = new AbortController().signal;
+			const run = await tools.get("dyna_run").execute("run-call", { workflow: "return 1", detach: true }, signal);
+			const registrationListCount = Number((await readFile(process.env.PI_LIST_COUNT, "utf8")).trim());
+			const show = await tools.get("dyna_runs").execute("show-call", { action: "show", run_id: "wf_fixture_detached" }, signal);
+			const steer = await tools.get("dyna_steer").execute("steer-call", { run_id: "wf_fixture_detached", agent_id: 1, message: "continue" }, signal);
+			let malformedError = "";
+			try {
+				await tools.get("dyna_run").execute("bad-run-call", { workflow: "return 2", detach: true }, signal);
+			} catch (error) {
+				malformedError = error instanceof Error ? error.message : String(error);
+			}
+			await writeFile(process.env.PI_TOOL_PROBE_MARKER, JSON.stringify({ ok: true, registrationListCount, run, show, steer, malformedError }));
+		} catch (error) {
+			await writeFile(process.env.PI_TOOL_PROBE_MARKER, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+		}
+		return { action: "handled" };
+	});
+}
+`
+	if err := os.WriteFile(probePath, []byte(probeSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, piPath,
+		"--offline", "--no-extensions",
+		"--extension", probePath,
+		"--provider", "openai-codex",
+		"--model", "gpt-5.6-terra",
+		"--api-key", "fixture-only",
+		"-p", "exercise native tools",
+	)
+	cmd.Env = os.Environ()
+	for key, value := range map[string]string{
+		"HOME":                 home,
+		"PI_CODING_AGENT_DIR":  filepath.Join(home, ".pi-fixture"),
+		"PI_OFFLINE":           "1",
+		"DYNA_SESSION":         "fixture-session",
+		"DYNA_BIN":             fakeDyna,
+		"DYNA_PI_CODEX_AUTH":   "0",
+		"PI_LIST_COUNT":        listCount,
+		"PI_RUN_COUNT":         runCount,
+		"PI_RUNTIME_SECRET":    secret,
+		"PI_TOOL_PROBE_MARKER": marker,
+		"OPENAI_API_KEY":       "",
+		"CODEX_HOME":           filepath.Join(home, ".codex-fixture"),
+		"DYNA_CODEX_BIN":       "/bin/false",
+		"DYNA_NO_AUTO_UPDATE":  "1",
+	} {
+		cmd.Env = setEnv(cmd.Env, key, value)
+	}
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("offline Pi native tool execution timed out: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("offline Pi native tool execution: %v\n%s", err, output)
+	}
+
+	raw := readFile(t, marker)
+	if strings.Contains(raw, secret) || bytes.Contains(output, []byte(secret)) {
+		t.Fatal("successful native tool output exposed the fixture secret")
+	}
+	var probe map[string]any
+	if err := json.Unmarshal([]byte(raw), &probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe["ok"] != true {
+		t.Fatalf("native tool runtime probe failed: %s", raw)
+	}
+	if probe["registrationListCount"] != float64(3) {
+		t.Fatalf("detached registration list calls = %v, want 3", probe["registrationListCount"])
+	}
+	if !strings.Contains(raw, "[REDACTED]") {
+		t.Fatalf("native tool runtime did not redact successful output: %s", raw)
+	}
+	run, _ := probe["run"].(map[string]any)
+	runDetails, _ := run["details"].(map[string]any)
+	if runDetails["runId"] != "wf_fixture_detached" || runDetails["detached"] != true {
+		t.Fatalf("detached run details = %#v", runDetails)
+	}
+	show, _ := probe["show"].(map[string]any)
+	showDetails, _ := show["details"].(map[string]any)
+	if showDetails["action"] != "show" || showDetails["runId"] != "wf_fixture_detached" || showDetails["priorStatus"] != "running" {
+		t.Fatalf("show details = %#v", showDetails)
+	}
+	if showDetails["stdoutTruncated"] != false || showDetails["stderrTruncated"] != false {
+		t.Fatalf("show truncation flags = stdout:%v stderr:%v", showDetails["stdoutTruncated"], showDetails["stderrTruncated"])
+	}
+	if malformed, _ := probe["malformedError"].(string); !strings.Contains(malformed, "invalid run ID") || !strings.Contains(malformed, "[REDACTED]") {
+		t.Fatalf("malformed detached ID error = %q", malformed)
 	}
 }
 
