@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -51,23 +52,22 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	if err := os.WriteFile(piPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", binDir)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_DATA_HOME", data)
-	t.Setenv("CAPTURE_ARGS", filepath.Join(capture, "args"))
-	t.Setenv("CAPTURE_SESSION", filepath.Join(capture, "session"))
-	t.Setenv("CAPTURE_BIN", filepath.Join(capture, "bin"))
-	t.Setenv("CAPTURE_AUTH", filepath.Join(capture, "auth"))
-	t.Setenv(runstore.SessionEnv, "stale-session")
-	t.Setenv("DYNA_BIN", "stale-binary")
-	t.Setenv("DYNA_NO_AUTO_UPDATE", "1")
-
-	cmd := newRootCommand()
-	cmd.SilenceErrors = true
-	cmd.SilenceUsage = true
-	cmd.SetArgs([]string{"pi", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "--skill", "user-skill", "-c"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatal(err)
+	cmd := piCommandSubprocess(t, binDir, "pi", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "--skill", "user-skill", "-c")
+	for key, value := range map[string]string{
+		"HOME":                home,
+		"XDG_DATA_HOME":       data,
+		"CAPTURE_ARGS":        filepath.Join(capture, "args"),
+		"CAPTURE_SESSION":     filepath.Join(capture, "session"),
+		"CAPTURE_BIN":         filepath.Join(capture, "bin"),
+		"CAPTURE_AUTH":        filepath.Join(capture, "auth"),
+		runstore.SessionEnv:   "stale-session",
+		"DYNA_BIN":            "stale-binary",
+		"DYNA_NO_AUTO_UPDATE": "1",
+	} {
+		cmd.Env = setEnv(cmd.Env, key, value)
+	}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pi subprocess: %v\n%s", err, output)
 	}
 
 	args := readNULArgs(t, filepath.Join(capture, "args"))
@@ -88,6 +88,49 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".pi", "agent", "skills", "dyna", "SKILL.md")); !os.IsNotExist(err) {
 		t.Fatalf("dyna pi installed a redundant skill: %v", err)
+	}
+}
+
+func TestPiCmdNormalizesRecognizedEqualsArgs(t *testing.T) {
+	binDir := t.TempDir()
+	data := t.TempDir()
+	capture := t.TempDir()
+	writeExecutable(t, filepath.Join(binDir, "pi"), "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$CAPTURE_ARGS\"\nprintf '%s\\n' \"$DYNA_PI_CODEX_AUTH\" > \"$CAPTURE_AUTH\"\n")
+
+	cmd := piCommandSubprocess(t, binDir,
+		"pi", "--",
+		"--provider=fixture-provider",
+		"--model=fixture-model",
+		"--models=fixture-provider/*:high",
+		"--thinking=xhigh",
+		"--api-key=fixture-only",
+		"--system-prompt=preserve=exactly",
+		"literal=value",
+	)
+	cmd.Env = setEnv(cmd.Env, "XDG_DATA_HOME", data)
+	cmd.Env = setEnv(cmd.Env, "CAPTURE_ARGS", filepath.Join(capture, "args"))
+	cmd.Env = setEnv(cmd.Env, "CAPTURE_AUTH", filepath.Join(capture, "auth"))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pi subprocess: %v\n%s", err, output)
+	}
+
+	wantArgs := []string{
+		"--extension", filepath.Join(data, "dyna", "pi-extension", "dyna.ts"),
+		"--append-system-prompt", piOrchestrationPrompt,
+		"--no-skills",
+		"--provider", "fixture-provider",
+		"--model", "fixture-model",
+		"--models", "fixture-provider/*:high",
+		"--thinking", "xhigh",
+		"--api-key", "fixture-only",
+		"--system-prompt=preserve=exactly",
+		"literal=value",
+	}
+	if got := readNULArgs(t, filepath.Join(capture, "args")); strings.Join(got, "\x00") != strings.Join(wantArgs, "\x00") {
+		t.Fatalf("pi args = %#v, want %#v", got, wantArgs)
+	}
+	if got := strings.TrimSpace(readFile(t, filepath.Join(capture, "auth"))); got != "0" {
+		t.Fatalf("DYNA_PI_CODEX_AUTH = %q, want 0", got)
 	}
 }
 
@@ -121,18 +164,10 @@ func TestPiCmdExplicitAPIKeyDisablesCodexAuthReuse(t *testing.T) {
 	binDir := t.TempDir()
 	capture := filepath.Join(t.TempDir(), "auth")
 	writeExecutable(t, filepath.Join(binDir, "pi"), "#!/bin/sh\nprintf '%s\\n' \"$DYNA_PI_CODEX_AUTH\" > \"$CAPTURE_AUTH\"\n")
-	t.Setenv("PATH", binDir)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("CAPTURE_AUTH", capture)
-	t.Setenv("DYNA_NO_AUTO_UPDATE", "1")
-
-	cmd := newRootCommand()
-	cmd.SilenceErrors = true
-	cmd.SilenceUsage = true
-	cmd.SetArgs([]string{"pi", "--api-key", "fixture-only"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatal(err)
+	cmd := piCommandSubprocess(t, binDir, "pi", "--api-key", "fixture-only")
+	cmd.Env = setEnv(cmd.Env, "CAPTURE_AUTH", capture)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("pi subprocess: %v\n%s", err, output)
 	}
 	if got := strings.TrimSpace(readFile(t, capture)); got != "0" {
 		t.Fatalf("DYNA_PI_CODEX_AUTH = %q, want 0", got)
@@ -146,7 +181,13 @@ func TestPiCommandSubprocess(t *testing.T) {
 	cmd := newRootCommand()
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
-	cmd.SetArgs([]string{"pi"})
+	args := []string{"pi"}
+	if raw := os.Getenv("GO_PI_COMMAND_ARGS"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &args); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
 		os.Exit(commandExitCode(err))
 	}
@@ -217,7 +258,10 @@ func TestPiExtensionReusesCodexAuthWithoutRegisteringProvider(t *testing.T) {
 		`join(home, "auth.json")`,
 		`auth.auth_mode !== "chatgpt"`,
 		`ctx.modelRegistry.authStorage.setRuntimeApiKey(CODEX_PROVIDER, access.token)`,
+		`ctx.modelRegistry.authStorage.removeRuntimeApiKey(CODEX_PROVIDER)`,
 		`CODEX_REFRESH_MARGIN_MS`,
+		`process.stderr.write`,
+		`process.exitCode = 1`,
 		`pi.on("input"`,
 		`return { action: "handled" as const }`,
 	} {
@@ -346,6 +390,259 @@ export default function (pi: any) {
 	}
 }
 
+func TestPiExtensionPrintModeFailsForUnusableCodexAuth(t *testing.T) {
+	piPath, err := exec.LookPath("pi")
+	if err != nil {
+		t.Skip("pi is not installed")
+	}
+	tests := []struct {
+		name       string
+		auth       string
+		secret     string
+		wantStderr string
+	}{
+		{
+			name:       "missing",
+			wantStderr: "Codex ChatGPT credentials are not available in its supported file store. Run `codex login` and retry.",
+		},
+		{
+			name:       "invalid",
+			auth:       `{"auth_mode":"chatgpt","tokens":{"access_token":"fixture-secret-not-jwt"}}`,
+			secret:     "fixture-secret-not-jwt",
+			wantStderr: "Codex uses an unsupported access-token format. Update Codex or run `codex login` and retry.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			data := t.TempDir()
+			codexHome := filepath.Join(home, ".codex-fixture")
+			if err := os.MkdirAll(codexHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tt.auth != "" {
+				if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(tt.auth), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			codexHomeJSON, err := json.Marshal(codexHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binDir := t.TempDir()
+			fakeCodex := filepath.Join(binDir, "codex")
+			writeExecutable(t, fakeCodex, fmt.Sprintf(`#!/bin/sh
+while IFS= read -r line; do
+	case "$line" in
+		*'"method":"initialize"'*) printf '%%s\n' '{"id":1,"result":{"codexHome":%s,"userAgent":"fixture"}}' ;;
+		*'"method":"account/read"'*) printf '%%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"},"requiresOpenaiAuth":true}}' ;;
+	esac
+done
+`, codexHomeJSON))
+
+			t.Setenv("XDG_DATA_HOME", data)
+			extensionPath, err := provisionPiExtension()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, piPath,
+				"--offline", "--no-extensions",
+				"--extension", extensionPath,
+				"--provider", "openai-codex",
+				"--model", "gpt-5.6-terra",
+				"-p", "probe unusable auth",
+			)
+			cmd.Env = os.Environ()
+			for key, value := range map[string]string{
+				"HOME":                home,
+				"PI_CODING_AGENT_DIR": filepath.Join(home, ".pi-fixture"),
+				"PI_OFFLINE":          "1",
+				"DYNA_SESSION":        "fixture-session",
+				"DYNA_BIN":            "/bin/false",
+				"DYNA_PI_CODEX_AUTH":  "1",
+				"DYNA_CODEX_BIN":      fakeCodex,
+			} {
+				cmd.Env = setEnv(cmd.Env, key, value)
+			}
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err = cmd.Run()
+			if ctx.Err() != nil {
+				t.Fatalf("offline pi unusable-auth contract timed out: %v", ctx.Err())
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
+				t.Fatalf("offline pi unusable-auth exit = %v, stderr=%q", err, stderr.String())
+			}
+			if got := strings.TrimSpace(stderr.String()); got != tt.wantStderr {
+				t.Fatalf("offline pi unusable-auth stderr = %q, want %q", got, tt.wantStderr)
+			}
+			if strings.Contains(stdout.String(), "credential") || strings.Contains(stdout.String(), "codex login") {
+				t.Fatalf("offline pi duplicated its auth failure on stdout: %q", stdout.String())
+			}
+			if tt.secret != "" && (strings.Contains(stdout.String(), tt.secret) || strings.Contains(stderr.String(), tt.secret)) {
+				t.Fatal("offline pi exposed its invalid fixture credential")
+			}
+		})
+	}
+}
+
+func TestPiExtensionDropsCodexAuthAfterInFlightRefreshAndModelSwitch(t *testing.T) {
+	piPath, err := exec.LookPath("pi")
+	if err != nil {
+		t.Skip("pi is not installed")
+	}
+	home := t.TempDir()
+	data := t.TempDir()
+	codexHome := filepath.Join(home, ".codex-fixture")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"exp":                         time.Now().Add(605 * time.Second).Unix(),
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "fixture-account"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encode := base64.RawURLEncoding.EncodeToString
+	fixtureToken := encode([]byte(`{"alg":"none","typ":"JWT"}`)) + "." + encode(payload) + ".fixture"
+	auth, err := json.Marshal(map[string]any{
+		"auth_mode": "chatgpt",
+		"tokens":    map[string]any{"access_token": fixtureToken},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	fakeCodex := filepath.Join(binDir, "codex")
+	refreshStarted := filepath.Join(t.TempDir(), "refresh-started")
+	refreshFinished := filepath.Join(t.TempDir(), "refresh-finished")
+	codexHomeJSON, err := json.Marshal(codexHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, fakeCodex, fmt.Sprintf(`#!/bin/sh
+while IFS= read -r line; do
+	case "$line" in
+		*'"method":"initialize"'*) printf '%%s\n' '{"id":1,"result":{"codexHome":%s,"userAgent":"fixture"}}' ;;
+		*'"refreshToken":true'*)
+			: > "$FAKE_CODEX_REFRESH_STARTED"
+			sleep 1
+			: > "$FAKE_CODEX_REFRESH_FINISHED"
+			printf '%%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"},"requiresOpenaiAuth":true}}'
+			;;
+		*'"method":"account/read"'*) printf '%%s\n' '{"id":2,"result":{"account":{"type":"chatgpt"},"requiresOpenaiAuth":true}}' ;;
+	esac
+done
+`, codexHomeJSON))
+
+	t.Setenv("XDG_DATA_HOME", data)
+	extensionPath, err := provisionPiExtension()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeMarker := filepath.Join(t.TempDir(), "probe")
+	probePath := filepath.Join(t.TempDir(), "probe.ts")
+	probeSource := `import { readFile, writeFile } from "node:fs/promises";
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitFor(path: string): Promise<void> {
+	const deadline = Date.now() + 10000;
+	while (Date.now() < deadline) {
+		try {
+			await readFile(path);
+			return;
+		} catch {
+			await delay(25);
+		}
+	}
+	throw new Error("timed out waiting for fixture refresh");
+}
+
+export default function (pi: any) {
+	pi.registerProvider("fixture-provider", {
+		baseUrl: "http://127.0.0.1:1/v1",
+		apiKey: "fixture-only",
+		api: "openai-completions",
+		models: [{
+			id: "fixture-model",
+			name: "Fixture Model",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1024,
+			maxTokens: 128,
+		}],
+	});
+	pi.on("input", async (_event: unknown, ctx: any) => {
+		try {
+			await waitFor(process.env.FAKE_CODEX_REFRESH_STARTED);
+			const model = ctx.modelRegistry.find("fixture-provider", "fixture-model");
+			if (!model || !await pi.setModel(model)) throw new Error("fixture model was not selectable");
+			await waitFor(process.env.FAKE_CODEX_REFRESH_FINISHED);
+			await delay(500);
+			const token = await ctx.modelRegistry.authStorage.getApiKey("openai-codex", { includeFallback: false });
+			await writeFile(process.env.AUTH_PROBE_MARKER, token === undefined ? "ok" : "stale");
+		} catch (error) {
+			await writeFile(process.env.AUTH_PROBE_MARKER, error instanceof Error ? error.message : String(error));
+		}
+		return { action: "handled" };
+	});
+}
+`
+	if err := os.WriteFile(probePath, []byte(probeSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, piPath,
+		"--offline", "--no-extensions",
+		"--extension", extensionPath,
+		"--extension", probePath,
+		"--provider", "openai-codex",
+		"--model", "gpt-5.6-terra",
+		"-p", "probe auth lifecycle",
+	)
+	cmd.Env = os.Environ()
+	for key, value := range map[string]string{
+		"HOME":                        home,
+		"PI_CODING_AGENT_DIR":         filepath.Join(home, ".pi-fixture"),
+		"PI_OFFLINE":                  "1",
+		"DYNA_SESSION":                "fixture-session",
+		"DYNA_BIN":                    "/bin/false",
+		"DYNA_PI_CODEX_AUTH":          "1",
+		"DYNA_CODEX_BIN":              fakeCodex,
+		"FAKE_CODEX_REFRESH_STARTED":  refreshStarted,
+		"FAKE_CODEX_REFRESH_FINISHED": refreshFinished,
+		"AUTH_PROBE_MARKER":           probeMarker,
+	} {
+		cmd.Env = setEnv(cmd.Env, key, value)
+	}
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("offline pi auth lifecycle contract timed out: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("offline pi auth lifecycle contract: %v\n%s", err, output)
+	}
+	if bytes.Contains(output, []byte(fixtureToken)) {
+		t.Fatal("offline pi auth lifecycle contract exposed its fixture token")
+	}
+	if got := strings.TrimSpace(readFile(t, probeMarker)); got != "ok" {
+		t.Fatalf("runtime auth cleanup probe = %q, want ok", got)
+	}
+}
+
 func TestRunsListSessionFilter(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("DYNA_RUN_ID", "wf_session-one")
@@ -406,11 +703,20 @@ func writeExecutable(t *testing.T, path, contents string) {
 	}
 }
 
-func piCommandSubprocess(t *testing.T, binDir string) *exec.Cmd {
+func piCommandSubprocess(t *testing.T, binDir string, args ...string) *exec.Cmd {
 	t.Helper()
+	rawArgs := ""
+	if len(args) > 0 {
+		encoded, err := json.Marshal(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rawArgs = string(encoded)
+	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestPiCommandSubprocess$")
 	cmd.Env = append(os.Environ(),
 		"GO_PI_COMMAND_HELPER=1",
+		"GO_PI_COMMAND_ARGS="+rawArgs,
 		"PATH="+binDir,
 		"HOME="+t.TempDir(),
 		"XDG_DATA_HOME="+t.TempDir(),

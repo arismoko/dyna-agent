@@ -37,6 +37,18 @@ function codexAuthMessage(error: unknown): string {
 	return "Codex authentication could not be reused. Run `codex login` and retry.";
 }
 
+function reportCodexAuthFailure(ctx: ExtensionContext, error: unknown): void {
+	const message = codexAuthMessage(error);
+	const repeated = message === codexAuthWarning;
+	codexAuthWarning = message;
+	if (ctx.mode === "print" || ctx.mode === "json") {
+		if (!repeated) process.stderr.write(`${message}\n`);
+		process.exitCode = 1;
+	} else if (!repeated) {
+		ctx.ui.notify(message, "error");
+	}
+}
+
 function readCodexRPCLine(line: string): Record<string, unknown> | undefined {
 	try {
 		const value: unknown = JSON.parse(line);
@@ -188,15 +200,19 @@ async function obtainCodexAccess(): Promise<CodexAccess> {
 }
 
 function scheduleCodexRefresh(ctx: ExtensionContext, expiresAt: number, retryDelay?: number): void {
+	if (ctx.model?.provider !== CODEX_PROVIDER) {
+		clearCodexAccess(ctx);
+		return;
+	}
 	if (codexRefreshTimer) clearTimeout(codexRefreshTimer);
 	const delay = retryDelay ?? Math.max(1000, expiresAt - Date.now() - CODEX_REFRESH_MARGIN_MS);
 	codexRefreshTimer = setTimeout(() => {
 		void installCodexAccess(ctx).catch((error) => {
-			const message = codexAuthMessage(error);
-			if (message !== codexAuthWarning) {
-				codexAuthWarning = message;
-				ctx.ui.notify(message, "error");
+			if (ctx.model?.provider !== CODEX_PROVIDER) {
+				clearCodexAccess(ctx);
+				return;
 			}
+			reportCodexAuthFailure(ctx, error);
 			if (Date.now() >= expiresAt && !ctx.isIdle()) ctx.abort();
 			scheduleCodexRefresh(ctx, expiresAt, CODEX_REFRESH_RETRY_MS);
 		});
@@ -204,13 +220,28 @@ function scheduleCodexRefresh(ctx: ExtensionContext, expiresAt: number, retryDel
 	codexRefreshTimer.unref?.();
 }
 
+function clearCodexAccess(ctx: ExtensionContext): void {
+	if (codexRefreshTimer) clearTimeout(codexRefreshTimer);
+	codexRefreshTimer = undefined;
+	ctx.modelRegistry.authStorage.removeRuntimeApiKey(CODEX_PROVIDER);
+	codexAuthWarning = "";
+}
+
 async function installCodexAccess(ctx: ExtensionContext): Promise<void> {
+	if (ctx.model?.provider !== CODEX_PROVIDER) {
+		clearCodexAccess(ctx);
+		return;
+	}
 	if (!codexSync) {
 		codexSync = obtainCodexAccess().finally(() => {
 			codexSync = undefined;
 		});
 	}
 	const access = await codexSync;
+	if (ctx.model?.provider !== CODEX_PROVIDER) {
+		clearCodexAccess(ctx);
+		return;
+	}
 	ctx.modelRegistry.authStorage.setRuntimeApiKey(CODEX_PROVIDER, access.token);
 	codexAuthWarning = "";
 	scheduleCodexRefresh(ctx, access.expiresAt);
@@ -598,21 +629,21 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await installCodexAccess(ctx);
 		} catch (error) {
-			const message = codexAuthMessage(error);
-			codexAuthWarning = message;
-			ctx.ui.notify(message, "error");
+			reportCodexAuthFailure(ctx, error);
 			return { action: "handled" as const };
 		}
 	});
 
-	pi.on("model_select", async (_event, ctx) => {
-		if (!CODEX_AUTH_ENABLED || ctx.model?.provider !== CODEX_PROVIDER) return;
+	pi.on("model_select", async (event, ctx) => {
+		if (!CODEX_AUTH_ENABLED) return;
+		if (event.model.provider !== CODEX_PROVIDER) {
+			clearCodexAccess(ctx);
+			return;
+		}
 		try {
 			await installCodexAccess(ctx);
 		} catch (error) {
-			const message = codexAuthMessage(error);
-			codexAuthWarning = message;
-			ctx.ui.notify(message, "error");
+			reportCodexAuthFailure(ctx, error);
 		}
 	});
 
@@ -663,9 +694,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				await installCodexAccess(ctx);
 			} catch (error) {
-				const message = codexAuthMessage(error);
-				codexAuthWarning = message;
-				ctx.ui.notify(message, "error");
+				reportCodexAuthFailure(ctx, error);
 			}
 		}
 		try {

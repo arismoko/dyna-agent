@@ -57,6 +57,7 @@ func runPi(c *cobra.Command, args []string) error {
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
+	args = piNormalizeArgs(args)
 	piArgs := []string{"--extension", extPath, "--append-system-prompt", piOrchestrationPrompt, "--no-skills"}
 	piArgs = append(piArgs, piDefaultArgs(args)...)
 	piArgs = append(piArgs, args...)
@@ -72,6 +73,22 @@ func runPi(c *cobra.Command, args []string) error {
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return runPiProcess(cmd)
+}
+
+func piNormalizeArgs(args []string) []string {
+	normalized := make([]string, 0, len(args))
+	for _, arg := range args {
+		name, value, equals := strings.Cut(arg, "=")
+		if equals {
+			switch name {
+			case "--provider", "--model", "--models", "--thinking", "--api-key":
+				normalized = append(normalized, name, value)
+				continue
+			}
+		}
+		normalized = append(normalized, arg)
+	}
+	return normalized
 }
 
 func piDefaultArgs(args []string) []string {
