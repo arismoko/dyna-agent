@@ -4,8 +4,8 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Type } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type TUI } from "@earendil-works/pi-tui";
 
 const SESSION = process.env.DYNA_SESSION ?? "";
 const DYNA = process.env.DYNA_BIN || "dyna";
@@ -16,7 +16,9 @@ const MAX_ERROR_DETAIL = 16 * 1024;
 const DETACHED_REGISTRATION_GRACE_MS = 15 * 1000;
 const DETACHED_REGISTRATION_POLL_MS = 300;
 const MAX_EVENT_READ = 4 * 1024 * 1024;
-const MAX_JOURNAL_TAIL = 256 * 1024;
+const MAX_JOURNAL_READ = 4 * 1024 * 1024;
+const MAX_OBSERVER_EVENTS = 2000;
+const MAX_OBSERVER_JOURNAL_ENTRIES = 2000;
 const LIST_POLL_TICKS = 5;
 const ROOT_AGENT = "dyna-orchestrator";
 const ACTIVATE_ALL_TOOLS = process.env.DYNA_PI_ACTIVATE_ALL_TOOLS === "1";
@@ -266,12 +268,19 @@ type Run = {
 
 type RunEvent = {
 	t: string;
+	ts?: number;
 	id?: number;
 	label?: string;
 	profile?: string;
 	phase?: string;
 	title?: string;
 	status?: string;
+	msg?: string;
+	kind?: string;
+	preview?: string;
+	error?: string;
+	durMs?: number;
+	cached?: boolean;
 };
 
 type Agent = {
@@ -280,11 +289,19 @@ type Agent = {
 	profile: string;
 	phase: string;
 	status: string;
+	journalKind: string;
+	journalPreview: string;
+	journalTS: number;
+	durMs: number;
+	error: string;
+	cached: boolean;
 };
 
 type Detail = {
 	phase: string;
 	agents: Agent[];
+	events: RunEvent[];
+	latestTS: number;
 };
 
 type EventRead = {
@@ -293,6 +310,25 @@ type EventRead = {
 	reset: boolean;
 	complete: boolean;
 };
+
+type AgentJournalEntry = {
+	ts: number;
+	kind: string;
+	message: string;
+	next: string;
+	source: string;
+	phase: string;
+	malformed: boolean;
+};
+
+type AgentJournalRead = {
+	entries: AgentJournalEntry[];
+	next: number;
+	reset: boolean;
+	missing: boolean;
+};
+
+type ObserverFocus = "runs" | "agents" | "journal";
 
 type CLIResult = {
 	ok: boolean;
@@ -450,7 +486,7 @@ function checkedString(value: string | undefined, name: string, maxBytes: number
 function isRun(value: unknown): value is Run {
 	if (typeof value !== "object" || value === null) return false;
 	const run = value as Record<string, unknown>;
-	if (typeof run.id !== "string" || !run.id.startsWith("wf_") || run.id.length === 3 || /[\\/]/.test(run.id) || run.id.includes("\0")) return false;
+	if (typeof run.id !== "string" || !/^wf_[A-Za-z0-9_-]+$/.test(run.id) || run.id.length > 128) return false;
 	if (typeof run.name !== "string" || typeof run.status !== "string" || !["running", "ok", "error", "canceled"].includes(run.status) || typeof run.startedAt !== "string") return false;
 	if (run.session !== undefined && typeof run.session !== "string") return false;
 	if (run.endedAt !== undefined && typeof run.endedAt !== "string") return false;
@@ -462,39 +498,73 @@ function isRunEvent(value: unknown): value is RunEvent {
 	const event = value as Record<string, unknown>;
 	if (typeof event.t !== "string") return false;
 	if (event.id !== undefined && (typeof event.id !== "number" || !Number.isInteger(event.id) || event.id <= 0)) return false;
-	for (const key of ["label", "profile", "phase", "title", "status"]) {
+	if (event.ts !== undefined && (typeof event.ts !== "number" || !Number.isFinite(event.ts))) return false;
+	if (event.durMs !== undefined && (typeof event.durMs !== "number" || !Number.isFinite(event.durMs))) return false;
+	if (event.cached !== undefined && typeof event.cached !== "boolean") return false;
+	for (const key of ["label", "profile", "phase", "title", "status", "msg", "kind", "preview", "error"]) {
 		if (event[key] !== undefined && typeof event[key] !== "string") return false;
 	}
 	return true;
+}
+
+function blankDetail(): Detail {
+	return { phase: "", agents: [], events: [], latestTS: 0 };
 }
 
 function applyEvents(detail: Detail, events: RunEvent[]): void {
 	const agents = new Map(detail.agents.map((agent) => [agent.id, agent]));
 
 	for (const event of events) {
+		if (event.ts && event.ts > detail.latestTS) detail.latestTS = event.ts;
 		if (event.t === "phase" && event.title) {
 			detail.phase = event.title;
 			continue;
 		}
 		if (event.t === "agent_start" && event.id !== undefined) {
 			if (event.phase) detail.phase = event.phase;
-			agents.set(event.id, {
-				id: event.id,
-				label: event.label || `agent ${event.id}`,
-				profile: event.profile || "",
-				phase: event.phase || detail.phase,
-				status: "queued",
-			});
+			const existing = agents.get(event.id);
+			if (existing) {
+				existing.label = event.label || existing.label;
+				existing.profile = event.profile || existing.profile;
+				existing.phase = event.phase || existing.phase || detail.phase;
+				existing.status = "queued";
+			} else {
+				agents.set(event.id, {
+					id: event.id,
+					label: event.label || `agent ${event.id}`,
+					profile: event.profile || "",
+					phase: event.phase || detail.phase,
+					status: "queued",
+					journalKind: "",
+					journalPreview: "",
+					journalTS: 0,
+					durMs: 0,
+					error: "",
+					cached: false,
+				});
+			}
 			continue;
 		}
 		if (event.id === undefined) continue;
 		const agent = agents.get(event.id);
 		if (!agent) continue;
 		if (event.t === "agent_run") agent.status = "running";
-		if (event.t === "agent_end") agent.status = event.status || "error";
+		if (event.t === "agent_journal") {
+			agent.journalKind = event.kind || agent.journalKind;
+			agent.journalPreview = event.preview || agent.journalPreview;
+			agent.journalTS = event.ts || agent.journalTS;
+		}
+		if (event.t === "agent_end") {
+			agent.status = event.status || "error";
+			agent.durMs = event.durMs || 0;
+			agent.error = event.error || "";
+			agent.cached = event.cached || false;
+			if (event.preview) agent.journalPreview = event.preview;
+		}
 	}
 
 	detail.agents = [...agents.values()];
+	detail.events = [...detail.events, ...events].slice(-MAX_OBSERVER_EVENTS);
 }
 
 function runsDir(): string {
@@ -503,6 +573,7 @@ function runsDir(): string {
 }
 
 async function readEvents(id: string, offset: number): Promise<EventRead> {
+	checkRunID(id);
 	const handle = await open(join(runsDir(), id, "events.jsonl"), "r");
 	try {
 		const stat = await handle.stat();
@@ -533,52 +604,87 @@ async function readEvents(id: string, offset: number): Promise<EventRead> {
 	}
 }
 
-async function journalTail(id: string, agent?: number): Promise<string[]> {
-	const path = agent === undefined
-		? join(runsDir(), id, "journal.jsonl")
-		: join(runsDir(), id, "agents", String(agent), "journal.jsonl");
+function displayValue(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (value === undefined || value === null) return "";
 	try {
-		const handle = await open(path, "r");
-		try {
-			const stat = await handle.stat();
-			if (!stat.isFile() || stat.size === 0) return [];
-			const start = Math.max(0, stat.size - MAX_JOURNAL_TAIL);
-			const buffer = Buffer.alloc(stat.size - start);
-			const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-			let tail = buffer.subarray(0, bytesRead);
-			if (start > 0) {
-				const firstNewline = tail.indexOf(0x0a);
-				if (firstNewline < 0) return [];
-				tail = tail.subarray(firstNewline + 1);
-			}
-			return tail.toString("utf8").trimEnd().split("\n").filter(Boolean).slice(-10).map(formatJournalLine);
-		} finally {
-			await handle.close();
-		}
+		return JSON.stringify(value) || String(value);
 	} catch {
-		return [];
+		return String(value);
 	}
 }
 
-function formatJournalLine(line: string): string {
+function safeText(value: unknown, fallback = ""): string {
+	const text = displayValue(value)
+		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+		.replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return text || fallback;
+}
+
+function parseAgentJournalLine(line: string): AgentJournalEntry {
 	try {
-		const entry = JSON.parse(line) as Record<string, unknown>;
-		const label = typeof entry.label === "string" ? `${entry.label}: ` : "";
-		const kind = typeof entry.kind === "string" ? `[${entry.kind}] ` : "";
-		const value = entry.message ?? entry.error ?? entry.result;
-		const text = typeof value === "string" ? value : JSON.stringify(value);
-		return `${label}${kind}${text || "completed"}`.replace(/\s+/g, " ");
+		const value: unknown = JSON.parse(line);
+		if (typeof value !== "object" || value === null) throw new Error("not an object");
+		const entry = value as Record<string, unknown>;
+		const message = safeText(entry.message ?? entry.error ?? entry.result ?? value, "(empty entry)");
+		return {
+			ts: typeof entry.ts === "number" && Number.isFinite(entry.ts) ? entry.ts : 0,
+			kind: safeText(entry.kind, "note"),
+			message,
+			next: safeText(entry.next),
+			source: safeText(entry.source),
+			phase: safeText(entry.phase),
+			malformed: false,
+		};
 	} catch {
-		return line.replace(/\s+/g, " ");
+		return { ts: 0, kind: "raw", message: safeText(line, "(malformed journal record)"), next: "", source: "", phase: "", malformed: true };
+	}
+}
+
+async function readAgentJournal(id: string, agentID: number, offset: number): Promise<AgentJournalRead> {
+	checkRunID(id);
+	if (!Number.isInteger(agentID) || agentID <= 0) throw new Error("invalid Dyna agent ID");
+	const path = join(runsDir(), id, "agents", String(agentID), "journal.jsonl");
+	let handle: Awaited<ReturnType<typeof open>>;
+	try {
+		handle = await open(path, "r");
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+			return { entries: [], next: offset, reset: false, missing: true };
+		}
+		throw error;
+	}
+	try {
+		const stat = await handle.stat();
+		if (!stat.isFile()) throw new Error("dyna agent journal path is not a regular file");
+		const reset = offset < 0 || offset > stat.size;
+		if (reset) offset = 0;
+		const length = Math.min(MAX_JOURNAL_READ, stat.size - offset);
+		if (length <= 0) return { entries: [], next: offset, reset, missing: false };
+
+		const buffer = Buffer.alloc(length);
+		const { bytesRead } = await handle.read(buffer, 0, length, offset);
+		const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1);
+		if (lastNewline < 0) return { entries: [], next: offset, reset, missing: false };
+		const entries = buffer.subarray(0, lastNewline).toString("utf8")
+			.split("\n")
+			.filter((line) => line.length > 0)
+			.map(parseAgentJournalLine);
+		return { entries, next: offset + lastNewline + 1, reset, missing: false };
+	} finally {
+		await handle.close();
 	}
 }
 
 function errorText(error: unknown): string {
 	if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-		return "dyna CLI not found on PATH";
+		return "file not found";
 	}
-	if (error instanceof Error) return error.message.split("\n")[0] || "unknown error";
-	return String(error);
+	if (error instanceof Error) return safeText(error.message.split("\n")[0], "unknown error");
+	return safeText(error, "unknown error");
 }
 
 function elapsed(run: Run): string {
@@ -598,6 +704,23 @@ function started(run: Run): string {
 	return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function journalTime(ts: number): string {
+	if (!Number.isFinite(ts) || ts <= 0) return "time unknown";
+	const date = new Date(ts);
+	if (!Number.isFinite(date.getTime())) return "time unknown";
+	return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function freshness(ts: number): string {
+	if (!Number.isFinite(ts) || ts <= 0) return "";
+	const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+	if (seconds < 5) return "now";
+	if (seconds < 60) return `${seconds}s ago`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m ago`;
+	return `${Math.floor(minutes / 60)}h ago`;
+}
+
 function statusGlyph(status: string): string {
 	switch (status) {
 		case "running": return "●";
@@ -608,155 +731,517 @@ function statusGlyph(status: string): string {
 	}
 }
 
+function statusColor(status: string): "success" | "error" | "warning" | "dim" {
+	if (status === "ok") return "success";
+	if (status === "error") return "error";
+	if (status === "running" || status === "queued") return "warning";
+	return "dim";
+}
+
+function padLine(line: string, width: number): string {
+	const clipped = truncateToWidth(line, Math.max(0, width), "");
+	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
+}
+
+function selectionWindow(selected: number, total: number, height: number): number {
+	if (height <= 0 || total <= height) return 0;
+	return Math.max(0, Math.min(selected - Math.floor(height / 2), total - height));
+}
+
 class DynaRunsOverlay implements Component {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private runs: Run[] = [];
-	private selected = 0;
-	private detail: Detail | undefined;
-	private journal: string[] = [];
-	private journalLabel = "journal";
-	private expanded = true;
+	private selectedRunID = "";
+	private selectedAgentID: number | undefined;
+	private focus: ObserverFocus = "runs";
+	private detail = blankDetail();
+	private journal: AgentJournalEntry[] = [];
 	private loading = true;
 	private refreshing = false;
-	private error = "";
+	private refreshQueued = false;
+	private forceListQueued = false;
+	private disposed = false;
+	private abortController: AbortController | undefined;
+	private listError = "";
+	private eventError = "";
+	private journalError = "";
 	private listPolls = 0;
 	private detailRunID = "";
 	private eventOffset = 0;
 	private eventsComplete = false;
+	private journalOffset = 0;
+	private journalLoaded = false;
+	private journalMissing = false;
+	private journalFollow = true;
+	private journalScroll = 0;
+	private journalUnseen = 0;
+	private selectionGeneration = 0;
+	private lastRunsPage = 5;
+	private lastAgentsPage = 5;
+	private lastJournalViewport = 5;
+	private lastJournalLineCount = 0;
 
-	constructor(private tui: TUI, private theme: Theme, private closeOverlay: () => void) {
-		void this.refresh();
-		this.timer = setInterval(() => void this.refresh(), 1000);
+	constructor(
+		private tui: TUI,
+		private theme: Theme,
+		private keys: KeybindingsManager,
+		private closeOverlay: () => void,
+	) {
+		this.requestRefresh(true);
+		this.timer = setInterval(() => this.requestRefresh(), 1000);
 	}
 
-	private async refresh(): Promise<void> {
-		if (this.refreshing) return;
+	private requestRefresh(forceList = false): void {
+		if (this.disposed) return;
+		if (forceList) this.listPolls = 0;
+		if (this.refreshing) {
+			this.refreshQueued = true;
+			this.forceListQueued = this.forceListQueued || forceList;
+			return;
+		}
+		void this.refresh(forceList);
+	}
+
+	private async refresh(forceList: boolean): Promise<void> {
 		this.refreshing = true;
-		const selectedID = this.runs[this.selected]?.id;
+		const controller = new AbortController();
+		this.abortController = controller;
 		try {
-			if (this.listPolls === 0) {
-				this.runs = await listRuns();
-				this.listPolls = LIST_POLL_TICKS - 1;
+			if (forceList || this.listPolls === 0) {
+				try {
+					const runs = await listRuns(controller.signal);
+					if (this.disposed) return;
+					this.applyRunList(runs);
+					this.listError = "";
+					this.listPolls = LIST_POLL_TICKS - 1;
+				} catch (error) {
+					if (this.disposed || controller.signal.aborted) return;
+					this.listError = errorText(error);
+				}
 			} else {
 				this.listPolls--;
 			}
-			this.error = "";
-			if (selectedID) {
-				const index = this.runs.findIndex((run) => run.id === selectedID);
-				if (index >= 0) this.selected = index;
-			}
-			this.selected = Math.max(0, Math.min(this.selected, this.runs.length - 1));
-			const run = this.runs[this.selected];
-			if (run) {
-				if (run.id !== this.detailRunID) {
-					this.detailRunID = run.id;
-					this.eventOffset = 0;
-					this.eventsComplete = false;
-					this.detail = { phase: "", agents: [] };
-				}
-				let detail = this.detail;
-				if (!detail) {
-					detail = { phase: "", agents: [] };
-					this.detail = detail;
-				}
-				if (!this.eventsComplete) {
+
+			const run = this.selectedRun();
+			if (!run) return;
+			if (run.id !== this.detailRunID) this.activateRun(run.id);
+			const eventGeneration = this.selectionGeneration;
+			if (!this.eventsComplete) {
+				try {
 					const batch = await readEvents(run.id, this.eventOffset);
+					if (this.disposed || eventGeneration !== this.selectionGeneration || run.id !== this.selectedRunID) return;
 					if (batch.reset) {
-						detail = { phase: "", agents: [] };
-						this.detail = detail;
+						this.detail = blankDetail();
+						this.eventOffset = 0;
 					}
-					applyEvents(detail, batch.events);
+					applyEvents(this.detail, batch.events);
 					this.eventOffset = batch.next;
 					this.eventsComplete = run.status !== "running" && batch.complete;
+					this.eventError = "";
+					this.reconcileAgentSelection();
+				} catch (error) {
+					if (this.disposed) return;
+					this.eventError = errorText(error);
 				}
-				const active = [...detail.agents].reverse().find((agent) => agent.status === "running");
-				this.journal = await journalTail(run.id, active?.id);
-				this.journalLabel = active ? `${active.label} journal` : "completion journal";
-			} else {
-				this.detailRunID = "";
-				this.eventOffset = 0;
-				this.eventsComplete = false;
-				this.detail = undefined;
-				this.journal = [];
 			}
-		} catch (error) {
-			this.error = errorText(error);
-			this.detailRunID = "";
-			this.eventOffset = 0;
-			this.eventsComplete = false;
-			this.detail = undefined;
-			this.journal = [];
+
+			const agentID = this.selectedAgentID;
+			const journalGeneration = this.selectionGeneration;
+			if (agentID !== undefined) {
+				try {
+					const batch = await readAgentJournal(run.id, agentID, this.journalOffset);
+					if (this.disposed || journalGeneration !== this.selectionGeneration || run.id !== this.selectedRunID || agentID !== this.selectedAgentID) return;
+					this.applyJournalRead(batch);
+					this.journalError = "";
+				} catch (error) {
+					if (this.disposed) return;
+					this.journalError = errorText(error);
+				}
+			}
 		} finally {
+			if (this.abortController === controller) this.abortController = undefined;
 			this.loading = false;
 			this.refreshing = false;
+			if (this.disposed) return;
+			const queued = this.refreshQueued;
+			const queuedForceList = this.forceListQueued;
+			this.refreshQueued = false;
+			this.forceListQueued = false;
 			this.tui.requestRender();
+			if (queued) this.requestRefresh(queuedForceList);
 		}
 	}
 
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || data === "q" || data === "Q") {
-			this.dispose();
-			this.closeOverlay();
+	private applyRunList(runs: Run[]): void {
+		this.runs = runs;
+		if (runs.length === 0) {
+			if (this.selectedRunID) this.activateRun("");
 			return;
 		}
-		if (matchesKey(data, "up") || data === "k") {
-			this.selected = Math.max(0, this.selected - 1);
-			void this.refresh();
-		} else if (matchesKey(data, "down") || data === "j") {
-			this.selected = Math.max(0, Math.min(this.runs.length - 1, this.selected + 1));
-			void this.refresh();
-		} else if (matchesKey(data, "return")) {
-			this.expanded = !this.expanded;
+		if (!this.selectedRunID || !runs.some((run) => run.id === this.selectedRunID)) {
+			this.activateRun(runs[0]!.id);
+		}
+	}
+
+	private selectedRun(): Run | undefined {
+		return this.runs.find((run) => run.id === this.selectedRunID);
+	}
+
+	private selectedAgent(): Agent | undefined {
+		return this.detail.agents.find((agent) => agent.id === this.selectedAgentID);
+	}
+
+	private activateRun(id: string): void {
+		if (id === this.detailRunID && id === this.selectedRunID) return;
+		this.selectedRunID = id;
+		this.detailRunID = id;
+		this.detail = blankDetail();
+		this.eventOffset = 0;
+		this.eventsComplete = false;
+		this.selectedAgentID = undefined;
+		this.eventError = "";
+		this.resetJournal();
+		this.selectionGeneration++;
+	}
+
+	private reconcileAgentSelection(): void {
+		const current = this.selectedAgentID;
+		if (current !== undefined && this.detail.agents.some((agent) => agent.id === current)) return;
+		const next = this.detail.agents[0]?.id;
+		if (next !== current) {
+			this.selectedAgentID = next;
+			this.resetJournal();
+			this.selectionGeneration++;
+		}
+	}
+
+	private resetJournal(): void {
+		this.journal = [];
+		this.journalOffset = 0;
+		this.journalLoaded = false;
+		this.journalMissing = false;
+		this.journalFollow = true;
+		this.journalScroll = 0;
+		this.journalUnseen = 0;
+		this.journalError = "";
+	}
+
+	private applyJournalRead(batch: AgentJournalRead): void {
+		if (batch.reset) this.resetJournal();
+		this.journalLoaded = true;
+		this.journalMissing = batch.missing;
+		this.journalOffset = batch.next;
+		if (batch.entries.length === 0) return;
+		this.journal = [...this.journal, ...batch.entries].slice(-MAX_OBSERVER_JOURNAL_ENTRIES);
+		this.journalMissing = false;
+		if (this.journalFollow) {
+			this.journalUnseen = 0;
+		} else {
+			this.journalUnseen += batch.entries.length;
+		}
+	}
+
+	private moveRun(delta: number): void {
+		if (this.runs.length === 0) return;
+		const current = Math.max(0, this.runs.findIndex((run) => run.id === this.selectedRunID));
+		const next = Math.max(0, Math.min(this.runs.length - 1, current + delta));
+		if (next === current) return;
+		this.activateRun(this.runs[next]!.id);
+		this.requestRefresh();
+	}
+
+	private moveAgent(delta: number): void {
+		if (this.detail.agents.length === 0) return;
+		const current = Math.max(0, this.detail.agents.findIndex((agent) => agent.id === this.selectedAgentID));
+		const next = Math.max(0, Math.min(this.detail.agents.length - 1, current + delta));
+		if (next === current) return;
+		this.selectedAgentID = this.detail.agents[next]!.id;
+		this.resetJournal();
+		this.selectionGeneration++;
+		this.requestRefresh();
+	}
+
+	private close(): void {
+		this.dispose();
+		this.closeOverlay();
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+			this.close();
+			return;
+		}
+		if (this.keys.matches(data, "tui.select.cancel")) {
+			if (this.focus === "journal") this.focus = "agents";
+			else if (this.focus === "agents") this.focus = "runs";
+			else {
+				this.close();
+				return;
+			}
+			this.tui.requestRender();
+			return;
+		}
+		if (data === "r" || data === "R") {
+			this.requestRefresh(true);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "tab")) {
+			this.focus = this.focus === "runs" ? "agents" : this.focus === "agents" ? "journal" : "runs";
+			this.tui.requestRender();
+			return;
+		}
+		if (data === "h" || data === "H" || matchesKey(data, "left") || matchesKey(data, "backspace")) {
+			if (this.focus === "journal") this.focus = "agents";
+			else if (this.focus === "agents") this.focus = "runs";
+			this.tui.requestRender();
+			return;
+		}
+		if (this.keys.matches(data, "tui.select.confirm") || data === "l" || data === "L" || matchesKey(data, "right")) {
+			if (this.focus === "runs") this.focus = "agents";
+			else if (this.focus === "agents" && this.selectedAgentID !== undefined) this.focus = "journal";
+			this.tui.requestRender();
+			return;
+		}
+
+		const up = this.keys.matches(data, "tui.select.up") || data === "k";
+		const down = this.keys.matches(data, "tui.select.down") || data === "j";
+		const pageUp = this.keys.matches(data, "tui.select.pageUp");
+		const pageDown = this.keys.matches(data, "tui.select.pageDown");
+		if (this.focus === "runs") {
+			if (up) this.moveRun(-1);
+			else if (down) this.moveRun(1);
+			else if (pageUp) this.moveRun(-this.lastRunsPage);
+			else if (pageDown) this.moveRun(this.lastRunsPage);
+			else if (matchesKey(data, "home")) this.moveRun(-this.runs.length);
+			else if (matchesKey(data, "end")) this.moveRun(this.runs.length);
+		} else if (this.focus === "agents") {
+			if (up) this.moveAgent(-1);
+			else if (down) this.moveAgent(1);
+			else if (pageUp) this.moveAgent(-this.lastAgentsPage);
+			else if (pageDown) this.moveAgent(this.lastAgentsPage);
+			else if (matchesKey(data, "home")) this.moveAgent(-this.detail.agents.length);
+			else if (matchesKey(data, "end")) this.moveAgent(this.detail.agents.length);
+		} else {
+			if (data === "f" || data === "F") {
+				this.journalFollow = !this.journalFollow;
+				if (this.journalFollow) {
+					this.journalScroll = Math.max(0, this.lastJournalLineCount - this.lastJournalViewport);
+					this.journalUnseen = 0;
+				}
+			} else if (data === "g" || matchesKey(data, "home")) {
+				this.journalFollow = false;
+				this.journalScroll = 0;
+			} else if (data === "G" || matchesKey(data, "end")) {
+				this.journalFollow = true;
+				this.journalScroll = Math.max(0, this.lastJournalLineCount - this.lastJournalViewport);
+				this.journalUnseen = 0;
+			} else if (up) this.scrollJournal(-1);
+			else if (down) this.scrollJournal(1);
+			else if (pageUp) this.scrollJournal(-this.lastJournalViewport);
+			else if (pageDown) this.scrollJournal(this.lastJournalViewport);
 		}
 		this.tui.requestRender();
 	}
 
-	render(width: number): string[] {
-		const th = this.theme;
-		const lines = [
-			th.fg("accent", th.bold(`dyna runs — session ${SESSION}`)),
-			th.fg("dim", "↑/↓ or j/k select • Enter details • q/Esc close"),
-			"",
-		];
-		if (this.loading) lines.push(th.fg("dim", "Loading dyna runs…"));
-		else if (this.error) lines.push(th.fg("error", `dyna unavailable: ${this.error}`));
-		else if (this.runs.length === 0) {
-			lines.push("No workflow runs in this session yet.");
-			lines.push(th.fg("dim", "Ask the model to start one with the native Dyna tools."));
-		} else {
-			const start = Math.max(0, Math.min(this.selected - 4, this.runs.length - 9));
-			for (let i = start; i < Math.min(this.runs.length, start + 9); i++) {
-				const run = this.runs[i]!;
-				const marker = i === this.selected ? th.fg("accent", "›") : " ";
-				const color = run.status === "ok" ? "success" : run.status === "error" ? "error" : run.status === "running" ? "warning" : "dim";
-				lines.push(`${marker} ${th.fg(color, statusGlyph(run.status))} ${run.name}  ${th.fg("dim", `${run.id}  ${started(run)}  ${elapsed(run)}`)}`);
-			}
-			if (this.expanded) this.renderDetail(lines);
-		}
-		return lines.map((line) => truncateToWidth(line, width));
+	private scrollJournal(delta: number): void {
+		this.journalFollow = false;
+		const max = Math.max(0, this.lastJournalLineCount - this.lastJournalViewport);
+		this.journalScroll = Math.max(0, Math.min(max, this.journalScroll + delta));
 	}
 
-	private renderDetail(lines: string[]): void {
-		if (!this.detail) return;
-		const counts = { queued: 0, running: 0, ok: 0, error: 0 };
+	render(width: number): string[] {
+		const safeWidth = Math.max(1, width);
+		const rowBudget = Math.max(1, Math.floor(this.tui.terminal.rows * 0.9));
+		const header = this.renderHeader(safeWidth);
+		const footer = this.theme.fg("dim", this.focus === "journal"
+			? "j/k scroll · PgUp/PgDn page · g/G ends · f follow · h back · r refresh · q close"
+			: "j/k move · PgUp/PgDn page · Enter/l open · h back · Tab pane · r refresh · q close");
+		const warning = this.renderWarning(safeWidth);
+		const fixed = header.length + warning.length + 1;
+		const available = Math.max(1, rowBudget - fixed);
+		let body: string[];
+		if (safeWidth >= 72 && available >= 8) {
+			const topHeight = Math.max(3, Math.min(7, Math.floor(available * 0.42)));
+			const journalHeight = Math.max(1, available - topHeight);
+			const leftWidth = Math.max(24, Math.floor((safeWidth - 2) * 0.46));
+			const rightWidth = Math.max(1, safeWidth - 2 - leftWidth);
+			const runs = this.renderRunsPane(leftWidth, topHeight);
+			const agents = this.renderAgentsPane(rightWidth, topHeight);
+			const top: string[] = [];
+			for (let i = 0; i < topHeight; i++) {
+				top.push(`${padLine(runs[i] || "", leftWidth)}  ${padLine(agents[i] || "", rightWidth)}`);
+			}
+			body = [...top, ...this.renderJournalPane(safeWidth, journalHeight)];
+		} else if (this.focus === "runs") {
+			body = this.renderRunsPane(safeWidth, available);
+		} else if (this.focus === "agents") {
+			body = this.renderAgentsPane(safeWidth, available);
+		} else {
+			body = this.renderJournalPane(safeWidth, available);
+		}
+		return [...header, ...warning, ...body, footer]
+			.slice(0, rowBudget)
+			.map((line) => truncateToWidth(line, safeWidth, ""));
+	}
+
+	private renderHeader(width: number): string[] {
+		const th = this.theme;
+		const title = `${th.fg("accent", th.bold("dyna observer"))}${th.fg("dim", ` · session ${safeText(SESSION, "unknown")}`)}`;
+		const run = this.selectedRun();
+		if (!run) {
+			return [title, th.fg("dim", this.loading ? "Loading session runs…" : "No workflow run selected"), ""];
+		}
+		const status = `${th.fg(statusColor(run.status), statusGlyph(run.status))} ${safeText(run.status, "unknown")}`;
+		const phase = safeText(this.detail.phase, "waiting for phase");
+		const summary = `${status}  ${th.bold(safeText(run.name, run.id))}  ${th.fg("dim", `${safeText(run.id)} · ${elapsed(run)} · ${phase}`)}`;
+		const counts = { queued: 0, running: 0, completed: 0, error: 0 };
 		for (const agent of this.detail.agents) {
-			if (agent.status in counts) counts[agent.status as keyof typeof counts]++;
+			if (agent.status === "queued") counts.queued++;
+			else if (agent.status === "running") counts.running++;
+			else if (agent.status === "error") counts.error++;
+			else counts.completed++;
 		}
-		lines.push("");
-		lines.push(this.theme.fg("accent", this.theme.bold("selected run")));
-		lines.push(`phase: ${this.detail.phase || "(none)"}`);
-		lines.push(`agents: ${counts.running} running • ${counts.queued} queued • ${counts.ok} ok • ${counts.error} error`);
-		if (this.journal.length > 0) {
-			lines.push(this.theme.fg("dim", `${this.journalLabel}:`));
-			for (const entry of this.journal.slice(-5)) lines.push(`  ${entry}`);
+		const fresh = freshness(this.detail.latestTS);
+		const facts = [
+			th.fg("warning", `● ${counts.running} running`),
+			th.fg("dim", `◌ ${counts.queued} queued`),
+			th.fg("success", `✓ ${counts.completed} done`),
+			th.fg("error", `✗ ${counts.error} error`),
+			fresh ? th.fg("dim", `updated ${fresh}`) : "",
+		].filter(Boolean).join("  ");
+		return [truncateToWidth(title, width, ""), truncateToWidth(summary, width, "…"), truncateToWidth(facts, width, "…")];
+	}
+
+	private renderWarning(width: number): string[] {
+		const warnings = [
+			this.listError ? `runs: ${this.listError}` : "",
+			this.eventError ? `events: ${this.eventError}` : "",
+			this.journalError ? `journal: ${this.journalError}` : "",
+		].filter(Boolean);
+		return warnings.length > 0 ? [this.theme.fg("error", truncateToWidth(`retrying · ${warnings.join(" · ")}`, width, "…"))] : [];
+	}
+
+	private paneTitle(label: string, active: boolean, suffix = ""): string {
+		const title = `${label}${suffix ? `  ${suffix}` : ""}`;
+		return active ? this.theme.fg("accent", this.theme.bold(title)) : this.theme.fg("dim", this.theme.bold(title));
+	}
+
+	private renderRunsPane(width: number, height: number): string[] {
+		if (height <= 0) return [];
+		const selected = Math.max(0, this.runs.findIndex((run) => run.id === this.selectedRunID));
+		const bodyHeight = Math.max(0, height - 1);
+		this.lastRunsPage = Math.max(1, bodyHeight);
+		const lines = [this.paneTitle("RUNS", this.focus === "runs", this.runs.length ? `${selected + 1}/${this.runs.length}` : "")];
+		if (bodyHeight === 0) return lines;
+		if (this.loading && this.runs.length === 0) lines.push(this.theme.fg("dim", "Loading…"));
+		else if (this.runs.length === 0) lines.push(this.theme.fg("dim", "No runs in this Pi session yet."));
+		else {
+			const startIndex = selectionWindow(selected, this.runs.length, bodyHeight);
+			for (let i = startIndex; i < Math.min(this.runs.length, startIndex + bodyHeight); i++) {
+				const run = this.runs[i]!;
+				const marker = run.id === this.selectedRunID ? this.theme.fg("accent", "›") : " ";
+				const state = this.theme.fg(statusColor(run.status), statusGlyph(run.status));
+				const meta = this.theme.fg("dim", ` · ${elapsed(run)} · ${started(run)}`);
+				lines.push(`${marker} ${state} ${safeText(run.name, run.id)}${meta}`);
+			}
 		}
+		return lines.slice(0, height).map((line) => truncateToWidth(line, width, "…"));
+	}
+
+	private renderAgentsPane(width: number, height: number): string[] {
+		if (height <= 0) return [];
+		const selected = Math.max(0, this.detail.agents.findIndex((agent) => agent.id === this.selectedAgentID));
+		const bodyHeight = Math.max(0, height - 1);
+		this.lastAgentsPage = Math.max(1, bodyHeight);
+		const lines = [this.paneTitle("AGENTS", this.focus === "agents", this.detail.agents.length ? `${selected + 1}/${this.detail.agents.length}` : "")];
+		if (bodyHeight === 0) return lines;
+		if (!this.selectedRun()) lines.push(this.theme.fg("dim", "Select a run first."));
+		else if (this.detail.agents.length === 0) lines.push(this.theme.fg("dim", this.eventError ? "Agent roster unavailable." : "No agents have started yet."));
+		else {
+			const startIndex = selectionWindow(selected, this.detail.agents.length, bodyHeight);
+			for (let i = startIndex; i < Math.min(this.detail.agents.length, startIndex + bodyHeight); i++) {
+				const agent = this.detail.agents[i]!;
+				const marker = agent.id === this.selectedAgentID ? this.theme.fg("accent", "›") : " ";
+				const state = this.theme.fg(statusColor(agent.status), statusGlyph(agent.status));
+				const profile = agent.profile ? ` [${safeText(agent.profile)}]` : "";
+				const fresh = freshness(agent.journalTS);
+				const meta = fresh ? this.theme.fg("dim", ` · ${fresh}`) : "";
+				lines.push(`${marker} ${state} ${safeText(agent.label, `agent ${agent.id}`)}${this.theme.fg("dim", profile)}${meta}`);
+			}
+		}
+		return lines.slice(0, height).map((line) => truncateToWidth(line, width, "…"));
+	}
+
+	private renderJournalPane(width: number, height: number): string[] {
+		if (height <= 0) return [];
+		const agent = this.selectedAgent();
+		const identity = agent ? safeText(agent.label, `agent ${agent.id}`) : "no agent selected";
+		const follow = this.journalFollow ? this.theme.fg("success", "● FOLLOW") : this.theme.fg("dim", "FOLLOW OFF");
+		const unseen = this.journalUnseen > 0 ? this.theme.fg("warning", `${this.journalUnseen} unseen`) : "";
+		const suffix = [identity, follow, unseen].filter(Boolean).join(" · ");
+		const lines = [this.paneTitle("JOURNAL", this.focus === "journal", suffix)];
+		const viewport = Math.max(0, height - 1);
+		this.lastJournalViewport = Math.max(1, viewport);
+		if (viewport === 0) return lines;
+		const body = this.renderJournalBody(width);
+		this.lastJournalLineCount = body.length;
+		const maxScroll = Math.max(0, body.length - viewport);
+		if (this.journalFollow) {
+			this.journalScroll = maxScroll;
+			this.journalUnseen = 0;
+		} else {
+			this.journalScroll = Math.max(0, Math.min(maxScroll, this.journalScroll));
+		}
+		return [...lines, ...body.slice(this.journalScroll, this.journalScroll + viewport)]
+			.slice(0, height)
+			.map((line) => truncateToWidth(line, width, ""));
+	}
+
+	private renderJournalBody(width: number): string[] {
+		const agent = this.selectedAgent();
+		if (!agent) return [this.theme.fg("dim", this.detail.agents.length ? "Select an agent to read its journal." : "Waiting for an agent to start…")];
+		if (this.journal.length === 0) {
+			if (!this.journalLoaded) return [this.theme.fg("dim", "Loading agent journal…")];
+			if (agent.cached) return [this.theme.fg("warning", "Cached completion · no live journal was produced.")];
+			if (agent.status === "ok" || agent.status === "error" || agent.status === "canceled") {
+				return [this.theme.fg("dim", "This agent completed without a recorded work journal.")];
+			}
+			return [this.theme.fg("dim", this.journalMissing ? "Waiting for the journal file…" : "Waiting for the first journal entry…")];
+		}
+
+		const lines: string[] = [];
+		let lastPhase = "";
+		for (const entry of this.journal) {
+			if (entry.phase && entry.phase !== lastPhase) {
+				if (lines.length > 0) lines.push("");
+				lines.push(this.theme.fg("accent", `▮ ${entry.phase}`));
+				lastPhase = entry.phase;
+			}
+			const kind = entry.malformed ? "RAW" : entry.kind.toUpperCase();
+			const meta = [journalTime(entry.ts), entry.source].filter(Boolean).join(" · ");
+			lines.push(`${this.theme.fg(entry.malformed ? "warning" : "accent", this.theme.bold(kind))}${this.theme.fg("dim", `  ${meta}`)}`);
+			for (const line of wrapTextWithAnsi(entry.message, Math.max(1, width - 2))) lines.push(`  ${line}`);
+			if (entry.next) {
+				const prefix = this.theme.fg("dim", "next → ");
+				const wrapped = wrapTextWithAnsi(entry.next, Math.max(1, width - 7));
+				for (let i = 0; i < wrapped.length; i++) lines.push(`${i === 0 ? prefix : "       "}${wrapped[i]}`);
+			}
+			lines.push("");
+		}
+		if (lines.at(-1) === "") lines.pop();
+		return lines;
 	}
 
 	invalidate(): void {}
 
 	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
+		this.abortController?.abort();
+		this.abortController = undefined;
 	}
 }
 
@@ -944,8 +1429,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			await ctx.ui.custom(
-				(tui, theme, _keys, done) => new DynaRunsOverlay(tui, theme, () => done(undefined)),
-				{ overlay: true, overlayOptions: { anchor: "center", width: "80%", maxHeight: "80%", margin: 1 } },
+				(tui, theme, keys, done) => new DynaRunsOverlay(tui, theme, keys, () => done(undefined)),
+				{ overlay: true, overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%", margin: 1 } },
 			);
 		},
 	});

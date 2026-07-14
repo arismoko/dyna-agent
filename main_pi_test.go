@@ -356,6 +356,52 @@ func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 	}
 }
 
+func TestPiDynaObserverStaticContract(t *testing.T) {
+	source := string(piExtensionTS)
+	for _, required := range []string{
+		`type ObserverFocus = "runs" | "agents" | "journal"`,
+		`private selectedRunID = ""`,
+		`private selectedAgentID: number | undefined`,
+		`private journalFollow = true`,
+		`private journalUnseen = 0`,
+		`private refreshQueued = false`,
+		`private selectionGeneration = 0`,
+		`private abortController: AbortController | undefined`,
+		`function safeText(value: unknown, fallback = "")`,
+		`async function readAgentJournal(id: string, agentID: number, offset: number)`,
+		`const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1)`,
+		`if (lastNewline < 0) return { entries: [], next: offset, reset, missing: false }`,
+		`const reset = offset < 0 || offset > stat.size`,
+		`eventGeneration !== this.selectionGeneration`,
+		`journalGeneration !== this.selectionGeneration`,
+		`this.journalUnseen += batch.entries.length`,
+		`this.keys.matches(data, "tui.select.up")`,
+		`this.keys.matches(data, "tui.select.pageDown")`,
+		`this.keys.matches(data, "tui.select.cancel")`,
+		`this.tui.terminal.rows * 0.9`,
+		`safeWidth >= 72`,
+		`wrapTextWithAnsi(entry.message`,
+		`visibleWidth(clipped)`,
+		`map((line) => truncateToWidth(line, safeWidth, ""))`,
+		`this.abortController?.abort()`,
+		`width: "92%", maxHeight: "90%"`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("Pi Dyna observer contract is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`function journalTail(`,
+		`this.journal.slice(-5)`,
+		`_keys, done`,
+		`width: "80%", maxHeight: "80%"`,
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("Pi Dyna observer retains obsolete behavior %q", forbidden)
+		}
+	}
+}
+
 func TestInstalledPiLoadsNativeWorkflowToolSchemasOffline(t *testing.T) {
 	piPath, err := exec.LookPath("pi")
 	if err != nil {
