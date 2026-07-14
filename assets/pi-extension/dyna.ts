@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { open, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -9,6 +9,9 @@ import { matchesKey, truncateToWidth, type Component, type TUI } from "@earendil
 const SESSION = process.env.DYNA_SESSION ?? "";
 const DYNA = process.env.DYNA_BIN || "dyna";
 const MAX_OUTPUT = 16 * 1024 * 1024;
+const MAX_TOOL_OUTPUT = 1024 * 1024;
+const MAX_WORKFLOW_SOURCE = 512 * 1024;
+const MAX_ERROR_DETAIL = 16 * 1024;
 const MAX_EVENT_READ = 4 * 1024 * 1024;
 const MAX_JOURNAL_TAIL = 256 * 1024;
 const LIST_POLL_TICKS = 5;
@@ -286,16 +289,82 @@ type EventRead = {
 	complete: boolean;
 };
 
-function dyna(args: string[]): Promise<string> {
-	return new Promise((resolve, reject) => {
-		execFile(DYNA, args, { encoding: "utf8", maxBuffer: MAX_OUTPUT }, (error, stdout) => {
-			if (error) {
-				reject(error);
+type CLIResult = {
+	ok: boolean;
+	exitCode: number | null;
+	signal: string | null;
+	stdout: string;
+	stderr: string;
+	stdoutTruncated: boolean;
+	stderrTruncated: boolean;
+	spawnError?: string;
+};
+
+function clipped(value: string, limit = MAX_TOOL_OUTPUT): { text: string; truncated: boolean } {
+	if (Buffer.byteLength(value, "utf8") <= limit) return { text: value, truncated: false };
+	const suffix = "\n… output truncated by dyna pi …";
+	return { text: Buffer.from(value).subarray(0, Math.max(0, limit - Buffer.byteLength(suffix))).toString("utf8") + suffix, truncated: true };
+}
+
+function redactSecrets(value: string): string {
+	let redacted = value;
+	for (const [key, secret] of Object.entries(process.env)) {
+		if (!/(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)/i.test(key) || !secret || secret.length < 4) continue;
+		redacted = redacted.split(secret).join("[REDACTED]");
+	}
+	return redacted
+		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+		.replace(/\b((?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[A-Za-z0-9_-]*)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+		.replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[REDACTED JWT]");
+}
+
+function runDyna(args: string[], cwd?: string, signal?: AbortSignal): Promise<CLIResult> {
+	return new Promise((resolve) => {
+		execFile(DYNA, args, { cwd, signal, encoding: "utf8", maxBuffer: MAX_OUTPUT, windowsHide: true }, (error, stdout, stderr) => {
+			const safeStderr = redactSecrets(stderr);
+			if (!error) {
+				resolve({ ok: true, exitCode: 0, signal: null, stdout, stderr: safeStderr, stdoutTruncated: false, stderrTruncated: false });
 				return;
 			}
-			resolve(stdout);
+			const code = typeof error.code === "number" ? error.code : null;
+			const signal = typeof error.signal === "string" ? error.signal : null;
+			const spawnError = error.code === "ENOENT"
+				? `Dyna binary or working directory not found (${DYNA})`
+				: error.name === "AbortError" ? "Dyna command was canceled" : undefined;
+			const bufferExceeded = error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+			resolve({ ok: false, exitCode: code, signal, stdout, stderr: safeStderr, stdoutTruncated: bufferExceeded, stderrTruncated: bufferExceeded, spawnError });
 		});
 	});
+}
+
+function failedCLI(operation: string, result: CLIResult): Error {
+	const detail = clipped(redactSecrets(result.stderr.trim() || result.spawnError || result.stdout.trim() || "no diagnostic output"), MAX_ERROR_DETAIL).text;
+	const status = result.signal ? `signal ${result.signal}` : result.exitCode === null ? "spawn error" : `exit ${result.exitCode}`;
+	return new Error(`${operation} failed (${status}): ${detail}`);
+}
+
+async function dyna(args: string[], cwd?: string): Promise<string> {
+	const result = await runDyna(args, cwd);
+	if (!result.ok) throw failedCLI(`dyna ${args.slice(0, 2).join(" ")}`, result);
+	return result.stdout;
+}
+
+function toolResult(result: CLIResult, extra: Record<string, unknown> = {}) {
+	const stdout = clipped(result.stdout, MAX_TOOL_OUTPUT / 4);
+	const stderr = clipped(result.stderr, MAX_TOOL_OUTPUT / 4);
+	const details = {
+		...extra,
+		...result,
+		stdout: stdout.text,
+		stderr: stderr.text,
+		stdoutTruncated: result.stdoutTruncated || stdout.truncated,
+		stderrTruncated: result.stderrTruncated || stderr.truncated,
+	};
+	const rendered = clipped(JSON.stringify(details, null, 2));
+	return {
+		content: [{ type: "text" as const, text: rendered.text }],
+		details,
+	};
 }
 
 async function listRuns(): Promise<Run[]> {
@@ -306,6 +375,50 @@ async function listRuns(): Promise<Run[]> {
 	if (!Array.isArray(parsed)) throw new Error("dyna returned an invalid run list");
 	if (!parsed.every(isRun)) throw new Error("dyna returned an invalid run list");
 	return parsed;
+}
+
+function requireSession(): string {
+	if (!SESSION) throw new Error("Dyna model tools require a dyna pi session (DYNA_SESSION is missing)");
+	return SESSION;
+}
+
+async function enabledProfiles(): Promise<Record<string, unknown>[]> {
+	const raw = await dyna(["profiles", "list", "--json"]);
+	if (Buffer.byteLength(raw, "utf8") > MAX_TOOL_OUTPUT) throw new Error("enabled Dyna profile JSON exceeds the Pi tool output limit");
+	const parsed: unknown = JSON.parse(raw);
+	if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === "object" && value !== null && typeof (value as Record<string, unknown>).name === "string")) {
+		throw new Error("dyna returned an invalid profile list");
+	}
+	return (parsed as Record<string, unknown>[])
+		.filter((profile) => profile.disabled !== true)
+		.map((profile) => ({
+			name: profile.name,
+			description: profile.description,
+			harness: profile.harness,
+			model: profile.model,
+			taste: profile.taste,
+			intelligence: profile.intelligence,
+			cost: profile.cost,
+			default: profile.default,
+			disableSubagents: profile.disableSubagents,
+			maxConcurrent: profile.maxConcurrent,
+			maxCallsPerRun: profile.maxCallsPerRun,
+		}));
+}
+
+async function requireSessionRun(id: string): Promise<Run> {
+	requireSession();
+	if (!/^wf_[A-Za-z0-9_-]+$/.test(id) || id.length > 128) throw new Error("run_id must be a valid Dyna workflow id (wf_...)");
+	const run = (await listRuns()).find((candidate) => candidate.id === id);
+	if (!run) throw new Error(`run ${id} does not belong to this Pi session`);
+	return run;
+}
+
+function checkedString(value: string | undefined, name: string, maxBytes: number): string | undefined {
+	if (value === undefined) return undefined;
+	if (value.includes("\0")) throw new Error(`${name} must not contain NUL bytes`);
+	if (Buffer.byteLength(value, "utf8") > maxBytes) throw new Error(`${name} exceeds the ${maxBytes}-byte limit`);
+	return value;
 }
 
 function isRun(value: unknown): value is Run {
@@ -583,7 +696,7 @@ class DynaRunsOverlay implements Component {
 		else if (this.error) lines.push(th.fg("error", `dyna unavailable: ${this.error}`));
 		else if (this.runs.length === 0) {
 			lines.push("No workflow runs in this session yet.");
-			lines.push(th.fg("dim", "Ask the model to start one, or see /skill dyna."));
+			lines.push(th.fg("dim", "Ask the model to start one with the native Dyna tools."));
 		} else {
 			const start = Math.max(0, Math.min(this.selected - 4, this.runs.length - 9));
 			for (let i = start; i < Math.min(this.runs.length, start + 9); i++) {
@@ -653,6 +766,114 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "dyna_profiles",
+		label: "Dyna Profiles",
+		description: "Return the enabled Dyna worker profiles with routing stats and per-run limits. Call this before authoring a workflow.",
+		promptSnippet: "List enabled Dyna worker profiles",
+		promptGuidelines: ["Call dyna_profiles before dyna_run, then choose profiles by cost, intelligence, taste, description, and limits."],
+		parameters: Type.Object({}),
+		async execute() {
+			requireSession();
+			const profiles = await enabledProfiles();
+			const rendered = clipped(JSON.stringify(profiles, null, 2));
+			return {
+				content: [{ type: "text" as const, text: rendered.text }],
+				details: { profiles, count: profiles.length, truncated: rendered.truncated },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "dyna_run",
+		label: "Run Dyna Workflow",
+		description: "Run a bounded inline JavaScript Dyna workflow with typed options. The extension uses the exact Dyna binary without a shell and removes its private temporary script after launch.",
+		promptSnippet: "Run an inline Dyna JavaScript workflow",
+		promptGuidelines: ["Pass the complete workflow inline after calling dyna_profiles. Prefer detach for work that should continue while this Pi session remains interactive."],
+		parameters: Type.Object({
+			workflow: Type.String({ description: "Complete inline Dyna JavaScript workflow", minLength: 1, maxLength: MAX_WORKFLOW_SOURCE }),
+			cwd: Type.Optional(Type.String({ description: "Working directory for workers", minLength: 1, maxLength: 4096 })),
+			args: Type.Optional(Type.Unknown({ description: "JSON value exposed to the workflow as args" })),
+			name: Type.Optional(Type.String({ description: "Run display name", minLength: 1, maxLength: 200 })),
+			detach: Type.Optional(Type.Boolean({ description: "Start in the background and return its run id" })),
+			resume: Type.Optional(Type.String({ description: "Session-owned run id whose successful calls may be reused", pattern: "^wf_[A-Za-z0-9_-]+$", maxLength: 128 })),
+			max_concurrent: Type.Optional(Type.Integer({ description: "Maximum simultaneous workers for this run", minimum: 1, maximum: 64 })),
+			call_cap: Type.Optional(Type.Integer({ description: "Maximum lifetime agent calls for this run", minimum: 1, maximum: 1000 })),
+		}),
+		async execute(_toolCallId, params, signal) {
+			requireSession();
+			checkedString(params.workflow, "workflow", MAX_WORKFLOW_SOURCE);
+			const cwd = checkedString(params.cwd, "cwd", 4096);
+			const name = checkedString(params.name, "name", 1024);
+			if (params.resume) await requireSessionRun(params.resume);
+
+			let argsJSON: string | undefined;
+			if (params.args !== undefined) {
+				argsJSON = JSON.stringify(params.args);
+				checkedString(argsJSON, "args", MAX_WORKFLOW_SOURCE);
+			}
+
+			const tempDir = await mkdtemp(join(tmpdir(), "dyna-pi-"));
+			const scriptPath = join(tempDir, "workflow.js");
+			try {
+				await writeFile(scriptPath, params.workflow, { mode: 0o600, flag: "wx" });
+				const cliArgs = ["run", scriptPath, "--json"];
+				if (cwd) cliArgs.push("--dir", cwd);
+				if (argsJSON !== undefined) cliArgs.push("--args", argsJSON);
+				if (name) cliArgs.push("--name", name);
+				if (params.detach) cliArgs.push("--detach");
+				if (params.resume) cliArgs.push("--resume", params.resume);
+				if (params.max_concurrent !== undefined) cliArgs.push("--max-concurrent", String(params.max_concurrent));
+				if (params.call_cap !== undefined) cliArgs.push("--max-agents", String(params.call_cap));
+
+				const result = await runDyna(cliArgs, undefined, signal);
+				if (!result.ok) throw failedCLI("dyna run", result);
+				const runID = params.detach ? result.stdout.trim() : (() => {
+					try {
+						const value = JSON.parse(result.stdout) as Record<string, unknown>;
+						return typeof value.runId === "string" ? value.runId : undefined;
+					} catch {
+						return undefined;
+					}
+				})();
+				return toolResult(result, { runId: runID, detached: params.detach === true });
+			} finally {
+				await rm(tempDir, { recursive: true, force: true });
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "dyna_runs",
+		label: "Manage Dyna Runs",
+		description: "List, inspect, wait for, or cancel Dyna runs owned by this Pi launch. Run-id operations reject runs from every other session.",
+		promptSnippet: "Manage Dyna runs from this Pi session",
+		promptGuidelines: ["Use dyna_runs instead of shell commands for session-scoped list, show, wait, and cancel operations."],
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("list"), Type.Literal("show"), Type.Literal("wait"), Type.Literal("cancel")], { description: "Run operation" }),
+			run_id: Type.Optional(Type.String({ description: "Required for show, wait, and cancel", pattern: "^wf_[A-Za-z0-9_-]+$", maxLength: 128 })),
+			timeout_seconds: Type.Optional(Type.Integer({ description: "Wait timeout without canceling the run", minimum: 1, maximum: 86400 })),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const session = requireSession();
+			if (params.action === "list") {
+				if (params.run_id || params.timeout_seconds !== undefined) throw new Error("dyna_runs list does not accept run_id or timeout_seconds");
+				const result = await runDyna(["runs", "list", "--json", "--session", session], undefined, signal);
+				if (!result.ok) throw failedCLI("dyna runs list", result);
+				return toolResult(result, { action: params.action, session });
+			}
+			if (!params.run_id) throw new Error(`run_id is required for dyna_runs ${params.action}`);
+			if (params.action !== "wait" && params.timeout_seconds !== undefined) throw new Error(`timeout_seconds is only valid for dyna_runs wait`);
+			const run = await requireSessionRun(params.run_id);
+			const cliArgs = ["runs", params.action, params.run_id];
+			if (params.action === "show") cliArgs.push("--json");
+			if (params.action === "wait" && params.timeout_seconds !== undefined) cliArgs.push("--timeout", String(params.timeout_seconds));
+			const result = await runDyna(cliArgs, undefined, signal);
+			if (!result.ok) throw failedCLI(`dyna runs ${params.action}`, result);
+			return toolResult(result, { action: params.action, runId: params.run_id, priorStatus: run.status });
+		},
+	});
+
+	pi.registerTool({
 		name: "dyna_steer",
 		label: "Steer Dyna Worker",
 		description: "Send a short steering message to an active worker in a Dyna workflow launched by this pi session. Dyna continues the existing resumable worker session and never starts a replacement.",
@@ -663,11 +884,14 @@ export default function (pi: ExtensionAPI) {
 			agent_id: Type.Integer({ description: "Numeric ID of the running worker", minimum: 1 }),
 			message: Type.String({ description: "Short instruction to apply to the worker's current task", minLength: 1, maxLength: 2000 }),
 		}),
-		async execute(_toolCallId, params) {
-			const run = (await listRuns()).find((candidate) => candidate.id === params.run_id);
-			if (!run) throw new Error(`run ${params.run_id} does not belong to this pi session`);
+		async execute(_toolCallId, params, signal) {
+			requireSession();
+			checkedString(params.message, "message", 2000);
+			const run = await requireSessionRun(params.run_id);
 			if (run.status !== "running") throw new Error(`run ${params.run_id} is not running (status ${run.status})`);
-			const output = (await dyna(["runs", "steer", params.run_id, String(params.agent_id), params.message])).trim();
+			const result = await runDyna(["runs", "steer", params.run_id, String(params.agent_id), params.message], undefined, signal);
+			if (!result.ok) throw failedCLI("dyna runs steer", result);
+			const output = result.stdout.trim();
 			return {
 				content: [{ type: "text", text: output || `Queued steering for ${params.run_id} agent ${params.agent_id}.` }],
 				details: { runId: params.run_id, agentId: params.agent_id, queued: true },

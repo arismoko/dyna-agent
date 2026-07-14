@@ -66,11 +66,11 @@ inode and are never restarted or killed; the new version is used by future
 invocations. A successful update also refreshes the embedded dyna skill in
 detected agent harnesses. On an interactive terminal, the update then offers
 to replace colliding bundled profiles, keep them managed by future releases,
-and install root-agent guidance. Non-interactive updates never prompt and
-print the corresponding commands instead. A once-per-version check on the
-next ordinary interactive command makes the same offer when the feature
-itself arrived in an update; worker-facing `dyna journal` and `dyna run` paths
-are always exempt.
+and install root-agent guidance. That consent is durable across releases:
+later updates refresh only profiles that remain marked managed and refresh
+previously accepted guidance without asking the three questions again or
+replaying the one-time replacement choice. Non-interactive and worker-facing
+paths never prompt.
 
 ## Teaching your agents about dyna
 
@@ -83,16 +83,24 @@ read `dyna guide`:
 - **opencode**: `~/.config/opencode/skills/dyna/SKILL.md`
 - **pi**: `~/.pi/agent/skills/dyna/SKILL.md`
 
+The Pi skill uses Pi's supported `disable-model-invocation: true` frontmatter,
+so it stays available to a person as `/skill:dyna` in plain Pi without appearing
+in model discovery. `dyna pi` supplies its own self-contained prompt and tools.
+
 `dyna skill install <harness>` forces one, `--all` forces all,
 `dyna skill uninstall` removes cleanly, and `dyna skill show` prints the
 content. Older versions wrote managed AGENTS.md blocks; install and uninstall
 migrate those away automatically.
 
 `dyna skill guidance install` optionally adds a short, separately managed
-root-agent block to each detected harness's shared `CLAUDE.md` or `AGENTS.md`.
+root-agent block to each detected non-Pi harness's shared `CLAUDE.md` or
+`AGENTS.md`.
 It explains when multi-model fan-out is worth its cost and when native
 subagents are the better fit. The command is idempotent, accepts the same
-harness names and `--all` flag as skill installation, and
+harness names and `--all` flag as skill installation. Pi guidance is
+explicit-only via `dyna skill guidance install pi`; automatic setup removes
+older managed Pi blocks from both `~/.pi/agent/AGENTS.md` and the legacy
+`~/.pi/AGENTS.md` while preserving user content. The
 `dyna skill guidance uninstall` removes only its marker block. Uninstalling
 the dyna skill also removes this guidance.
 
@@ -338,13 +346,22 @@ as or replaces that result.
   and thinking flags still win. It reuses Codex's ChatGPT OAuth in memory and
   delegates refresh to Codex's app server, so no second Pi login or credential
   copy is required. Unsupported or missing Codex auth fails with a `codex login`
-  instruction rather than falling back to another provider. The launcher passes
-  `--no-skills` because its Dyna instructions and extension are supplied directly;
-  explicit Pi arguments are still appended unchanged.
+  instruction rather than falling back to another provider. Other Pi skills
+  remain enabled; an installed Dyna Pi skill is hidden from model discovery by
+  its frontmatter because the launcher supplies the Dyna contract directly.
 
-  The extension bundled by `dyna pi` also registers a model-visible
-  `dyna_steer` tool for active workflows owned by that pi session, so the
-  parent model can steer a worker without constructing a shell command.
+  The extension registers model-visible `dyna_profiles`, `dyna_run`,
+  `dyna_runs`, and `dyna_steer` tools. They list enabled profiles, run bounded
+  inline workflows through a private temporary script, manage only runs owned
+  by that Pi launch, and steer active workers without shell command assembly.
+  Type `/dyna` for the launch-scoped interactive overlay; `dyna tui` remains
+  the full cross-session dashboard.
+
+  Pi 0.80.7 already reports `openai-codex/gpt-5.6-terra` with its correct 372K
+  context window, so Dyna leaves that model metadata untouched. Pi's public
+  extension API exposes context usage and manual compaction, but no
+  session-local compaction-threshold override, so Dyna does not mutate global
+  settings or replace the provider/model to emulate Codex's 95% threshold.
 
   ![Run inspector: per-agent journal timeline while workers run](docs/img/tui-journal.png)
 - **Profiles**: the fleet at a glance, with descriptions and

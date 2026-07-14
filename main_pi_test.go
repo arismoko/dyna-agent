@@ -72,7 +72,7 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 
 	args := readNULArgs(t, filepath.Join(capture, "args"))
 	wantExtension := filepath.Join(data, "dyna", "pi-extension", "dyna.ts")
-	wantArgs := []string{"--extension", wantExtension, "--append-system-prompt", piOrchestrationPrompt, "--no-skills", "--thinking", "xhigh", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "--skill", "user-skill", "-c"}
+	wantArgs := []string{"--extension", wantExtension, "--append-system-prompt", piOrchestrationPrompt, "--thinking", "xhigh", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "--skill", "user-skill", "-c"}
 	if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("pi args = %#v, want %#v", args, wantArgs)
 	}
@@ -117,7 +117,6 @@ func TestPiCmdNormalizesRecognizedEqualsArgs(t *testing.T) {
 	wantArgs := []string{
 		"--extension", filepath.Join(data, "dyna", "pi-extension", "dyna.ts"),
 		"--append-system-prompt", piOrchestrationPrompt,
-		"--no-skills",
 		"--provider", "fixture-provider",
 		"--model", "fixture-model",
 		"--models", "fixture-provider/*:high",
@@ -157,6 +156,23 @@ func TestPiDefaultArgsPreserveExplicitSelection(t *testing.T) {
 				t.Fatalf("piDefaultArgs(%#v) = %#v, want %#v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestPiTerraUsesBundledCatalogMetadata(t *testing.T) {
+	if piDefaultProvider != "openai-codex" || piDefaultModel != "gpt-5.6-terra" {
+		t.Fatalf("Pi default = %s/%s", piDefaultProvider, piDefaultModel)
+	}
+	combined := string(piExtensionTS) + piOrchestrationPrompt + guideMD
+	for _, stale := range []string{"270000", "258000"} {
+		if strings.Contains(combined, stale) {
+			t.Errorf("Pi integration hard-codes stale Terra context value %s", stale)
+		}
+	}
+	for _, privateOverride := range []string{"setCompactionReserveTokens", `registerProvider("openai-codex"`, "contextWindow: 372000"} {
+		if strings.Contains(string(piExtensionTS), privateOverride) {
+			t.Errorf("Pi extension mutates catalog/compaction internals with %q", privateOverride)
+		}
 	}
 }
 
@@ -236,7 +252,7 @@ func TestPiExtensionRegistersModelVisibleSteeringTool(t *testing.T) {
 		`agent_id: Type.Integer`,
 		`message: Type.String`,
 		`maxLength: 2000`,
-		`candidate.id === params.run_id`,
+		`const run = await requireSessionRun(params.run_id)`,
 		`["runs", "steer", params.run_id, String(params.agent_id), params.message]`,
 		`never starts a replacement`,
 	} {
@@ -246,6 +262,160 @@ func TestPiExtensionRegistersModelVisibleSteeringTool(t *testing.T) {
 	}
 	if strings.Contains(source, `execute(_toolCallId, params) { return pi.sendUserMessage`) {
 		t.Fatal("pi steering tool delegates to prose instead of invoking the command boundary")
+	}
+}
+
+func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
+	source := string(piExtensionTS)
+	for _, required := range []string{
+		`name: "dyna_profiles"`,
+		`name: "dyna_run"`,
+		`name: "dyna_runs"`,
+		`workflow: Type.String`,
+		`args: Type.Optional(Type.Unknown`,
+		`max_concurrent: Type.Optional(Type.Integer`,
+		`call_cap: Type.Optional(Type.Integer`,
+		`await mkdtemp(join(tmpdir(), "dyna-pi-"))`,
+		`await writeFile(scriptPath, params.workflow, { mode: 0o600, flag: "wx" })`,
+		`await rm(tempDir, { recursive: true, force: true })`,
+		`execFile(DYNA, args`,
+		`await requireSessionRun(params.resume)`,
+		`await requireSessionRun(params.run_id)`,
+		`Type.Literal("cancel")`,
+		`redactSecrets`,
+		`function requireSession(): string`,
+		`const session = requireSession()`,
+		`["runs", "list", "--json", "--session", session]`,
+		`checkedString(params.message, "message", 2000)`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("Pi native workflow tool contract is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{`name: "dyna_guide"`, `exec(`, `shell: true`} {
+		if strings.Contains(source, forbidden) {
+			t.Errorf("Pi native workflow tools contain forbidden implementation %q", forbidden)
+		}
+	}
+}
+
+func TestInstalledPiLoadsNativeWorkflowToolSchemasOffline(t *testing.T) {
+	piPath, err := exec.LookPath("pi")
+	if err != nil {
+		t.Skip("pi is not installed")
+	}
+	home := t.TempDir()
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	extensionPath, err := provisionPiExtension()
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "tools.json")
+	probePath := filepath.Join(t.TempDir(), "probe.ts")
+	probeSource := `import { writeFile } from "node:fs/promises";
+export default function (pi: any) {
+	pi.on("input", async () => {
+		const wanted = new Set(["dyna_profiles", "dyna_run", "dyna_runs", "dyna_steer"]);
+		const tools = pi.getAllTools()
+			.filter((tool: any) => wanted.has(tool.name) || tool.name === "dyna_guide")
+			.map((tool: any) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+		await writeFile(process.env.TOOL_PROBE_MARKER, JSON.stringify(tools));
+		return { action: "handled" };
+	});
+}
+`
+	if err := os.WriteFile(probePath, []byte(probeSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, piPath,
+		"--offline", "--no-extensions",
+		"--extension", extensionPath,
+		"--extension", probePath,
+		"--provider", "openai-codex",
+		"--model", "gpt-5.6-terra",
+		"--api-key", "fixture-only",
+		"-p", "probe native tools",
+	)
+	cmd.Env = os.Environ()
+	for key, value := range map[string]string{
+		"HOME":                home,
+		"PI_CODING_AGENT_DIR": filepath.Join(home, ".pi-fixture"),
+		"PI_OFFLINE":          "1",
+		"DYNA_SESSION":        "fixture-session",
+		"DYNA_BIN":            "/bin/false",
+		"DYNA_PI_CODEX_AUTH":  "0",
+		"TOOL_PROBE_MARKER":   marker,
+		"OPENAI_API_KEY":      "",
+		"CODEX_HOME":          filepath.Join(home, ".codex-fixture"),
+		"DYNA_CODEX_BIN":      "/bin/false",
+		"DYNA_NO_AUTO_UPDATE": "1",
+	} {
+		cmd.Env = setEnv(cmd.Env, key, value)
+	}
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("offline Pi tool registration timed out: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("offline Pi tool registration: %v\n%s", err, output)
+	}
+	var tools []struct {
+		Name       string         `json:"name"`
+		Parameters map[string]any `json:"parameters"`
+	}
+	if err := json.Unmarshal([]byte(readFile(t, marker)), &tools); err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 4 {
+		t.Fatalf("native Pi tools = %#v", tools)
+	}
+	byName := make(map[string]map[string]any, len(tools))
+	for _, tool := range tools {
+		if tool.Name == "dyna_guide" {
+			t.Fatal("dyna_guide was registered")
+		}
+		byName[tool.Name] = tool.Parameters
+	}
+	for _, name := range []string{"dyna_profiles", "dyna_run", "dyna_runs", "dyna_steer"} {
+		if byName[name] == nil {
+			t.Errorf("installed Pi did not load %s", name)
+		}
+	}
+	runProperties, _ := byName["dyna_run"]["properties"].(map[string]any)
+	for _, field := range []string{"workflow", "cwd", "args", "name", "detach", "resume", "max_concurrent", "call_cap"} {
+		if runProperties[field] == nil {
+			t.Errorf("installed dyna_run schema is missing %s", field)
+		}
+	}
+
+	missingSessionMarker := filepath.Join(t.TempDir(), "tools.json")
+	missingCtx, cancelMissing := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelMissing()
+	missing := exec.CommandContext(missingCtx, piPath,
+		"--offline", "--no-extensions",
+		"--extension", extensionPath,
+		"--extension", probePath,
+		"--provider", "openai-codex",
+		"--model", "gpt-5.6-terra",
+		"--api-key", "fixture-only",
+		"-p", "probe tools without session",
+	)
+	missing.Env = cmd.Env
+	missing.Env = setEnv(missing.Env, "DYNA_SESSION", "")
+	missing.Env = setEnv(missing.Env, "TOOL_PROBE_MARKER", missingSessionMarker)
+	if output, err := missing.CombinedOutput(); err != nil {
+		t.Fatalf("offline Pi missing-session registration: %v\n%s", err, output)
+	}
+	var withoutSession []any
+	if err := json.Unmarshal([]byte(readFile(t, missingSessionMarker)), &withoutSession); err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutSession) != 0 {
+		t.Fatalf("Pi exposed session-scoped Dyna tools without DYNA_SESSION: %#v", withoutSession)
 	}
 }
 

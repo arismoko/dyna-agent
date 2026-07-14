@@ -103,21 +103,91 @@ func TestPiOrchestrationPromptIsCompactAndSelfContained(t *testing.T) {
 	for _, required := range []string{
 		"Dyna is enabled for this Pi launch",
 		"do not search for or load a separate dyna skill",
-		"dyna profiles list --json",
-		"dyna guide",
-		"dyna run workflow.js",
-		"dyna runs wait <id>",
-		"use only `dyna journal`",
+		"Call dyna_profiles first",
+		"inline JavaScript to dyna_run",
+		"profiles.find(p => p.default) ?? profiles[0]",
+		"profile: profile.name",
+		"pipeline(items",
+		"schema: { type: 'object'",
+		"isolation: 'worktree'",
+		"Use dyna_runs to list, show, wait for, or cancel",
+		"dyna_steer",
+		"type /dyna",
+		"full cross-session dashboard",
+		"never opened automatically",
 	} {
 		if !strings.Contains(piOrchestrationPrompt, required) {
 			t.Errorf("Pi orchestration prompt is missing %q", required)
 		}
 	}
-	if strings.Count(piOrchestrationPrompt, agentFacingGuidance) != 1 {
-		t.Fatal("Pi orchestration prompt must inject the shared guidance exactly once")
+	for _, forbidden := range []string{"dyna guide", "profile: 'reviewer'", "dyna run workflow.js", "dyna profiles list --json"} {
+		if strings.Contains(piOrchestrationPrompt, forbidden) {
+			t.Errorf("Pi orchestration prompt contains forbidden fallback %q", forbidden)
+		}
 	}
 	if len(piOrchestrationPrompt) > 9000 {
 		t.Fatalf("Pi orchestration prompt grew too large for standing root guidance: %d bytes", len(piOrchestrationPrompt))
+	}
+}
+
+func TestPiOnlyToolsDoNotLeakIntoPortableGuidance(t *testing.T) {
+	for _, tool := range []string{"dyna_profiles", "dyna_run", "dyna_runs", "dyna_steer"} {
+		if strings.Contains(agentFacingGuidance, tool) || strings.Contains(skillBody, tool) || strings.Contains(guidanceBody, tool) {
+			t.Errorf("portable guidance contains Pi-only tool %q", tool)
+		}
+	}
+}
+
+func TestPiSkillIsManualOnlyForModelInvocation(t *testing.T) {
+	dir := t.TempDir()
+	piTarget := harnessTarget{name: "pi", path: func() string { return filepath.Join(dir, "pi", "SKILL.md") }}
+	if err := installSkill(piTarget); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, piTarget.path()); !strings.Contains(got, "disable-model-invocation: true") {
+		t.Fatalf("Pi skill is model-visible:\n%s", got)
+	}
+
+	portableTarget := harnessTarget{name: "codex", path: func() string { return filepath.Join(dir, "codex", "SKILL.md") }}
+	if err := installSkill(portableTarget); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, portableTarget.path()); strings.Contains(got, "disable-model-invocation") {
+		t.Fatalf("portable skill unexpectedly disabled model invocation:\n%s", got)
+	}
+}
+
+func TestGuidanceCommandRequiresExplicitPiTarget(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	for _, dir := range []string{filepath.Join(homeDir, ".codex"), filepath.Join(homeDir, ".pi")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cmd := guidanceCmd()
+	cmd.SetArgs([]string{"install"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, ".codex", "AGENTS.md")); err != nil {
+		t.Fatalf("detected Codex guidance was not installed: %v", err)
+	}
+	piPath := filepath.Join(homeDir, ".pi", "agent", "AGENTS.md")
+	if _, err := os.Stat(piPath); !os.IsNotExist(err) {
+		t.Fatalf("no-argument guidance install wrote Pi guidance: %v", err)
+	}
+
+	explicit := guidanceCmd()
+	explicit.SetArgs([]string{"install", "pi"})
+	if err := explicit.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, piPath); !strings.Contains(got, guidanceMarkBegin) {
+		t.Fatalf("explicit Pi guidance was not installed:\n%s", got)
 	}
 }
 

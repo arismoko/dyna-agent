@@ -551,6 +551,14 @@ func detachRun(script string) error {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return err
 	}
+	src, err := os.ReadFile(script)
+	if err != nil {
+		return err
+	}
+	stagedScript := filepath.Join(runDir, "script.js")
+	if err := os.WriteFile(stagedScript, src, 0o600); err != nil {
+		return err
+	}
 	logf, err := os.Create(filepath.Join(runDir, "daemon.log"))
 	if err != nil {
 		return err
@@ -562,11 +570,26 @@ func detachRun(script string) error {
 		return err
 	}
 	var childArgs []string
+	replacedScript := false
+	hasName := false
 	for _, a := range os.Args[1:] {
 		if a == "--detach" || a == "--detach=true" {
 			continue
 		}
+		if !replacedScript && a == script {
+			a = stagedScript
+			replacedScript = true
+		}
+		if a == "--name" || strings.HasPrefix(a, "--name=") {
+			hasName = true
+		}
 		childArgs = append(childArgs, a)
+	}
+	if !replacedScript {
+		return fmt.Errorf("cannot preserve detached workflow script argument")
+	}
+	if !hasName {
+		childArgs = append(childArgs, "--name", metaName(string(src), script))
 	}
 	child := exec.Command(self, childArgs...)
 	child.Env = append(os.Environ(), "DYNA_RUN_ID="+id)
@@ -576,7 +599,6 @@ func detachRun(script string) error {
 	if err := child.Start(); err != nil {
 		return err
 	}
-	_ = script
 	fmt.Println(id)
 	fmt.Fprintln(os.Stderr, stDim.Render("running in background; `dyna runs wait "+id+"` blocks until done, watch live with `dyna tui`"))
 	return nil

@@ -61,8 +61,14 @@ func maybeOfferPostUpdateSetup(c *cobra.Command) error {
 	if _, err := os.Stat(profile.DefaultPath()); err != nil {
 		return nil
 	}
-	if state, err := readPostUpdateState(); err == nil && state.Version == currentVersion {
-		return nil
+	if state, err := readPostUpdateState(); err == nil {
+		if state.Version == currentVersion {
+			return nil
+		}
+		if err := applyRecurringPostUpdateSetup(state.Answers, c.OutOrStdout()); err != nil {
+			return err
+		}
+		return writePostUpdateState(currentVersion, state.Answers)
 	}
 
 	answers, err := promptPostUpdateSetup(c.InOrStdin(), c.OutOrStdout())
@@ -106,6 +112,9 @@ func askYesNo(reader *bufio.Reader, out io.Writer, question string) (bool, error
 }
 
 func applyPostUpdateSetup(answers postUpdateAnswers, out io.Writer) error {
+	if err := removeAutomaticPiGuidance(); err != nil {
+		return err
+	}
 	store, err := loadStore()
 	if err != nil {
 		return err
@@ -124,8 +133,29 @@ func applyPostUpdateSetup(answers postUpdateAnswers, out io.Writer) error {
 	return nil
 }
 
+// applyRecurringPostUpdateSetup deliberately avoids ApplyBundledPreferences:
+// loading the store refreshes only profiles the user still marks managed.
+func applyRecurringPostUpdateSetup(answers postUpdateAnswers, out io.Writer) error {
+	if err := removeAutomaticPiGuidance(); err != nil {
+		return err
+	}
+	if _, err := loadStore(); err != nil {
+		return err
+	}
+	if answers.Guidance {
+		return installDetectedGuidance(out)
+	}
+	return nil
+}
+
 func installDetectedGuidance(out io.Writer) error {
+	if err := removeAutomaticPiGuidance(); err != nil {
+		return err
+	}
 	for _, target := range skillTargets() {
+		if target.name == "pi" {
+			continue
+		}
 		if !target.detect() {
 			continue
 		}
@@ -133,6 +163,20 @@ func installDetectedGuidance(out io.Writer) error {
 			return fmt.Errorf("%s: %w", target.name, err)
 		}
 		fmt.Fprintf(out, "  ✓ %-11s %s\n", target.name, target.guidancePath())
+	}
+	return nil
+}
+
+// Pi receives this contract directly from `dyna pi`; automatic setup removes
+// old managed copies from both Pi paths. Explicit guidance installation for
+// plain Pi remains available through `dyna skill guidance install pi`.
+func removeAutomaticPiGuidance() error {
+	for _, target := range skillTargets() {
+		if target.name != "pi" {
+			continue
+		}
+		_, err := uninstallGuidance(target)
+		return err
 	}
 	return nil
 }
@@ -145,6 +189,9 @@ func readPostUpdateState() (postUpdateState, error) {
 	var state postUpdateState
 	if err := json.Unmarshal(b, &state); err != nil {
 		return postUpdateState{}, err
+	}
+	if strings.TrimSpace(state.Version) == "" {
+		return postUpdateState{}, fmt.Errorf("invalid post-update consent state: missing version")
 	}
 	return state, nil
 }
@@ -164,11 +211,16 @@ func writePostUpdateState(currentVersion string, answers postUpdateAnswers) erro
 func postUpdateApplyCmd() *cobra.Command {
 	var answers postUpdateAnswers
 	var stampVersion string
+	var recurring bool
 	cmd := &cobra.Command{
 		Use:    "_post-update-apply",
 		Hidden: true,
 		RunE: func(c *cobra.Command, _ []string) error {
-			if err := applyPostUpdateSetup(answers, c.OutOrStdout()); err != nil {
+			apply := applyPostUpdateSetup
+			if recurring {
+				apply = applyRecurringPostUpdateSetup
+			}
+			if err := apply(answers, c.OutOrStdout()); err != nil {
 				return err
 			}
 			if stampVersion == "" {
@@ -180,11 +232,18 @@ func postUpdateApplyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&answers.Replace, "replace", false, "replace colliding bundled profiles")
 	cmd.Flags().BoolVar(&answers.Managed, "managed", false, "keep colliding bundled profiles managed")
 	cmd.Flags().BoolVar(&answers.Guidance, "guidance", false, "install root-agent guidance")
+	cmd.Flags().BoolVar(&recurring, "recurring", false, "refresh only previously accepted managed setup")
 	cmd.Flags().StringVar(&stampVersion, "stamp-version", "", "version recorded as prompted")
 	return cmd
 }
 
 func offerSetupAfterUpdate(c *cobra.Command, executable, latest string) {
+	if state, err := readPostUpdateState(); err == nil {
+		if err := applySetupWithExecutable(c.Context(), executable, latest, state.Answers, true, c.OutOrStdout(), c.ErrOrStderr()); err != nil {
+			fmt.Fprintf(c.ErrOrStderr(), "warning: dyna updated, but accepted setup refresh failed: %v\n", err)
+		}
+		return
+	}
 	if !shouldOfferPostUpdateSetup(
 		isTerminalFile(c.InOrStdin()),
 		isTerminalFile(c.OutOrStdout()),
@@ -198,7 +257,7 @@ func offerSetupAfterUpdate(c *cobra.Command, executable, latest string) {
 		fmt.Fprintf(c.ErrOrStderr(), "warning: dyna updated, but post-update setup was skipped: %v\n", err)
 		return
 	}
-	if err := applySetupWithExecutable(c.Context(), executable, latest, answers, c.OutOrStdout(), c.ErrOrStderr()); err != nil {
+	if err := applySetupWithExecutable(c.Context(), executable, latest, answers, false, c.OutOrStdout(), c.ErrOrStderr()); err != nil {
 		fmt.Fprintf(c.ErrOrStderr(), "warning: dyna updated, but post-update setup failed: %v\n", err)
 	}
 }
@@ -207,14 +266,18 @@ func shouldOfferPostUpdateSetup(stdinTTY, stdoutTTY, worker bool) bool {
 	return stdinTTY && stdoutTTY && !worker
 }
 
-func applySetupWithExecutable(ctx context.Context, executable, latest string, answers postUpdateAnswers, stdout, stderr io.Writer) error {
-	cmd := exec.CommandContext(ctx, executable,
+func applySetupWithExecutable(ctx context.Context, executable, latest string, answers postUpdateAnswers, recurring bool, stdout, stderr io.Writer) error {
+	args := []string{
 		"_post-update-apply",
-		"--replace="+strconv.FormatBool(answers.Replace),
-		"--managed="+strconv.FormatBool(answers.Managed),
-		"--guidance="+strconv.FormatBool(answers.Guidance),
-		"--stamp-version="+latest,
-	)
+		"--replace=" + strconv.FormatBool(answers.Replace),
+		"--managed=" + strconv.FormatBool(answers.Managed),
+		"--guidance=" + strconv.FormatBool(answers.Guidance),
+		"--stamp-version=" + latest,
+	}
+	if recurring {
+		args = append(args, "--recurring=true")
+	}
+	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Env = append(os.Environ(), "DYNA_NO_AUTO_UPDATE=1")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

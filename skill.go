@@ -10,9 +10,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Keep one compact policy/API source for installed skills, managed root
-// guidance, and the direct `dyna pi --no-skills` launch prompt. The detailed
-// reference and runnable examples live in guide/GUIDE.md (`dyna guide`).
+// Keep one compact portable policy/API source for installed skills and managed
+// root guidance. The detailed reference and runnable examples live in
+// guide/GUIDE.md (`dyna guide`). Pi has a separate tool-native prompt in pi.go.
 const agentFacingGuidance = `# Multi-model workflows with dyna
 
 Dyna runs plain JavaScript workflow files that orchestrate registered model
@@ -89,6 +89,14 @@ const skillBody = agentFacingGuidance
 const skillFrontmatter = `---
 name: dyna
 description: Orchestrate registered model workers with the dyna CLI when the user explicitly requests Dyna, a workflow, fan-out, or multi-model orchestration such as parallel review, audits, judge panels, or adversarial verification.
+---
+
+`
+
+const piSkillFrontmatter = `---
+name: dyna
+description: Orchestrate registered model workers with the dyna CLI when the user explicitly requests Dyna, a workflow, fan-out, or multi-model orchestration such as parallel review, audits, judge panels, or adversarial verification.
+disable-model-invocation: true
 ---
 
 `
@@ -259,7 +267,7 @@ func guidanceCmd() *cobra.Command {
 	var all bool
 	install := &cobra.Command{
 		Use:   "install [harness...]",
-		Short: "Install root-agent guidance (default: all detected harnesses)",
+		Short: "Install root-agent guidance (default: detected non-Pi harnesses; name pi explicitly)",
 		RunE: func(c *cobra.Command, argv []string) error {
 			pick := make(map[string]bool, len(argv))
 			for _, a := range argv {
@@ -268,6 +276,10 @@ func guidanceCmd() *cobra.Command {
 			installed := 0
 			for _, t := range skillTargets() {
 				if len(pick) > 0 && !pick[t.name] {
+					continue
+				}
+				if t.name == "pi" && !pick["pi"] {
+					fmt.Println("  - pi          explicit-only (install with `dyna skill guidance install pi` for plain Pi)")
 					continue
 				}
 				if len(pick) == 0 && !all && !t.detect() {
@@ -321,7 +333,11 @@ func installSkill(t harnessTarget) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(p, []byte(skillFrontmatter+skillBody), 0o644); err != nil {
+	frontmatter := skillFrontmatter
+	if t.name == "pi" {
+		frontmatter = piSkillFrontmatter
+	}
+	if err := os.WriteFile(p, []byte(frontmatter+skillBody), 0o644); err != nil {
 		return err
 	}
 	removeLegacyBlock(t)
