@@ -24,14 +24,18 @@ when the user asks for a workflow.
 If your instructions include a run-owned dyna journal, you are a dyna worker:
 do not use this skill; the only permitted dyna command is ` + "`dyna journal`" + `.
 
+Pi users can launch an interactive dyna-enabled harness with ` + "`dyna pi`" + `.
+Runs started there are grouped to that launch and visible live with ` + "`/dyna`" + `.
+
 **Read ` + "`dyna guide`" + ` first**: it is the full scripting guide (API + orchestration
 patterns). Quick reference:
 
-1. ` + "`dyna profiles list --json`" + `: the workers you may use. Each has a
-   description and stats (taste, intelligence, cost: 1-10, higher is better;
-   cost = cost-efficiency, 10 = very cheap). Match workers to stages: high
-   taste for review/judging/frontend; high intelligence for long hard tasks;
-   high cost stat (cheap) for wide fan-outs and first-pass triage.
+1. ` + "`dyna profiles list --json`" + `: the workers you may use. Each has three
+   stats (taste, intelligence, cost: 1-10, higher is better; cost =
+   cost-efficiency, 10 = very cheap) plus a description for color. Route
+   each stage on its stat: high taste for review/judging/frontend; high
+   intelligence for long hard tasks; high cost stat (cheap) for wide
+   fan-outs and first-pass triage.
 2. Write the script: ` + "`agent(prompt, {profile, label, phase, schema})`" + `,
    ` + "`parallel(thunks)`" + `, ` + "`pipeline(items, ...stages)`" + `, ` + "`phase(title)`" + `, ` + "`log(msg)`" + `,
    plus ` + "`args`" + ` and ` + "`profiles`" + ` globals. Plain JS, top-level await, return value

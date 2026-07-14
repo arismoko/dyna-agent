@@ -15,60 +15,80 @@ dyna run review.js --args '{"target":"src/"}'
 
 ```js
 export const meta = {
-  name: 'review-changes',
-  description: 'Review changed files across dimensions, verify each finding',
-  phases: [{ title: 'Review' }, { title: 'Verify' }],
+  name: 'audit-target',
+  description: 'Cheap sweep for hotspots, deep review, adversarial verification',
+  phases: [{ title: 'Sweep' }, { title: 'Review' }, { title: 'Verify' }],
 }
 
-const DIMENSIONS = [
-  { key: 'bugs', prompt: 'Find correctness bugs in ' + args.target },
-  { key: 'perf', prompt: 'Find performance issues in ' + args.target },
-]
+// Route on stats: cheapest worker sweeps wide, smartest reviews deep,
+// highest taste judges the findings.
+const by = k => [...profiles].sort((a, b) => b[k] - a[k])[0].name
+const sweeper = by('cost'), reviewer = by('intelligence'), judge = by('taste')
 
+const HOTSPOTS = { type: 'object', required: ['files'], properties: {
+  files: { type: 'array', items: { type: 'string' } } } }
 const FINDINGS = {
   type: 'object', required: ['findings'],
   properties: { findings: { type: 'array', items: {
-    type: 'object', required: ['title', 'file'],
-    properties: { title: {type:'string'}, file: {type:'string'}, detail: {type:'string'} },
+    type: 'object', required: ['title'],
+    properties: { title: {type:'string'}, detail: {type:'string'} },
   }}},
 }
 const VERDICT = { type: 'object', required: ['isReal'], properties: {
   isReal: {type:'boolean'}, reason: {type:'string'} }}
 
+phase('Sweep')
+const { files } = await agent(
+  `List the files under ${args.target} most likely to hide correctness or
+   security bugs (complex state, auth, concurrency). Return at most 8 paths.`,
+  { profile: sweeper, label: 'sweep', schema: HOTSPOTS })
+log(`sweep found ${files.length} hotspot files`)
+
+// pipeline = no barrier: each file's Verify starts the moment its own
+// Review finishes, while other files are still being reviewed.
 const results = await pipeline(
-  DIMENSIONS,
-  d => agent(d.prompt, { profile: 'sol', label: `review:${d.key}`, phase: 'Review', schema: FINDINGS }),
-  review => parallel(review.findings.map(f => () =>
-    agent(`Adversarially verify (try to REFUTE): ${f.title} in ${f.file}. ${f.detail || ''}`,
-      { profile: 'fable', label: `verify:${f.file}`, phase: 'Verify', schema: VERDICT })
-      .then(v => ({ ...f, verdict: v }))
-  ))
+  files,
+  f => agent(`Review ${f} for correctness and security bugs. Cite line numbers.`,
+    { profile: reviewer, label: `review:${f}`, phase: 'Review', schema: FINDINGS }),
+  (review, f) => parallel(review.findings.map(x => () =>
+    agent(`Adversarially verify — try to REFUTE: "${x.title}" in ${f}. ${x.detail || ''}`,
+      { profile: judge, label: `verify:${f}`, phase: 'Verify', schema: VERDICT })
+      .then(v => ({ ...x, file: f, verdict: v })))),
 )
-return { confirmed: results.flat().filter(Boolean).filter(f => f.verdict?.isReal) }
+return { confirmed: results.filter(Boolean).flat().filter(Boolean)
+  .filter(x => x.verdict?.isReal) }
 ```
 
 The script's `return` value is printed as JSON on stdout when the run ends.
 
-## Choosing workers: profiles
+## Choosing workers: route on the stats
 
 Users register profiles (`dyna profiles add`, `dyna profiles init`, or the
-TUI's profile wizard). Each has a description plus three standardized stats,
-all **1-10, higher is better**:
+TUI's profile wizard). Every profile carries three standardized stats, all
+**1-10, higher is better**, and the stats are your primary routing signal:
 
 - **taste**: code quality, judgment, design/frontend sense, review ability
 - **intelligence**: raw capability on hard, long, complex tasks
 - **cost**: cost efficiency (10 = very cheap to run, 1 = very expensive)
 
+Each stage of a workflow stresses exactly one stat, so route stage by stage:
+
+- **Sweep with cost. Grind with intelligence. Judge with taste.**
+- High **cost** (cheap): wide fan-outs, scouting, dedup, first-pass triage,
+  mechanical bulk edits — anywhere volume matters more than depth.
+- High **intelligence**: hard debugging, long implementation grinds,
+  root-cause analysis, gnarly correctness work.
+- High **taste**: review, verification votes, judge panels, synthesis,
+  frontend/design work — anywhere a verdict or polish is the product.
+
+Pick the stage's worker from the stats first; then read the description as
+color — it names failure modes and quirks the numbers can't (e.g. "correct
+but unpolished code, weak frontend taste"), and should only confirm or veto
+the stat-based pick, not replace it. A common shape: the cheapest profile
+gathers, the smartest digs, the most tasteful decides.
+
 Disabled profiles never appear in your `profiles` global and calling them
 fails. Only orchestrate with what you can see.
-
-Read the descriptions: they tell you each worker's strengths and failure
-modes (e.g. "tireless workhorse, writes correct but unpolished code, weak
-frontend taste"). Match workers to stages:
-
-- High **intelligence**, medium cost: long implementation grinds, hard debugging
-- High **taste**: review, verification, judging panels, frontend/design work
-- High **cost** stat (cheap): wide fan-outs, sweeps, dedup, first-pass triage
 
 Scripts also get a `profiles` global (the registry as an array), so you can
 select dynamically: `profiles.filter(p => p.cost >= 8).map(p => p.name)`.
@@ -134,9 +154,9 @@ early-exit on zero findings, "compare against the other findings" prompts).
 - **Adversarial verify**: N independent skeptics per finding, each prompted
   to REFUTE; keep only findings a majority can't kill:
   ```js
-  const votes = await parallel([1,2,3].map(() => () =>
+  const votes = await parallel([1, 2, 3].map(() => () =>
     agent(`Try to refute: ${claim}. Default refuted=true if uncertain.`,
-      { profile: 'fable', schema: VERDICT })))
+      { profile: judge, schema: VERDICT })))  // judge = highest-taste profile
   const survives = votes.filter(Boolean).filter(v => !v.refuted).length >= 2
   ```
 - **Judge panel**: generate N attempts from different angles with different
@@ -156,7 +176,7 @@ dyna profiles list [--json]        # registered workers + stats/descriptions
 dyna profiles show <name>
 dyna run <script.js> [--args '<json>'] [--name x] [--dir path] [--json] [--quiet]
          [--detach] [--resume <run-id>] [--max-agents N] [--max-concurrent N]
-dyna runs list [--json]            # past/active runs
+dyna runs list [--json] [--session <id>] # past/active runs, optionally by parent session
 dyna runs show <id> [--json]       # events, result
 dyna runs wait <id> [--timeout N]  # block until a run finishes, print result
 dyna runs cancel <id>              # stop a running workflow (kills workers)
@@ -165,6 +185,7 @@ dyna runs remove <id>... | clear   # delete finished runs
 dyna journal "message" --kind update|finding|decision|verification|blocker [--next "..."]
 dyna guide                         # this document
 dyna tui                           # human dashboard (profiles + live runs)
+dyna pi [pi args...]               # interactive pi harness with session-scoped /dyna
 ```
 
 `dyna run` streams progress to stderr and prints the workflow's JSON result to
@@ -173,6 +194,11 @@ stdout, so you can pipe it. Runs persist under the data dir. The root
 prompts and results), while each live worker writes progress to
 `agents/<agent-id>/journal.jsonl`; the final workflow value is in
 `result.json`.
+
+`dyna pi` launches pi with the dyna skill and bundled extension enabled. Every
+workflow started from that invocation is tagged with one session id; use
+`/dyna` inside pi to watch only those runs, or `dyna runs list --session <id>`
+to apply the same filter from a shell.
 
 - **Background runs**: `dyna run --detach script.js` prints the run id
   immediately; continue other work, then `dyna runs wait <id>` for the result.

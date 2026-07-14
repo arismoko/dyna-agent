@@ -2,7 +2,7 @@
   "profiles": [
     {
       "name": "fable",
-      "description": "Pick for high-stakes review and synthesis where taste matters: API design, simplifying a solution, frontend and visual design, code quality judgment, readability, and product sense. It is also strong for judge panels, final synthesis, planning and architecture, subtle correctness work (concurrency, tricky invariants), and long autonomous implementation. It is the premium worker ($10/$50 per 1M tokens, about twice sol) with deliberate multi-minute turns, so it shines on digests and decisions rather than raw fan-out; let luna or terra gather, then hand fable the synthesis. Capped at 3 concurrent and 6 calls per run, so budget it for the review, judge, and synthesize stages.",
+      "description": "Strong direction, taste, and feel for nuance, but can be less thorough than the grinders. Pick it for API design, product design, and nuanced reviews that need judgment and world knowledge; pair it with a thorough worker when completeness matters. Premium-priced and capped at 3 concurrent and 6 calls per run, so spend it on decisions, not fan-out.",
       "harness": "claude-code",
       "model": "fable",
       "taste": 10,
@@ -17,11 +17,10 @@
     },
     {
       "name": "luna",
-      "description": "Pick for the wide cheap tier: fan-out sweeps, scouting, exploration, inventory and grep-style tasks, first-pass bug finding, mechanical broad changes, and high-volume classification. The cheapest and fastest worker ($1/$6 per 1M tokens), with real capability for routine coding. Ideal as the gathering layer of any workflow: sweep wide with luna, then route the digest to a stronger model for depth. Keep its tasks scoped and self-contained; for long multi-file work, deep architectural reasoning, or visual polish, hand off to terra or sol, and double-check fast-moving factual claims against a source.",
       "harness": "codex",
       "model": "gpt-5.6-luna",
-      "taste": 5,
-      "intelligence": 7,
+      "taste": 4,
+      "intelligence": 6,
       "cost": 10,
       "extraArgs": [
         "-c",
@@ -32,7 +31,6 @@
     },
     {
       "name": "sol",
-      "description": "The workhorse for reviews and implementation that need high raw intelligence: complex bugs, deep debugging, tricky correctness, root-cause analysis, security-sensitive work, migrations, and repo-wide changes ($5/$30 per 1M tokens). Frontend bugs in behavior, state, or rendering logic fit sol, but frontend taste--visual design, UX polish, and aesthetic judgment--belongs with fable. It is also a first-rate adversarial reviewer and verification panelist; token-efficient with no concurrency cap, so it scales well for parallel review panels and multi-voter verification. It works boldly and thoroughly: on legacy code, pin the scope explicitly, and skim the diff after long autonomous runs. Route trivial edits and wide fan-outs to luna or terra to save budget for what sol does best.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -46,7 +44,7 @@
     },
     {
       "name": "sol-max",
-      "description": "Sol at maximum effort: the same gpt-5.6-sol as 'sol' pushed to xhigh effort for the very hardest problems. Use it for open-ended complex bugs, deep debugging, tricky correctness, root-cause analysis, and security-sensitive review when sol needs more time and raw intelligence. Frontend bugs in behavior, state, or rendering logic fit it, but frontend taste--visual design, UX polish, and aesthetic judgment--belongs with fable. Give it constraints and a definition of done and it will not give up. Reserve it for top-tier work; sol covers most hard jobs at lower cost. Capped at 4 concurrent and 8 calls per run.",
+      "description": "A diligent genius: always thorough, will not give up, sometimes over-engineers. Use it for complex bugs, hunting vulnerabilities and edge cases, and deep root-cause work where missing something is worse than overdoing it. Capped at 4 concurrent and 8 calls per run.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -63,12 +61,11 @@
     },
     {
       "name": "terra",
-      "description": "Default generalist and the right first choice for most standard work: multi-file implementation, bug diagnosis with verified fixes, code review, refactoring plans, and technical research. Reliable, production-oriented, and cheap ($2.50/$15 per 1M tokens), with no concurrency cap, so it also scales for parallel mid-weight work. Thorough by nature: it verifies before it answers, which is what you want on real changes (nudge it toward brevity for quick lookups). Step down to luna for high-volume trivial edits, and escalate the hardest reasoning, verification, or taste-critical frontend work to sol-max or fable. When routing is uncertain and stakes are moderate, pick terra.",
       "harness": "codex",
       "model": "gpt-5.6-terra",
       "taste": 6,
       "intelligence": 8,
-      "cost": 8,
+      "cost": 9,
       "extraArgs": [
         "-c",
         "model_reasoning_effort=high"
