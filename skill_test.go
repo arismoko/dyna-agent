@@ -13,7 +13,7 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 		"do not infer that\n  scale",
 		"Scout inline first",
 		"recursively orchestrate Dyna",
-		"only permitted Dyna command\n  is `dyna journal`",
+		"use only `dyna journal`",
 		"dyna profiles list --json",
 		"maxConcurrent",
 		"maxCallsPerRun",
@@ -107,7 +107,7 @@ func TestPiOrchestrationPromptIsCompactAndSelfContained(t *testing.T) {
 		"dyna guide",
 		"dyna run workflow.js",
 		"dyna runs wait <id>",
-		"only permitted Dyna command",
+		"use only `dyna journal`",
 	} {
 		if !strings.Contains(piOrchestrationPrompt, required) {
 			t.Errorf("Pi orchestration prompt is missing %q", required)

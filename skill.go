@@ -33,8 +33,8 @@ review, adversarial verification, judge panels, and isolated migrations.
   a thorough audit can justify broader finders, multiple votes, and synthesis.
 - If these instructions arrived inside a worker prompt with a run-owned Dyna
   journal, you are already a Dyna worker. Never load the Dyna skill, run a
-  workflow, or recursively orchestrate Dyna. The only permitted Dyna command
-  is ` + "`dyna journal`" + `. Native harness subagents remain governed by the selected
+  workflow, or recursively orchestrate Dyna; use only ` + "`dyna journal`" + `.
+  Native harness subagents remain governed by the selected
   profile; ` + "`disableSubagents`" + ` profiles require the worker to finish alone.
 
 ## Compact contract
