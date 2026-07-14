@@ -3,34 +3,14 @@
 package main
 
 import (
-	"os"
 	"os/exec"
-	"os/signal"
 	"syscall"
 )
 
+// runPiProcess replaces the dyna process with pi. An interactive TUI must own
+// the terminal's foreground process group; exec keeps the existing one, and
+// signals, exit codes, and job control all behave as if pi were launched
+// directly. It only returns on failure.
 func runPiProcess(cmd *exec.Cmd) error {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	signals := make(chan os.Signal, 4)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(signals)
-
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		for {
-			select {
-			case sig := <-signals:
-				if unixSignal, ok := sig.(syscall.Signal); ok {
-					_ = syscall.Kill(-cmd.Process.Pid, unixSignal)
-				}
-			case <-done:
-				return
-			}
-		}
-	}()
-	return cmd.Wait()
+	return syscall.Exec(cmd.Path, cmd.Args, cmd.Env)
 }
