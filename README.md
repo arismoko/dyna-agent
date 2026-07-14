@@ -333,9 +333,16 @@ as or replaces that result.
   400 ms, so entries appear while the worker is still running, not only when
   it finishes.
 
-  `dyna pi` passes `--no-skills` because its Dyna instructions and extension
-  are supplied directly; explicit pi arguments are still appended unchanged.
-  The bundled extension also registers a model-visible
+  `dyna pi` defaults its root Pi process to Pi's existing
+  `openai-codex/gpt-5.6-terra` model at `xhigh`, while explicit provider, model,
+  and thinking flags still win. It reuses Codex's ChatGPT OAuth in memory and
+  delegates refresh to Codex's app server, so no second Pi login or credential
+  copy is required. Unsupported or missing Codex auth fails with a `codex login`
+  instruction rather than falling back to another provider. The launcher passes
+  `--no-skills` because its Dyna instructions and extension are supplied directly;
+  explicit Pi arguments are still appended unchanged.
+
+  The extension bundled by `dyna pi` also registers a model-visible
   `dyna_steer` tool for active workflows owned by that pi session, so the
   parent model can steer a worker without constructing a shell command.
 

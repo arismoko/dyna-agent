@@ -1,9 +1,9 @@
-import { execFile } from "node:child_process";
-import { open } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 const SESSION = process.env.DYNA_SESSION ?? "";
@@ -12,6 +12,209 @@ const MAX_OUTPUT = 16 * 1024 * 1024;
 const MAX_EVENT_READ = 4 * 1024 * 1024;
 const MAX_JOURNAL_TAIL = 256 * 1024;
 const LIST_POLL_TICKS = 5;
+const CODEX_AUTH_ENABLED = process.env.DYNA_PI_CODEX_AUTH === "1";
+const CODEX = process.env.DYNA_CODEX_BIN || "codex";
+const CODEX_PROVIDER = "openai-codex";
+const CODEX_REFRESH_MARGIN_MS = 10 * 60 * 1000;
+const CODEX_REFRESH_RETRY_MS = 30 * 1000;
+const CODEX_RPC_TIMEOUT_MS = 20 * 1000;
+const CODEX_RPC_MAX_LINE = 1024 * 1024;
+
+type CodexAccess = {
+	token: string;
+	expiresAt: number;
+};
+
+class CodexAuthError extends Error {}
+
+let codexHome: string | undefined;
+let codexSync: Promise<CodexAccess> | undefined;
+let codexRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+let codexAuthWarning = "";
+
+function codexAuthMessage(error: unknown): string {
+	if (error instanceof CodexAuthError) return error.message;
+	return "Codex authentication could not be reused. Run `codex login` and retry.";
+}
+
+function readCodexRPCLine(line: string): Record<string, unknown> | undefined {
+	try {
+		const value: unknown = JSON.parse(line);
+		return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function queryCodexAccount(refreshToken: boolean): Promise<string> {
+	return await new Promise<string>((resolve, reject) => {
+		const child = spawn(CODEX, ["app-server", "--listen", "stdio://"], {
+			stdio: ["pipe", "pipe", "ignore"],
+			windowsHide: true,
+		});
+		let buffer = "";
+		let home = "";
+		let settled = false;
+		const timer = setTimeout(() => finish(new CodexAuthError("Codex authentication check timed out. Run `codex login` and retry.")), CODEX_RPC_TIMEOUT_MS);
+		timer.unref?.();
+
+		function finish(error?: Error): void {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			child.stdin.end();
+			child.kill();
+			if (error) reject(error);
+			else resolve(home);
+		}
+
+		function send(value: unknown): void {
+			child.stdin.write(`${JSON.stringify(value)}\n`);
+		}
+
+		child.on("error", () => finish(new CodexAuthError("Codex CLI is unavailable. Install Codex, run `codex login`, and retry.")));
+		child.stdin.on("error", () => {
+			// The process error/exit handler reports the actionable failure.
+		});
+		child.on("exit", () => {
+			if (!settled) finish(new CodexAuthError("Codex authentication check exited before completing. Run `codex login` and retry."));
+		});
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			buffer += chunk;
+			if (buffer.length > CODEX_RPC_MAX_LINE) {
+				finish(new CodexAuthError("Codex returned an unsupported authentication response."));
+				return;
+			}
+			for (;;) {
+				const newline = buffer.indexOf("\n");
+				if (newline < 0) break;
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				const message = readCodexRPCLine(line);
+				if (!message) continue;
+				if (message.id === 1) {
+					const result = message.result;
+					const candidate = typeof result === "object" && result !== null
+						? (result as Record<string, unknown>).codexHome
+						: undefined;
+					if (typeof candidate !== "string" || !isAbsolute(candidate)) {
+						finish(new CodexAuthError("Codex returned an unsupported authentication-store location."));
+						return;
+					}
+					home = candidate;
+					send({ method: "initialized" });
+					send({ method: "account/read", id: 2, params: { refreshToken } });
+					continue;
+				}
+				if (message.id !== 2) continue;
+				if (message.error !== undefined) {
+					finish(new CodexAuthError(refreshToken
+						? "Codex could not refresh its ChatGPT authentication. Run `codex login` and retry."
+						: "Codex authentication could not be read. Run `codex login` and retry."));
+					return;
+				}
+				const result = message.result;
+				const account = typeof result === "object" && result !== null
+					? (result as Record<string, unknown>).account
+					: undefined;
+				const accountType = typeof account === "object" && account !== null
+					? (account as Record<string, unknown>).type
+					: undefined;
+				if (accountType !== "chatgpt") {
+					finish(new CodexAuthError("Codex is not authenticated with ChatGPT OAuth. Run `codex login` and retry."));
+					return;
+				}
+				finish();
+			}
+		});
+
+		send({
+			method: "initialize",
+			id: 1,
+			params: { clientInfo: { name: "dyna_pi", title: "Dyna Pi", version: "1" } },
+		});
+	});
+}
+
+async function readCodexAccess(home: string): Promise<CodexAccess> {
+	let value: unknown;
+	try {
+		value = JSON.parse(await readFile(join(home, "auth.json"), "utf8"));
+	} catch {
+		throw new CodexAuthError("Codex ChatGPT credentials are not available in its supported file store. Run `codex login` and retry.");
+	}
+	if (typeof value !== "object" || value === null) {
+		throw new CodexAuthError("Codex uses an unsupported credential format. Update Codex or run `codex login` and retry.");
+	}
+	const auth = value as Record<string, unknown>;
+	if (auth.auth_mode !== "chatgpt" || typeof auth.tokens !== "object" || auth.tokens === null) {
+		throw new CodexAuthError("Codex is not authenticated with a supported ChatGPT OAuth credential. Run `codex login` and retry.");
+	}
+	const token = (auth.tokens as Record<string, unknown>).access_token;
+	if (typeof token !== "string" || token.length === 0) {
+		throw new CodexAuthError("Codex uses an unsupported credential format. Update Codex or run `codex login` and retry.");
+	}
+	try {
+		const parts = token.split(".");
+		if (parts.length !== 3) throw new Error("not a JWT");
+		const claims: unknown = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8"));
+		if (typeof claims !== "object" || claims === null) throw new Error("invalid claims");
+		const expires = (claims as Record<string, unknown>).exp;
+		const providerClaims = (claims as Record<string, unknown>)["https://api.openai.com/auth"];
+		const accountID = typeof providerClaims === "object" && providerClaims !== null
+			? (providerClaims as Record<string, unknown>).chatgpt_account_id
+			: undefined;
+		if (typeof expires !== "number" || !Number.isFinite(expires) || typeof accountID !== "string" || accountID.length === 0) {
+			throw new Error("missing claims");
+		}
+		return { token, expiresAt: expires * 1000 };
+	} catch {
+		throw new CodexAuthError("Codex uses an unsupported access-token format. Update Codex or run `codex login` and retry.");
+	}
+}
+
+async function obtainCodexAccess(): Promise<CodexAccess> {
+	if (!codexHome) codexHome = await queryCodexAccount(false);
+	let access = await readCodexAccess(codexHome);
+	if (access.expiresAt - Date.now() <= CODEX_REFRESH_MARGIN_MS) {
+		codexHome = await queryCodexAccount(true);
+		access = await readCodexAccess(codexHome);
+	}
+	if (access.expiresAt <= Date.now()) {
+		throw new CodexAuthError("Codex ChatGPT authentication is expired and could not be refreshed. Run `codex login` and retry.");
+	}
+	return access;
+}
+
+function scheduleCodexRefresh(ctx: ExtensionContext, expiresAt: number, retryDelay?: number): void {
+	if (codexRefreshTimer) clearTimeout(codexRefreshTimer);
+	const delay = retryDelay ?? Math.max(1000, expiresAt - Date.now() - CODEX_REFRESH_MARGIN_MS);
+	codexRefreshTimer = setTimeout(() => {
+		void installCodexAccess(ctx).catch((error) => {
+			const message = codexAuthMessage(error);
+			if (message !== codexAuthWarning) {
+				codexAuthWarning = message;
+				ctx.ui.notify(message, "error");
+			}
+			if (Date.now() >= expiresAt && !ctx.isIdle()) ctx.abort();
+			scheduleCodexRefresh(ctx, expiresAt, CODEX_REFRESH_RETRY_MS);
+		});
+	}, delay);
+	codexRefreshTimer.unref?.();
+}
+
+async function installCodexAccess(ctx: ExtensionContext): Promise<void> {
+	if (!codexSync) {
+		codexSync = obtainCodexAccess().finally(() => {
+			codexSync = undefined;
+		});
+	}
+	const access = await codexSync;
+	ctx.modelRegistry.authStorage.setRuntimeApiKey(CODEX_PROVIDER, access.token);
+	codexAuthWarning = "";
+	scheduleCodexRefresh(ctx, access.expiresAt);
+}
 
 type Run = {
 	id: string;
@@ -390,6 +593,34 @@ class DynaRunsOverlay implements Component {
 export default function (pi: ExtensionAPI) {
 	if (!SESSION) return;
 
+	pi.on("input", async (_event, ctx) => {
+		if (!CODEX_AUTH_ENABLED || ctx.model?.provider !== CODEX_PROVIDER) return;
+		try {
+			await installCodexAccess(ctx);
+		} catch (error) {
+			const message = codexAuthMessage(error);
+			codexAuthWarning = message;
+			ctx.ui.notify(message, "error");
+			return { action: "handled" as const };
+		}
+	});
+
+	pi.on("model_select", async (_event, ctx) => {
+		if (!CODEX_AUTH_ENABLED || ctx.model?.provider !== CODEX_PROVIDER) return;
+		try {
+			await installCodexAccess(ctx);
+		} catch (error) {
+			const message = codexAuthMessage(error);
+			codexAuthWarning = message;
+			ctx.ui.notify(message, "error");
+		}
+	});
+
+	pi.on("session_shutdown", () => {
+		if (codexRefreshTimer) clearTimeout(codexRefreshTimer);
+		codexRefreshTimer = undefined;
+	});
+
 	pi.registerTool({
 		name: "dyna_steer",
 		label: "Steer Dyna Worker",
@@ -428,6 +659,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (CODEX_AUTH_ENABLED && ctx.model?.provider === CODEX_PROVIDER) {
+			try {
+				await installCodexAccess(ctx);
+			} catch (error) {
+				const message = codexAuthMessage(error);
+				codexAuthWarning = message;
+				ctx.ui.notify(message, "error");
+			}
+		}
 		try {
 			const runs = await listRuns();
 			const running = runs.filter((run) => run.status === "running").length;

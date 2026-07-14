@@ -196,10 +196,19 @@ prompts and results), while each live worker writes progress to
 `agents/<agent-id>/journal.jsonl`; the final workflow value is in
 `result.json`.
 
-`dyna pi` launches pi with direct Dyna instructions and the bundled extension enabled. It
-passes `--no-skills`, so the harness has no runtime skill dependency; explicit pi arguments
-are appended unchanged. Every workflow started from that invocation is tagged with one session id; use
-`/dyna` inside pi to watch only those runs, or `dyna runs list --session <id>`
+`dyna pi` launches Pi with direct Dyna instructions and the bundled extension,
+defaulting the root orchestrator to Pi's built-in
+`openai-codex/gpt-5.6-terra` model at `xhigh` reasoning. Explicit Pi
+`--provider`, `--model`, or `--thinking` flags take precedence. The extension
+asks Codex's app server to own OAuth refresh and installs only the current
+access token in Pi's in-memory runtime auth; it does not copy credentials into
+Pi's config. A missing login or unsupported Codex credential store stops the
+prompt with a `codex login` error instead of selecting another provider. The
+launcher passes `--no-skills`, so the harness has no runtime skill dependency;
+explicit Pi arguments are appended unchanged.
+
+Every workflow started from that invocation is tagged with one session id; use
+`/dyna` inside Pi to watch only those runs, or `dyna runs list --session <id>`
 to apply the same filter from a shell. Its model-visible `dyna_steer` tool can
 send a short instruction to a running worker from that session. In `dyna tui`,
 select a running worker in the agent inspector and press `s` for the same
