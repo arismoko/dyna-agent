@@ -343,8 +343,10 @@ as or replaces that result.
 
   `dyna pi` launches the built-in root agent preset `dyna-orchestrator`, names
   new sessions after that preset unless `--name`/`-n` is supplied, and keeps an
-  `agent:dyna-orchestrator` footer status visible without a startup message. By
-  default it activates every tool registered when Pi starts, including Pi's
+  `agent:dyna-orchestrator` footer status visible without a startup message. It
+  uses Dyna workflows by default for code changes, reserving direct work for
+  clearly small, straightforward changes that are easy to verify. By default it
+  activates every tool registered when Pi starts, including Pi's
   normally opt-in built-ins, the native Dyna tools, and tools from other loaded
   extensions. Explicit `--tools`/`-t`, `--exclude-tools`/`-xt`, `--no-tools`/`-nt`,
   and `--no-builtin-tools`/`-nbt` selections remain authoritative.

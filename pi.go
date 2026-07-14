@@ -21,9 +21,10 @@ var piExtensionTS []byte
 
 const piOrchestrationPrompt = `Dyna is enabled for this Pi launch. Treat these instructions as standing session guidance. The launcher provides the Dyna extension directly, so do not search for or load a separate dyna skill.
 
-Use Dyna only when the user explicitly requests Dyna, a workflow, agent fan-out,
-or multi-model orchestration. Scout the concrete work list inline first, then
-scale the run to the request. If these instructions appear inside a Dyna worker
+Use Dyna workflows by default for code changes. Scout the concrete work list
+inline first, then scale the workflow to the request. Work directly only when
+the change is clearly small, straightforward, and easy to verify; honor an
+explicit user direction not to use Dyna. If these instructions appear inside a Dyna worker
 prompt with a run-owned journal, never orchestrate recursively; use only dyna
 journal and obey any disableSubagents restriction.
 
