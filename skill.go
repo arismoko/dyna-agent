@@ -10,75 +10,85 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The agent-facing skill. Kept short on purpose: `dyna guide` is the real
-// documentation; this just teaches harnesses that dyna exists and when to
-// reach for it.
-const skillBody = `# dyna: dynamic multi-agent workflows
+// Keep one compact policy/API source for installed skills, managed root
+// guidance, and the direct `dyna pi --no-skills` launch prompt. The detailed
+// reference and runnable examples live in guide/GUIDE.md (`dyna guide`).
+const agentFacingGuidance = `# Multi-model workflows with dyna
 
-You have access to the ` + "`dyna`" + ` CLI: write a JavaScript workflow script that
-orchestrates registered model workers, then run it. Use it when a task
-benefits from fanning work out to multiple models (parallel code review,
-wide sweeps/audits, adversarial verification, judge panels, migrations) or
-when the user asks for a workflow.
+Dyna runs plain JavaScript workflow files that orchestrate registered model
+workers. Use it for deterministic fan-out such as broad audits, parallel
+review, adversarial verification, judge panels, and isolated migrations.
 
-If your instructions include a run-owned dyna journal, you are a dyna worker:
-do not invoke Dyna workflows; the only permitted dyna command is ` + "`dyna journal`" + `.
+## Use boundary
 
-Pi users can launch an interactive dyna-enabled harness with ` + "`dyna pi`" + `.
-Runs started there are grouped to that launch and visible live with ` + "`/dyna`" + `.
+- Run Dyna when the user explicitly asks for Dyna, a workflow, agent fan-out,
+  or multi-model orchestration, or when an invoked skill/instruction requires
+  it. A workflow can start many paid worker sessions, so do not infer that
+  scale merely because it could help; use ordinary harness subagents for
+  small context-local delegation, or describe the proposed fleet and ask.
+- Scout inline first: list files, inspect the diff, and discover the concrete
+  work list. Then orchestrate over that list. Keep each run to one coherent
+  phase when reading its result should influence the next phase. Scale to the
+  user's words: a quick check needs a small fan-out and one verification pass;
+  a thorough audit can justify broader finders, multiple votes, and synthesis.
+- If these instructions arrived inside a worker prompt with a run-owned Dyna
+  journal, you are already a Dyna worker. Never load the Dyna skill, run a
+  workflow, or recursively orchestrate Dyna. The only permitted Dyna command
+  is ` + "`dyna journal`" + `. Native harness subagents remain governed by the selected
+  profile; ` + "`disableSubagents`" + ` profiles require the worker to finish alone.
 
-**Read ` + "`dyna guide`" + ` first**: it is the full scripting guide (API + orchestration
-patterns). Quick reference:
+## Compact contract
 
-1. ` + "`dyna profiles list --json`" + `: the workers you may use. Each has three
-   stats (taste, intelligence, cost: 1-10, higher is better; cost =
-   cost-efficiency, 10 = very cheap) plus a description for color. Route
-   each stage on its stat: high taste for review/judging/frontend; high
-   intelligence for long hard tasks; high cost stat (cheap) for wide
-   fan-outs and first-pass triage.
-2. Write the script: ` + "`agent(prompt, {profile, label, phase, schema})`" + `,
-   ` + "`parallel(thunks)`" + `, ` + "`pipeline(items, ...stages)`" + `, ` + "`phase(title)`" + `, ` + "`log(msg)`" + `,
-   plus ` + "`args`" + ` and ` + "`profiles`" + ` globals. Plain JS, top-level await, return value
-   becomes the result. ` + "`schema`" + ` gives validated JSON output back. Every call defaults to
-   5 hours; explicit script and profile timeout values have a 30-minute minimum; shorter values are clamped.
-3. ` + "`dyna run script.js --args '{...}'`" + `: progress streams to stderr, the
-   result JSON prints to stdout. Add ` + "`--detach`" + ` to run in the background
-   (prints run id; collect later with ` + "`dyna runs wait <id>`" + `), and
-   ` + "`--resume <run-id>`" + ` to replay unchanged agent calls from a previous run
-   after a failure or script edit.
-4. ` + "`dyna runs list`" + ` / ` + "`dyna runs show <id> --json`" + ` to inspect past runs.
-   The user watches live with ` + "`dyna tui`" + `.
+1. Run ` + "`dyna profiles list --json`" + ` and route by the 1-10 stats: high
+   ` + "`cost`" + ` means cheap enough for breadth, ` + "`intelligence`" + ` fits hard implementation,
+   and ` + "`taste`" + ` fits review, judging, and synthesis. Disabled profiles are
+   absent. Respect ` + "`maxConcurrent`" + ` and ` + "`maxCallsPerRun`" + `; exceeding a call
+   cap aborts the run.
+2. Read ` + "`dyna guide`" + `, then write a plain ` + "`.js`" + ` file. Scripts allow top-level
+   ` + "`await`" + ` and return their final JSON value. The globals are ` + "`args`" + ` (parsed
+   ` + "`--args`" + ` JSON) and enabled ` + "`profiles`" + `. An optional ` + "`export const meta`" + `
+   documents the run; ` + "`meta.name`" + ` supplies its default display name.
+3. ` + "`agent(prompt, opts)`" + ` starts one independent worker. Supported options are
+   ` + "`profile`" + `, ` + "`label`" + `, ` + "`phase`" + `, ` + "`schema`" + `, ` + "`cwd`" + `, ` + "`timeout`" + ` (seconds),
+   and ` + "`isolation: 'worktree'`" + `. A schema returns validated JSON after at most
+   three attempts. Calls default to five hours; positive script timeouts
+   override profile timeouts, and all explicit/profile values have a
+   30-minute minimum. Worktree isolation starts from repository ` + "`HEAD`" + `,
+   removes a clean tree, and keeps/logs a changed tree; Dyna does not merge it.
+4. ` + "`parallel(thunks)`" + ` is an all-results barrier. Rejected thunks are logged
+   and become ` + "`null`" + `. ` + "`pipeline(items, ...stages)`" + ` streams each item through
+   its stages independently; a throwing stage makes that item ` + "`null`" + ` and skips
+   its remaining stages. Prefer pipeline unless a later step truly needs all
+   earlier results together. Use explicit ` + "`phase`" + ` options inside concurrent
+   callbacks. ` + "`phase(title)`" + ` groups progress, ` + "`log(message)`" + ` reports it, and
+   ` + "`sleep(ms)`" + ` paces polling.
+5. Run ` + "`dyna run workflow.js --args '{...}'`" + `. Progress goes to stderr and
+   the returned JSON goes to stdout. ` + "`--detach`" + ` prints a run id immediately;
+   collect it with ` + "`dyna runs wait <id>`" + `. ` + "`--resume <id>`" + ` reuses successful
+   calls matching profile, prompt, and schema; failures and kept changed
+   worktrees rerun. Inspect with ` + "`dyna runs show <id> --json`" + ` or ` + "`dyna tui`" + `.
 
-Every worker gets ` + "`runs/<run-id>/agents/<agent-id>/journal.jsonl`" + `; the root
-` + "`journal.jsonl`" + ` remains the completed-call/resume ledger. Dyna prepends the
-base journal instructions. Reinforce them in every ` + "`agent()`" + ` prompt: use
-` + "`dyna journal \"message\" --kind update|finding|decision|verification|blocker --next \"...\"`" + `
-once after orientation, at meaningful discoveries/decisions/verification/
-blockers, before a long operation, and before finishing. Notes are concise
-and brief (one or two sentences plus an optional next step), not chain-of-thought
-or a running transcript. This includes read-only exploration: the worker treats
-the run-owned journal as its only allowed write. An explicitly read-only Codex
-profile stays read-only; dyna grants write access only to its agent journal directory,
-not the target workspace. Other explicit read-only modes are not auto-bypassed;
-if they cannot allow the journal narrowly, dyna records the missing entry.
-After five minutes without a valid agent-authored entry,
-dyna gracefully interrupts and continues the exact same
-resumable built-in session with a write-now-and-continue reminder; it never
-starts a fresh worker for a journal nudge. A fast resumable worker that finishes
-without an entry gets one bounded, immediate reminder in that same session, while its
-original result is preserved. Non-resumable/custom sessions are only marked
-quiet or missing-entry. Journal entries are a progress side channel,
-not the worker's final response or schema output. The user can watch them appear live
-in the TUI while the worker is still running.
+Uncaught ` + "`agent()`" + ` errors fail the workflow; only ` + "`parallel`" + `/` + "`pipeline`" + ` convert
+their contained failures to ` + "`null`" + `. Filter and account for those values rather
+than silently claiming full coverage. Each worker sees only its prompt and working
+directory, so include all needed context. For parallel mutations, use worktree
+isolation or disjoint scopes.
 
-Unless a profile opts into safe/read-only behavior, workers run with harness
-permissions bypassed so headless approval prompts cannot hang them. For
-parallel file mutation, pass ` + "`isolation: 'worktree'`" + ` per agent.
+Dyna gives every worker a live ` + "`agents/<agent-id>/journal.jsonl`" + ` progress
+side channel and keeps the root ` + "`journal.jsonl`" + ` as the completed-call/resume
+ledger. Dyna injects the journal and no-recursion rules automatically; reinforce
+brief entries after orientation, on meaningful findings/decisions/verification/
+blockers, before long operations, and before finishing. The journal never replaces
+the worker's final response or schema output. A quiet resumable built-in session is
+reminded in that exact session; Dyna never starts a replacement merely to obtain a
+journal entry.
 `
+
+const skillBody = agentFacingGuidance
 
 const skillFrontmatter = `---
 name: dyna
-description: Orchestrate multi-model workflows with the dyna CLI. Fan work out to registered worker models (parallel review, sweeps, judge panels, adversarial verification). Use when a task would benefit from multiple models working together or the user mentions dyna, workflows, or worker profiles.
+description: Orchestrate registered model workers with the dyna CLI when the user explicitly requests Dyna, a workflow, fan-out, or multi-model orchestration such as parallel review, audits, judge panels, or adversarial verification.
 ---
 
 `
@@ -90,16 +100,7 @@ const (
 	guidanceMarkEnd   = "<!-- dyna:guidance:end -->"
 )
 
-const guidanceBody = `# Multi-model workflows with dyna
-
-You can orchestrate fleets of worker models with the dyna CLI.
-
-- Reach for dyna when the user explicitly asks (mentions dyna, workflows, worker profiles, or multi-model orchestration) or when a task genuinely benefits from fanning out across models: parallel code review, wide audits or sweeps, adversarial verification, judge panels, or large migrations. Workflows can spawn many worker sessions and consume significant tokens, so the user should be requesting that scale rather than having it inferred from an ordinary task.
-- Prefer a hybrid approach: scout inline first (list files, scope the diff, find the work list), then orchestrate over what you found.
-- Scale to the ask: "find bugs" means a few finders and a single verification vote; "thoroughly audit" means a large finder pool, an adversarial multi-vote pass, and a synthesis stage.
-- For ordinary context-local delegation (a focused search or a scoped edit), use your harness's built-in subagents. Dyna is for cases where different models or deterministic fan-out add real value.
-- EXCEPTION: if you are yourself a dyna worker (your instructions mention the run-owned dyna journal), none of this applies. Never invoke dyna workflow commands; use only ` + "`dyna journal`" + `.
-`
+const guidanceBody = agentFacingGuidance
 
 // Every supported harness loads Claude-style skills (a directory holding a
 // SKILL.md with name/description frontmatter), so installation is always a

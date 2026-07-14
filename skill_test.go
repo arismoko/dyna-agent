@@ -7,42 +7,117 @@ import (
 	"testing"
 )
 
-func TestSkillDocumentsAgentJournalContract(t *testing.T) {
+func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 	required := []string{
-		"If your instructions include a run-owned dyna journal",
-		"do not use this skill",
-		"only permitted dyna command is `dyna journal`",
-		"runs/<run-id>/agents/<agent-id>/journal.jsonl",
-		"completed-call/resume ledger",
-		"Dyna prepends the",
-		"Reinforce them in every",
-		`dyna journal "message" --kind update|finding|decision|verification|blocker`,
-		"once after orientation",
-		"before a long operation",
+		"user explicitly asks for Dyna",
+		"do not infer that\n  scale",
+		"Scout inline first",
+		"recursively orchestrate Dyna",
+		"only permitted Dyna command\n  is `dyna journal`",
+		"dyna profiles list --json",
+		"maxConcurrent",
+		"maxCallsPerRun",
+		"dyna guide",
+		"export const meta",
+		"agent(prompt, opts)",
+		"profile`, `label`, `phase`, `schema`, `cwd`, `timeout`",
+		"isolation: 'worktree'",
+		"at most\n   three attempts",
+		"30-minute minimum",
+		"all-results barrier",
+		"streams each item through",
+		"throwing stage makes that item `null`",
+		"dyna runs wait <id>",
+		"--resume <id>",
+		"matching profile, prompt, and schema",
+		"Uncaught `agent()` errors fail the workflow",
+		"agents/<agent-id>/journal.jsonl",
+		"completed-call/resume\nledger",
+		"after orientation",
+		"before long operations",
 		"before finishing",
-		"one or two sentences plus an optional next step",
-		"not chain-of-thought",
-		"read-only exploration",
-		"only allowed write",
-		"five minutes without a valid agent-authored entry",
-		"exact same",
-		"resumable built-in session",
-		"fresh worker for a journal nudge",
-		"grants write access only to its agent journal directory",
-		"explicit read-only modes are not auto-bypassed",
-		"fast resumable worker that finishes",
-		"original result is preserved",
-		"Non-resumable/custom sessions are only marked",
-		"progress side channel",
-		"not the worker's final response or schema output",
-		"defaults to\n   5 hours",
-		"30-minute minimum; shorter values are clamped",
-		"watch them appear live",
+		"progress\nside channel",
+		"never replaces\nthe worker's final response or schema output",
+		"never starts a replacement",
+	}
+	for name, body := range map[string]string{"skill": skillBody, "guidance": guidanceBody} {
+		for _, contract := range required {
+			if !strings.Contains(body, contract) {
+				t.Errorf("%s body is missing contract %q", name, contract)
+			}
+		}
+	}
+	if skillBody != agentFacingGuidance || guidanceBody != agentFacingGuidance {
+		t.Fatal("skill and managed guidance must share the canonical agent-facing contract")
+	}
+}
+
+func TestAgentFacingDocsExcludeUnsupportedWorkflowConcepts(t *testing.T) {
+	forbidden := []string{
+		"ultracode", "<task-notification>", "/workflows", "StructuredOutput",
+		"workflow(name", "budget.remaining", "Date.now", "Math.random",
+		"agentType", "opts.effort", "saved workflow", "nested workflow",
+		"4096 items",
+	}
+	for name, body := range map[string]string{
+		"guidance": agentFacingGuidance,
+		"guide":    guideMD,
+	} {
+		for _, term := range forbidden {
+			if strings.Contains(body, term) {
+				t.Errorf("%s contains unsupported workflow concept %q", name, term)
+			}
+		}
+	}
+}
+
+func TestGuideDocumentsRuntimeContractAndRunnableExamples(t *testing.T) {
+	required := []string{
+		"## When to use Dyna",
+		"## Public JavaScript API",
+		"meta` is a convention, not a validated runtime schema",
+		"three attempts total",
+		"no stage barrier",
+		"## Example 1: parallel structured review",
+		"## Example 2: streaming transform and verify",
+		"## Example 3: isolated implementation followed by review",
+		"## Quality patterns",
+		"### Adversarial verification",
+		"### Judge panel",
+		"### Completeness and convergence",
+		"## Failure and result behavior",
+		"## Journals and live progress",
+		"## Resume semantics",
+		"profile name, exact prompt, and serialized schema",
+		"This is\nkey matching, not source-line or longest-prefix matching",
+		"## Common mistakes",
 	}
 	for _, contract := range required {
-		if !strings.Contains(skillBody, contract) {
-			t.Errorf("skillBody is missing journal contract %q", contract)
+		if !strings.Contains(guideMD, contract) {
+			t.Errorf("guide is missing contract or example %q", contract)
 		}
+	}
+}
+
+func TestPiOrchestrationPromptIsCompactAndSelfContained(t *testing.T) {
+	for _, required := range []string{
+		"Dyna is enabled for this Pi launch",
+		"do not search for or load a separate dyna skill",
+		"dyna profiles list --json",
+		"dyna guide",
+		"dyna run workflow.js",
+		"dyna runs wait <id>",
+		"only permitted Dyna command",
+	} {
+		if !strings.Contains(piOrchestrationPrompt, required) {
+			t.Errorf("Pi orchestration prompt is missing %q", required)
+		}
+	}
+	if strings.Count(piOrchestrationPrompt, agentFacingGuidance) != 1 {
+		t.Fatal("Pi orchestration prompt must inject the shared guidance exactly once")
+	}
+	if len(piOrchestrationPrompt) > 9000 {
+		t.Fatalf("Pi orchestration prompt grew too large for standing root guidance: %d bytes", len(piOrchestrationPrompt))
 	}
 }
 

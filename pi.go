@@ -19,7 +19,7 @@ import (
 //go:embed assets/pi-extension/dyna.ts
 var piExtensionTS []byte
 
-const piOrchestrationPrompt = "Dyna is enabled for this Pi launch. Treat these instructions as standing session guidance. The launcher provides the Dyna extension directly, so do not search for or load a separate dyna skill.\n\n" + skillBody + "\n" + guidanceBody
+const piOrchestrationPrompt = "Dyna is enabled for this Pi launch. Treat these instructions as standing session guidance. The launcher provides the Dyna extension directly, so do not search for or load a separate dyna skill.\n\n" + agentFacingGuidance
 
 const (
 	piDefaultProvider = "openai-codex"
