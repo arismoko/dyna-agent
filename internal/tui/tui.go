@@ -252,6 +252,20 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
+func visibleRange(total, selected, rows int) (int, int) {
+	if total <= 0 || rows <= 0 {
+		return 0, 0
+	}
+	rows = min(rows, total)
+	selected = clamp(selected, 0, total-1)
+	start := clamp(selected-rows+1, 0, total-rows)
+	return start, start + rows
+}
+
+func overflowLabel(start, end, total int) string {
+	return itoa(start+1) + "-" + itoa(end) + " of " + itoa(total)
+}
+
 func fmtDur(ms int64) string {
 	d := time.Duration(ms) * time.Millisecond
 	if d < time.Minute {

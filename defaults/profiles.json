@@ -2,7 +2,7 @@
   "profiles": [
     {
       "name": "fable",
-      "description": "Pick for the stages where a wrong answer is costly: judge panels, final synthesis, high-stakes code review, planning and architecture, subtle correctness work (concurrency, tricky invariants), long autonomous implementation, and frontend work that needs real design taste. It is the premium worker ($10/$50 per 1M tokens, about twice sol) with deliberate multi-minute turns, so it shines on digests and decisions rather than raw fan-out; let luna or terra gather, then hand fable the synthesis. For the most important verdicts, pair it with sol-max: two frontier models from different families with uncorrelated errors beat either alone. For security-focused analysis, prefer sol, the specialist. Capped at 3 concurrent and 6 calls per run, so budget it for the verify, judge, and synthesize stages.",
+      "description": "Pick for high-stakes review and synthesis where taste matters: API design, simplifying a solution, frontend and visual design, code quality judgment, readability, and product sense. It is also strong for judge panels, final synthesis, planning and architecture, subtle correctness work (concurrency, tricky invariants), and long autonomous implementation. It is the premium worker ($10/$50 per 1M tokens, about twice sol) with deliberate multi-minute turns, so it shines on digests and decisions rather than raw fan-out; let luna or terra gather, then hand fable the synthesis. Capped at 3 concurrent and 6 calls per run, so budget it for the review, judge, and synthesize stages.",
       "harness": "claude-code",
       "model": "fable",
       "taste": 10,
@@ -12,7 +12,8 @@
         "MAX_THINKING_TOKENS": "63999"
       },
       "maxConcurrent": 3,
-      "maxCallsPerRun": 6
+      "maxCallsPerRun": 6,
+      "managed": true
     },
     {
       "name": "luna",
@@ -24,12 +25,14 @@
       "cost": 10,
       "extraArgs": [
         "-c",
-        "model_reasoning_effort=medium"
-      ]
+        "model_reasoning_effort=high"
+      ],
+      "disableSubagents": true,
+      "managed": true
     },
     {
       "name": "sol",
-      "description": "The workhorse for the hardest jobs: complex implementation, deep debugging, migrations, repo-wide changes, root-cause analysis, and security-focused work where it specializes ($5/$30 per 1M tokens). Also a first-rate adversarial reviewer and verification panelist; token-efficient with no concurrency cap, so it scales well for parallel review panels and multi-voter verification. It works boldly and thoroughly: on legacy code, pin the scope explicitly, and skim the diff after long autonomous runs. Route trivial edits and wide fan-outs to luna or terra to save budget for what sol does best.",
+      "description": "The workhorse for reviews and implementation that need high raw intelligence: complex bugs, deep debugging, tricky correctness, root-cause analysis, security-sensitive work, migrations, and repo-wide changes ($5/$30 per 1M tokens). Frontend bugs in behavior, state, or rendering logic fit sol, but frontend taste--visual design, UX polish, and aesthetic judgment--belongs with fable. It is also a first-rate adversarial reviewer and verification panelist; token-efficient with no concurrency cap, so it scales well for parallel review panels and multi-voter verification. It works boldly and thoroughly: on legacy code, pin the scope explicitly, and skim the diff after long autonomous runs. Route trivial edits and wide fan-outs to luna or terra to save budget for what sol does best.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -38,11 +41,12 @@
       "extraArgs": [
         "-c",
         "model_reasoning_effort=high"
-      ]
+      ],
+      "managed": true
     },
     {
       "name": "sol-max",
-      "description": "Fable's peer from a different model family: the same gpt-5.6-sol as 'sol' pushed to max effort, putting it in the top tier alongside fable. Its value is the alternate angle: uncorrelated errors make it the ideal cross-check on fable's verdicts (and fable on its), the tie-breaker in judge panels, and the second opinion on decisions too important for one frontier model. Also the closer when sol needs backup on an open-ended hard problem: give it constraints and a definition of done and it will not give up. Reserve it for top-tier work; sol covers most hard jobs at lower cost. Capped at 4 concurrent and 8 calls per run.",
+      "description": "Sol at maximum effort: the same gpt-5.6-sol as 'sol' pushed to xhigh effort for the very hardest problems. Use it for open-ended complex bugs, deep debugging, tricky correctness, root-cause analysis, and security-sensitive review when sol needs more time and raw intelligence. Frontend bugs in behavior, state, or rendering logic fit it, but frontend taste--visual design, UX polish, and aesthetic judgment--belongs with fable. Give it constraints and a definition of done and it will not give up. Reserve it for top-tier work; sol covers most hard jobs at lower cost. Capped at 4 concurrent and 8 calls per run.",
       "harness": "codex",
       "model": "gpt-5.6-sol",
       "taste": 7,
@@ -50,10 +54,12 @@
       "cost": 5,
       "extraArgs": [
         "-c",
-        "model_reasoning_effort=max"
+        "model_reasoning_effort=xhigh"
       ],
       "maxConcurrent": 4,
-      "maxCallsPerRun": 8
+      "maxCallsPerRun": 8,
+      "disableSubagents": true,
+      "managed": true
     },
     {
       "name": "terra",
@@ -65,9 +71,11 @@
       "cost": 8,
       "extraArgs": [
         "-c",
-        "model_reasoning_effort=medium"
+        "model_reasoning_effort=high"
       ],
-      "default": true
+      "default": true,
+      "disableSubagents": true,
+      "managed": true
     }
   ]
 }

@@ -863,7 +863,7 @@ func (m runsModel) view(frame int) string {
 			rightStyle = sPaneR
 		}
 		content := m.renderInspectHeader() + "\n\n" + m.ivp.View()
-		right := rightStyle.Width(m.detailWidth()).Height(m.height - 2).Render(content)
+		right := rightStyle.Width(m.detailWidth()).Height(max(0, m.height-2)).Render(content)
 		return lipgloss.JoinHorizontal(lipgloss.Top, m.viewAgentList(), right)
 	}
 	left := m.viewList(frame)
@@ -885,12 +885,15 @@ func (m runsModel) viewAgentList() string {
 	if m.inspectorAgentCount() == 0 {
 		b.WriteString(sDim.Render("\nwaiting for agents to start…"))
 	}
-	maxRows := max(1, (m.height-4)/2)
-	start := 0
-	if m.agentSel >= maxRows {
-		start = m.agentSel - maxRows + 1
+	total := m.inspectorAgentCount()
+	availableLines := max(1, m.height-3) // pane interior minus title
+	maxRows := max(1, availableLines/2)
+	overflow := total > maxRows
+	if overflow {
+		maxRows = max(1, (availableLines-1)/2) // reserve the range indicator
 	}
-	for i := start; i < m.inspectorAgentCount() && i-start < maxRows; i++ {
+	start, end := visibleRange(total, m.agentSel, maxRows)
+	for i := start; i < end; i++ {
 		a := m.inspectorAgentAt(i)
 		icon := agentStatusIcon(a.status)
 		if a.cached {
@@ -929,11 +932,14 @@ func (m runsModel) viewAgentList() string {
 		b.WriteString(sDim.Render("   "+meta) + badgeText)
 		b.WriteString("\n")
 	}
+	if overflow {
+		b.WriteString(sDim.Render(overflowLabel(start, end, total)) + "\n")
+	}
 	pane := sPaneL
 	if !m.inspectFocus {
 		pane = sPaneR
 	}
-	return pane.Width(w).Height(m.height - 2).Render(b.String())
+	return pane.Width(w).Height(max(0, m.height-2)).Render(b.String())
 }
 
 func (m runsModel) viewList(frame int) string {
@@ -947,12 +953,19 @@ func (m runsModel) viewList(frame int) string {
 			b.WriteString(sDim.Render("\nloading runs…"))
 		}
 	}
-	maxRows := m.height - 4
-	start := 0
-	if m.sel >= maxRows {
-		start = m.sel - maxRows + 1
+	footerLines := 0
+	if m.confirm != "" && m.sel < len(m.runs) {
+		footerLines = 3
+	} else if m.statusMsg != "" {
+		footerLines = 2
 	}
-	for i := start; i < len(m.runs) && i-start < maxRows; i++ {
+	maxRows := max(1, m.height-3-footerLines) // pane interior minus title/footer
+	overflow := len(m.runs) > maxRows
+	if overflow {
+		maxRows = max(1, maxRows-1) // reserve the range indicator
+	}
+	start, end := visibleRange(len(m.runs), m.sel, maxRows)
+	for i := start; i < end; i++ {
 		r := m.runs[i]
 		status := r.Status
 		if status == "running" && m.paused[r.ID] {
@@ -967,6 +980,9 @@ func (m runsModel) viewList(frame int) string {
 		}
 		b.WriteString(row + "\n")
 	}
+	if overflow {
+		b.WriteString(sDim.Render(overflowLabel(start, end, len(m.runs))) + "\n")
+	}
 	if m.confirm != "" && m.sel < len(m.runs) {
 		warn := map[string]string{
 			"delete": "delete %s? its journal and result are gone forever",
@@ -977,7 +993,7 @@ func (m runsModel) viewList(frame int) string {
 	} else if m.statusMsg != "" {
 		b.WriteString("\n" + sDim.Render(m.statusMsg))
 	}
-	return sPaneL.Width(w).Height(m.height - 2).Render(b.String())
+	return sPaneL.Width(w).Height(max(0, m.height-2)).Render(b.String())
 }
 
 func statusIcon(status string, frame int) string {
@@ -1003,7 +1019,7 @@ func (m runsModel) viewDetailPane(frame int) string {
 		content += "\n\n"
 	}
 	content += m.vp.View()
-	return sPaneR.Width(m.detailWidth()).Height(m.height - 2).Render(content)
+	return sPaneR.Width(m.detailWidth()).Height(max(0, m.height-2)).Render(content)
 }
 
 // agentState tracks one agent's lifecycle assembled from events.

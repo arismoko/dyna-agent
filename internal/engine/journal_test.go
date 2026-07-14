@@ -29,6 +29,11 @@ func TestJournalWorkerPromptContract(t *testing.T) {
 		"Keep working after every entry",
 		"still return the final response",
 		"separate from any final-response JSON schema",
+		"running INSIDE a dyna workflow as a worker",
+		"Under no circumstances may you load or invoke the dyna skill",
+		"The only dyna command you may use is dyna journal",
+		"harness's built-in subagent feature",
+		"Never use dyna for delegation",
 		"[ORIGINAL TASK]",
 	} {
 		if !strings.Contains(prompt, required) {

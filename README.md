@@ -64,7 +64,13 @@ release's SHA-256 checksum, smoke-tested with `--version`, and moved into
 place atomically. Already-running workflows keep their current executable
 inode and are never restarted or killed; the new version is used by future
 invocations. A successful update also refreshes the embedded dyna skill in
-detected agent harnesses.
+detected agent harnesses. On an interactive terminal, the update then offers
+to replace colliding bundled profiles, keep them managed by future releases,
+and install root-agent guidance. Non-interactive updates never prompt and
+print the corresponding commands instead. A once-per-version check on the
+next ordinary interactive command makes the same offer when the feature
+itself arrived in an update; worker-facing `dyna journal` and `dyna run` paths
+are always exempt.
 
 ## Teaching your agents about dyna
 
@@ -82,6 +88,14 @@ read `dyna guide`:
 content. Older versions wrote managed AGENTS.md blocks; install and uninstall
 migrate those away automatically.
 
+`dyna skill guidance install` optionally adds a short, separately managed
+root-agent block to each detected harness's shared `CLAUDE.md` or `AGENTS.md`.
+It explains when multi-model fan-out is worth its cost and when native
+subagents are the better fit. The command is idempotent, accepts the same
+harness names and `--all` flag as skill installation, and
+`dyna skill guidance uninstall` removes only its marker block. Uninstalling
+the dyna skill also removes this guidance.
+
 ## Worker profiles
 
 You register the models agents are allowed to use, each with a description
@@ -95,11 +109,17 @@ higher means cheaper):
 **Quick start:** `dyna profiles init` registers a curated default fleet:
 `fable` (Claude Fable 5 via claude-code, for verification, judging,
 high-stakes review, and frontend work), `sol` and `sol-max` (gpt-5.6-sol via
-codex at high and max effort, for hard implementation and debugging), `terra`
+codex at high and xhigh effort, for hard implementation and debugging), `terra`
 (the balanced default generalist), and `luna` (cheap, fast sweeps). Each
 description tells agents when to pick that worker, when to avoid it, and how
-it tends to fail. Existing profiles are never overwritten unless you pass
-`--force`.
+it tends to fail. These profiles are managed, so installed entries follow
+bundled settings in later dyna builds while their default and enabled state
+remain yours. Editing one in the TUI or overwriting it with `profiles add`
+opts it out unless you explicitly keep `managed` enabled; deleting one does
+not recreate it. Existing unmanaged profiles are never overwritten unless
+you pass `--force`. The deep-work `fable` and `sol` profiles may use their
+harnesses' native subagents, while the `luna`, `terra`, and `sol-max`
+fan-out/panel profiles block nested delegation.
 
 Or build profiles interactively with the TUI's profile wizard (`w` on the
 Profiles tab), six multiple-choice steps:
@@ -166,9 +186,9 @@ explicit persistence, session, budget, or resume-incompatible flags (and
 custom harnesses) stay single-shot so recovery cannot silently change those
 controls.
 
-Every `agent()` call gets at least 30 minutes. A shorter `timeout` option or
-profile default is clamped to 30 minutes; larger values are preserved. Parent
-workflow cancellation can still stop a worker earlier.
+Every `agent()` call defaults to 5 hours. Explicit script and profile timeout
+values have a 30-minute minimum; shorter values are clamped and larger values
+are preserved. Parent workflow cancellation can still stop a worker earlier.
 
 Agents discover the fleet with `dyna profiles list --json` and pick workers
 by description and stats, or dynamically inside scripts via the `profiles`
@@ -238,6 +258,12 @@ worker records concise progress notes with:
 dyna journal "confirmed the decoder rejects truncated input" \
   --kind verification --next "report the evidence"
 ```
+
+That prompt also tells the process unambiguously that it is inside a dyna
+workflow. A worker may use `dyna journal` and no other dyna command: it must
+not load the dyna skill, start another workflow, or orchestrate more dyna
+workers. When its profile permits delegation, it uses only the current
+harness's built-in subagents.
 
 `--kind` is one of `update`, `finding`, `decision`, `verification`, or
 `blocker`; `--next` is optional. Dyna supplies the timestamp and agent

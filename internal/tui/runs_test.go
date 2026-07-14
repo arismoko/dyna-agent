@@ -321,6 +321,60 @@ func TestResizeKeepsFollowAndInspectorAnchored(t *testing.T) {
 	}
 }
 
+func TestRunListWindowsSelectionAndResize(t *testing.T) {
+	m := testRunsModel()
+	m.runs = make([]runstore.Meta, 10)
+	for i := range m.runs {
+		m.runs[i] = runstore.Meta{ID: fmt.Sprintf("wf_%02d", i), Name: fmt.Sprintf("run-%02d", i), Status: "ok", StartedAt: time.Now()}
+	}
+	m.sel = 6
+	m.setSize(120, 8)
+
+	view := m.viewList(0)
+	if !strings.Contains(view, "run-06") || !strings.Contains(view, "4-7 of 10") || strings.Contains(view, "run-02") {
+		t.Fatalf("selection below fold was not windowed:\n%s", view)
+	}
+
+	m.setSize(120, 6)
+	view = m.viewList(0)
+	if !strings.Contains(view, "run-06") || !strings.Contains(view, "6-7 of 10") {
+		t.Fatalf("resize did not keep selected run visible:\n%s", view)
+	}
+
+	m.setSize(120, 0)
+	if view = m.viewList(0); !strings.Contains(view, "run-06") || !strings.Contains(view, "7-7 of 10") {
+		t.Fatalf("zero-height run list did not clamp safely:\n%s", view)
+	}
+}
+
+func TestInspectorAgentListWindowsSelectionAndResize(t *testing.T) {
+	m := testRunsModel()
+	events := make([]runstore.Event, 8)
+	for i := range events {
+		events[i] = runstore.Event{T: "agent_start", ID: i + 1, Label: fmt.Sprintf("agent-%02d", i+1), Profile: "test"}
+	}
+	m.applyEvents(events)
+	m.inspecting = true
+	m.agentSel = 5
+	m.setSize(120, 10)
+
+	view := m.viewAgentList()
+	if !strings.Contains(view, "agent-06") || !strings.Contains(view, "4-6 of 8") || strings.Contains(view, "agent-03") {
+		t.Fatalf("selected agent below fold was not windowed:\n%s", view)
+	}
+
+	m.setSize(120, 8)
+	view = m.viewAgentList()
+	if !strings.Contains(view, "agent-06") || !strings.Contains(view, "5-6 of 8") {
+		t.Fatalf("resize did not keep selected agent visible:\n%s", view)
+	}
+
+	m.setSize(120, 0)
+	if view = m.viewAgentList(); !strings.Contains(view, "agent-06") || !strings.Contains(view, "6-6 of 8") {
+		t.Fatalf("zero-height agent list did not clamp safely:\n%s", view)
+	}
+}
+
 func TestInspectorEnterFocusesPromptAndJKScroll(t *testing.T) {
 	m := testRunsModel()
 	m.inspecting = true
@@ -792,6 +846,7 @@ func TestRefreshRequestsAreCoalesced(t *testing.T) {
 
 func TestReadRunsRefreshTailsRequestedFile(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv(runstore.AgentJournalRootEnv, runstore.RunsDir())
 	dir := filepath.Join(runstore.RunsDir(), "wf_async")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)

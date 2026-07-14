@@ -8,10 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // Harness identifies which CLI executes the worker.
@@ -40,6 +44,9 @@ type Profile struct {
 	Env          map[string]string `json:"env,omitempty"`
 	TimeoutSec   int               `json:"timeoutSec,omitempty"`
 	Default      bool              `json:"default,omitempty"`
+	// Managed profiles are owned by the bundled defaults and automatically
+	// refreshed when a newer dyna build ships different bundled values.
+	Managed bool `json:"managed,omitempty"`
 	// SafeMode keeps the harness's own permission prompts / sandbox. By
 	// default dyna bypasses them (workers run headless and must act freely).
 	SafeMode bool `json:"safeMode,omitempty"`
@@ -97,6 +104,32 @@ type Store struct {
 
 const storeVersion = 2
 
+var (
+	bundledMu       sync.RWMutex
+	bundledProfiles map[string]Profile
+)
+
+// SetBundledDefaults configures the bundled profiles that Load uses to
+// refresh managed profiles. Passing nil clears the bundle.
+func SetBundledDefaults(raw []byte) error {
+	profiles := make(map[string]Profile)
+	if len(raw) > 0 {
+		var bundle struct {
+			Profiles []Profile `json:"profiles"`
+		}
+		if err := json.Unmarshal(raw, &bundle); err != nil {
+			return err
+		}
+		for _, p := range bundle.Profiles {
+			profiles[p.Name] = cloneProfile(p)
+		}
+	}
+	bundledMu.Lock()
+	bundledProfiles = profiles
+	bundledMu.Unlock()
+	return nil
+}
+
 func DefaultPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -118,6 +151,7 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	s.Path = path
+	changed := false
 	// v1 stores used a 1..5 stat scale; double onto the 1..10 scale once.
 	if s.Version < storeVersion && len(s.Profiles) > 0 {
 		for i := range s.Profiles {
@@ -126,12 +160,90 @@ func Load(path string) (*Store, error) {
 			s.Profiles[i].Cost = scaleTo10(s.Profiles[i].Cost)
 		}
 		s.Version = storeVersion
+		changed = true
+	}
+	if s.refreshManaged() {
+		changed = true
+	}
+	if changed {
 		if err := s.Save(); err != nil {
-			return nil, fmt.Errorf("migrating %s to stat scale 1..10: %w", path, err)
+			return nil, fmt.Errorf("updating %s: %w", path, err)
 		}
 	}
 	sort.Slice(s.Profiles, func(i, j int) bool { return s.Profiles[i].Name < s.Profiles[j].Name })
 	return s, nil
+}
+
+func (s *Store) refreshManaged() bool {
+	bundledMu.RLock()
+	defer bundledMu.RUnlock()
+
+	changed := false
+	for i := range s.Profiles {
+		stored := &s.Profiles[i]
+		bundle, ok := bundledProfiles[stored.Name]
+		if !stored.Managed || !ok || bundledFieldsEqual(*stored, bundle) {
+			continue
+		}
+		defaultValue, disabled, managed := stored.Default, stored.Disabled, stored.Managed
+		copyBundledFields(stored, bundle)
+		stored.Default, stored.Disabled, stored.Managed = defaultValue, disabled, managed
+		changed = true
+	}
+	return changed
+}
+
+// ApplyBundledPreferences updates profiles whose names collide with the
+// bundled fleet. Replacement preserves the user's default and disabled flags.
+func (s *Store) ApplyBundledPreferences(replace, managed bool) int {
+	bundledMu.RLock()
+	defer bundledMu.RUnlock()
+
+	collisions := 0
+	for i := range s.Profiles {
+		stored := &s.Profiles[i]
+		bundle, ok := bundledProfiles[stored.Name]
+		if !ok {
+			continue
+		}
+		collisions++
+		defaultValue, disabled := stored.Default, stored.Disabled
+		if replace {
+			copyBundledFields(stored, bundle)
+		}
+		stored.Default, stored.Disabled, stored.Managed = defaultValue, disabled, managed
+	}
+	return collisions
+}
+
+func bundledFieldsEqual(a, b Profile) bool {
+	a.Default, a.Disabled, a.Managed, a.Name = false, false, false, ""
+	b.Default, b.Disabled, b.Managed, b.Name = false, false, false, ""
+	return reflect.DeepEqual(a, b)
+}
+
+func copyBundledFields(dst *Profile, src Profile) {
+	dst.Description = src.Description
+	dst.Harness = src.Harness
+	dst.Model = src.Model
+	dst.Taste = src.Taste
+	dst.Intelligence = src.Intelligence
+	dst.Cost = src.Cost
+	dst.ExtraArgs = slices.Clone(src.ExtraArgs)
+	dst.Command = slices.Clone(src.Command)
+	dst.Env = maps.Clone(src.Env)
+	dst.TimeoutSec = src.TimeoutSec
+	dst.SafeMode = src.SafeMode
+	dst.DisableSubagents = src.DisableSubagents
+	dst.MaxConcurrent = src.MaxConcurrent
+	dst.MaxCallsPerRun = src.MaxCallsPerRun
+}
+
+func cloneProfile(p Profile) Profile {
+	p.ExtraArgs = slices.Clone(p.ExtraArgs)
+	p.Command = slices.Clone(p.Command)
+	p.Env = maps.Clone(p.Env)
+	return p
 }
 
 func scaleTo10(v int) int {

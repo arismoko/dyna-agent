@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -69,10 +70,14 @@ func (m profilesModel) update(msg tea.KeyMsg) (profilesModel, tea.Cmd) {
 	if m.confirmDel {
 		switch msg.String() {
 		case "y", "Y":
-			if m.sel < len(m.store.Profiles) {
+			if m.sel >= 0 && m.sel < len(m.store.Profiles) {
 				m.store.Remove(m.store.Profiles[m.sel].Name)
 				m.store.Save()
-				m.sel = clamp(m.sel, 0, len(m.store.Profiles)-1)
+				if len(m.store.Profiles) == 0 {
+					m.sel = 0
+				} else {
+					m.sel = clamp(m.sel, 0, len(m.store.Profiles)-1)
+				}
 				m.statusMsg = "deleted"
 			}
 		}
@@ -150,7 +155,21 @@ func (m profilesModel) view() string {
 	if len(m.store.Profiles) == 0 {
 		b.WriteString(sDim.Render("\nnone yet. Press ") + sHelpKey.Render("a") + sDim.Render(" to add\nor run `dyna demo`"))
 	}
-	for i, p := range m.store.Profiles {
+	footerLines := 0
+	if m.confirmDel && m.sel < len(m.store.Profiles) {
+		footerLines += 2
+	}
+	if m.statusMsg != "" {
+		footerLines += 2
+	}
+	maxRows := max(1, m.height-3-footerLines) // pane interior minus title/footer
+	overflow := len(m.store.Profiles) > maxRows
+	if overflow {
+		maxRows = max(1, maxRows-1) // reserve the range indicator
+	}
+	start, end := visibleRange(len(m.store.Profiles), m.sel, maxRows)
+	for i := start; i < end; i++ {
+		p := m.store.Profiles[i]
 		icon := sDim.Render("○")
 		if p.Default {
 			icon = sOK.Render("●")
@@ -168,10 +187,16 @@ func (m profilesModel) view() string {
 			row = icon + " " + sSel.Render(name)
 		}
 		row += "  " + sDim.Render(p.Harness)
+		if p.Managed {
+			row += sDim.Render(" · managed")
+		}
 		if p.Disabled {
 			row += sDim.Render(" · off")
 		}
 		b.WriteString(row + "\n")
+	}
+	if overflow {
+		b.WriteString(sDim.Render(overflowLabel(start, end, len(m.store.Profiles))) + "\n")
 	}
 	if m.confirmDel && m.sel < len(m.store.Profiles) {
 		b.WriteString("\n" + sErrS.Render("delete "+m.store.Profiles[m.sel].Name+"? (y/n)"))
@@ -179,14 +204,14 @@ func (m profilesModel) view() string {
 	if m.statusMsg != "" {
 		b.WriteString("\n" + sDim.Render(m.statusMsg))
 	}
-	left := sPaneL.Width(lw).Height(m.height - 2).Render(b.String())
+	left := sPaneL.Width(lw).Height(max(0, m.height-2)).Render(b.String())
 
-	right := sPaneR.Width(rw).Height(m.height - 2).Render(m.viewCard(rw - 4))
+	right := sPaneR.Width(rw).Height(max(0, m.height-2)).Render(m.viewCard(rw - 4))
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
 func (m profilesModel) viewCard(w int) string {
-	if m.sel >= len(m.store.Profiles) {
+	if m.sel < 0 || m.sel >= len(m.store.Profiles) {
 		return sDim.Render("select a profile; these are the workers agents may orchestrate")
 	}
 	p := m.store.Profiles[m.sel]
@@ -194,6 +219,9 @@ func (m profilesModel) viewCard(w int) string {
 	name := sTitle.Render(p.Name)
 	if p.Default {
 		name += "  " + sBadge.Render("default")
+	}
+	if p.Managed {
+		name += "  " + sBadge.Render("managed")
 	}
 	if p.Disabled {
 		name += "  " + sErrS.Render("● disabled") + sDim.Render(" (stats kept; press t to enable)")
@@ -267,6 +295,7 @@ type formModel struct {
 	fields   []field
 	focus    int
 	origPk   string // original name when editing ("" = new)
+	original profile.Profile
 	subtitle string // extra context (wizard progress)
 	errMsg   string
 }
@@ -287,7 +316,7 @@ func newForm(v profile.Profile, origPk string) formModel {
 			harnessIdx = i
 		}
 	}
-	f := formModel{origPk: origPk}
+	f := formModel{origPk: origPk, original: v}
 	f.fields = []field{
 		textField("name", "e.g. opus-4.8", v.Name, "unique id agents reference in scripts"),
 		textField("description", "personality, strengths, weaknesses…", v.Description, "agents read this to pick workers"),
@@ -300,6 +329,7 @@ func newForm(v profile.Profile, origPk string) formModel {
 		textField("limit conc.", "0 = unlimited", intStr(v.MaxConcurrent), "max simultaneous workers of this profile"),
 		textField("limit calls", "0 = unlimited", intStr(v.MaxCallsPerRun), "max total calls per run"),
 		{label: "subagents", kind: fCycle, cycle: []string{"allow", "block"}, cycleI: boolIdx(v.DisableSubagents), note: "prevent this worker from delegating to child agents"},
+		{label: "managed", kind: fCycle, cycle: []string{"no", "yes"}, cycleI: boolIdx(v.Managed), note: "refresh bundle-owned settings when dyna updates"},
 		{label: "enabled", kind: fCycle, cycle: []string{"yes", "no"}, cycleI: boolIdx(v.Disabled), note: "disabled profiles keep their stats but can't be used"},
 		{label: "default", kind: fCycle, cycle: []string{"no", "yes"}, cycleI: boolIdx(v.Default), note: "used when a script omits profile"},
 	}
@@ -315,20 +345,21 @@ func boolIdx(b bool) int {
 }
 
 func (f *formModel) toProfile() profile.Profile {
-	p := profile.Profile{
-		Name:             strings.TrimSpace(f.fields[0].input.Value()),
-		Description:      strings.TrimSpace(f.fields[1].input.Value()),
-		Harness:          f.fields[2].cycle[f.fields[2].cycleI],
-		Model:            strings.TrimSpace(f.fields[3].input.Value()),
-		Taste:            f.fields[4].stat,
-		Intelligence:     f.fields[5].stat,
-		Cost:             f.fields[6].stat,
-		MaxConcurrent:    atoiOr0(f.fields[8].input.Value()),
-		MaxCallsPerRun:   atoiOr0(f.fields[9].input.Value()),
-		DisableSubagents: f.fields[10].cycleI == 1,
-		Disabled:         f.fields[11].cycleI == 1,
-		Default:          f.fields[12].cycleI == 1,
-	}
+	p := f.original
+	p.Name = strings.TrimSpace(f.fields[0].input.Value())
+	p.Description = strings.TrimSpace(f.fields[1].input.Value())
+	p.Harness = f.fields[2].cycle[f.fields[2].cycleI]
+	p.Model = strings.TrimSpace(f.fields[3].input.Value())
+	p.Taste = f.fields[4].stat
+	p.Intelligence = f.fields[5].stat
+	p.Cost = f.fields[6].stat
+	p.MaxConcurrent = atoiOr0(f.fields[8].input.Value())
+	p.MaxCallsPerRun = atoiOr0(f.fields[9].input.Value())
+	p.DisableSubagents = f.fields[10].cycleI == 1
+	p.Managed = f.fields[11].cycleI == 1
+	p.Disabled = f.fields[12].cycleI == 1
+	p.Default = f.fields[13].cycleI == 1
+	p.ExtraArgs = nil
 	if ea := strings.TrimSpace(f.fields[7].input.Value()); ea != "" {
 		p.ExtraArgs = strings.Fields(ea)
 	}
@@ -352,6 +383,15 @@ func atoiOr0(s string) int {
 
 // update returns (done, saved).
 func (f *formModel) update(msg tea.KeyMsg) (bool, bool, tea.Cmd) {
+	before := f.toProfile()
+	done, saved, cmd := f.updateFields(msg)
+	if before.Managed && f.toProfile().Managed && !bundleOwnedFieldsEqual(before, f.toProfile()) {
+		f.fields[11].cycleI = 0
+	}
+	return done, saved, cmd
+}
+
+func (f *formModel) updateFields(msg tea.KeyMsg) (bool, bool, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		return true, false, nil
@@ -404,6 +444,12 @@ func (f *formModel) update(msg tea.KeyMsg) (bool, bool, tea.Cmd) {
 		return false, false, cmd
 	}
 	return false, false, nil
+}
+
+func bundleOwnedFieldsEqual(a, b profile.Profile) bool {
+	a.Default, a.Disabled, a.Managed = false, false, false
+	b.Default, b.Disabled, b.Managed = false, false, false
+	return reflect.DeepEqual(a, b)
 }
 
 func (f *formModel) setFocus(i int) {

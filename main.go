@@ -35,6 +35,12 @@ var guideMD string
 //go:embed defaults/profiles.json
 var defaultProfilesJSON []byte
 
+func init() {
+	if err := profile.SetBundledDefaults(defaultProfilesJSON); err != nil {
+		panic(fmt.Sprintf("parse bundled profiles: %v", err))
+	}
+}
+
 // version is stamped from the release tag with -ldflags "-X main.version=...".
 var version = "dev"
 
@@ -53,9 +59,12 @@ func newRootCommand() *cobra.Command {
 			"profiles (claude-code, codex, opencode, pi, custom CLIs). Agents use the CLI;\n" +
 			"humans use `dyna tui` to configure profiles and watch runs live.",
 		SilenceUsage: true,
+		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
+			return maybeOfferPostUpdateSetup(c)
+		},
 	}
 	root.SetVersionTemplate("dyna {{.Version}}\n")
-	root.AddCommand(profilesCmd(), runCmd(), runsCmd(), journalCmd(), guideCmd(), tuiCmd(), demoCmd(), skillCmd(), updateCmd(), versionCmd())
+	root.AddCommand(profilesCmd(), runCmd(), runsCmd(), journalCmd(), guideCmd(), tuiCmd(), demoCmd(), skillCmd(), updateCmd(), versionCmd(), postUpdateApplyCmd())
 	return root
 }
 
@@ -122,6 +131,7 @@ func updateCmd() *cobra.Command {
 			if err := refreshInstalledSkills(c.Context(), result.Target, c.OutOrStdout()); err != nil {
 				fmt.Fprintf(c.ErrOrStderr(), "warning: dyna updated, but skill refresh failed: %v\n", err)
 			}
+			offerSetupAfterUpdate(c, result.Target, result.Latest)
 			return nil
 		},
 	}
@@ -287,8 +297,9 @@ func profilesCmd() *cobra.Command {
 	f.IntVar(&p.Cost, "cost", 5, "cost efficiency 1..10, higher better (10 = very cheap)")
 	f.StringArrayVar(&p.ExtraArgs, "extra-arg", nil, "extra CLI arg for the harness (repeatable)")
 	f.StringArrayVar(&command, "command", nil, "custom harness argv (repeatable; {{prompt}}/{{model}} placeholders)")
-	f.IntVar(&p.TimeoutSec, "timeout", 0, "default per-call timeout in seconds (minimum 1800)")
+	f.IntVar(&p.TimeoutSec, "timeout", 0, "per-call timeout in seconds (default: 5 hours; explicit values have a 30-minute minimum)")
 	f.BoolVar(&p.Default, "default", false, "make this the default profile")
+	f.BoolVar(&p.Managed, "managed", false, "refresh this profile from bundled defaults on dyna updates")
 	f.BoolVar(&p.SafeMode, "safe-mode", false, "keep the harness's own permission prompts/sandbox (default: bypassed)")
 	f.BoolVar(&p.DisableSubagents, "disable-subagents", false, "prevent this worker from spawning or delegating to child agents")
 	f.IntVar(&p.MaxConcurrent, "limit-concurrent", 0, "max simultaneous workers of this profile per run (0 = unlimited)")

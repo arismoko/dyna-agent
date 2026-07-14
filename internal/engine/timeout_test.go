@@ -26,6 +26,38 @@ func TestClampAgentTimeoutHasThirtyMinuteMinimum(t *testing.T) {
 	}
 }
 
+func TestResolveAgentTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		timeout    time.Duration
+		timeoutSet bool
+		profile    profile.Profile
+		want       time.Duration
+	}{
+		{name: "default", timeout: defaultAgentTimeout, want: 5 * time.Hour},
+		{name: "short explicit timeout", timeout: 10 * time.Minute, timeoutSet: true, want: 30 * time.Minute},
+		{
+			name:       "long explicit timeout",
+			timeout:    6 * time.Hour,
+			timeoutSet: true,
+			profile:    profile.Profile{TimeoutSec: int((2 * time.Hour) / time.Second)},
+			want:       6 * time.Hour,
+		},
+		{
+			name:    "profile timeout without script timeout",
+			timeout: defaultAgentTimeout,
+			profile: profile.Profile{TimeoutSec: int((2 * time.Hour) / time.Second)},
+			want:    2 * time.Hour,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveAgentTimeout(tc.timeout, tc.timeoutSet, tc.profile); got != tc.want {
+				t.Fatalf("resolveAgentTimeout(%s, %t, %#v) = %s, want %s", tc.timeout, tc.timeoutSet, tc.profile, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExplicitShortAgentTimeoutIsClamped(t *testing.T) {
 	store := &profile.Store{Profiles: []profile.Profile{{
 		Name: "slow", Harness: profile.HarnessCustom,

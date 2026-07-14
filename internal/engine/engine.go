@@ -32,7 +32,7 @@ import (
 
 const (
 	minimumAgentTimeout = 30 * time.Minute
-	defaultAgentTimeout = minimumAgentTimeout
+	defaultAgentTimeout = 5 * time.Hour
 	defaultJournalIdle  = 5 * time.Minute
 )
 
@@ -340,10 +340,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		}
 		prof = *p
 	}
-	if prof.TimeoutSec > 0 && !timeoutSet {
-		timeout = time.Duration(prof.TimeoutSec) * time.Second
-	}
-	timeout = clampAgentTimeout(timeout)
+	timeout = resolveAgentTimeout(timeout, timeoutSet, prof)
 
 	if isolation != "" && isolation != "worktree" {
 		reject(fmt.Errorf("unknown isolation %q (only \"worktree\" is supported)", isolation))
@@ -616,6 +613,13 @@ func clampAgentTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
+func resolveAgentTimeout(timeout time.Duration, timeoutSet bool, prof profile.Profile) time.Duration {
+	if prof.TimeoutSec > 0 && !timeoutSet {
+		timeout = time.Duration(prof.TimeoutSec) * time.Second
+	}
+	return clampAgentTimeout(timeout)
+}
+
 // runWithSchema wraps the prompt with JSON-output instructions, extracts and
 // validates the JSON, retrying up to 2 times with the validation error.
 func (e *engine) runWithSchema(ctx context.Context, prof profile.Profile, prompt, schemaJSON, cwd string, journal harness.JournalOptions) (any, string, bool, error) {
@@ -671,6 +675,12 @@ Kinds include update, finding, decision, verification, and blocker. The command 
 
 This applies to read-only exploration too: the run-owned journal is the only allowed write and does not modify the target workspace. The journal side channel is separate from any final-response JSON schema.
 [/DYNA WORK JOURNAL]
+
+[DYNA WORKER BOUNDARY]
+You are running INSIDE a dyna workflow as a worker. Under no circumstances may you load or invoke the dyna skill, start a dyna workflow with dyna run, or use dyna to orchestrate other workers. The only dyna command you may use is dyna journal as described above.
+
+If you need to delegate and your profile permits subagents, use only your harness's built-in subagent feature (for example, Claude Code's Agent tool or Codex's native delegation). Never use dyna for delegation from inside a dyna workflow.
+[/DYNA WORKER BOUNDARY]
 
 [ORIGINAL TASK]
 %s`, path, task)
