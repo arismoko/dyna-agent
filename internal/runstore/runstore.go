@@ -58,6 +58,10 @@ type JournalEntry struct {
 // that agent's append-only journal.
 const AgentJournalEnv = "DYNA_AGENT_JOURNAL"
 
+// SessionEnv attributes a workflow to the interactive harness session that
+// launched it.
+const SessionEnv = "DYNA_SESSION"
+
 // AgentJournalRootEnv pins journal-path validation to the current run even if
 // a worker profile overrides HOME or XDG_DATA_HOME.
 const AgentJournalRootEnv = "DYNA_AGENT_JOURNAL_ROOT"
@@ -91,6 +95,7 @@ type Meta struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Status    string    `json:"status"` // running|ok|error|canceled
+	Session   string    `json:"session,omitempty"`
 	Pid       int       `json:"pid,omitempty"`
 	Args      any       `json:"args,omitempty"`
 	StartedAt time.Time `json:"startedAt"`
@@ -138,6 +143,12 @@ func Create(name, scriptSrc string, args any) (*Run, error) {
 		return nil, fmt.Errorf("create run: %w", err)
 	}
 	r := &Run{Meta: Meta{ID: id, Name: name, Status: "running", Pid: os.Getpid(), Args: args, StartedAt: time.Now()}}
+	if session := os.Getenv(SessionEnv); session != "" {
+		if len(session) > 128 {
+			session = session[:128]
+		}
+		r.Meta.Session = session
+	}
 	r.Dir = filepath.Join(RunsDir(), r.Meta.ID)
 	if err := os.MkdirAll(r.Dir, 0o755); err != nil {
 		return nil, err

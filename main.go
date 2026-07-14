@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -46,8 +47,16 @@ var version = "dev"
 
 func main() {
 	if err := newRootCommand().Execute(); err != nil {
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
+}
+
+func commandExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
+		return exitErr.ExitCode()
+	}
+	return 1
 }
 
 func newRootCommand() *cobra.Command {
@@ -64,7 +73,7 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 	root.SetVersionTemplate("dyna {{.Version}}\n")
-	root.AddCommand(profilesCmd(), runCmd(), runsCmd(), journalCmd(), guideCmd(), tuiCmd(), demoCmd(), skillCmd(), updateCmd(), versionCmd(), postUpdateApplyCmd())
+	root.AddCommand(profilesCmd(), runCmd(), runsCmd(), journalCmd(), guideCmd(), tuiCmd(), piCmd(), demoCmd(), skillCmd(), updateCmd(), versionCmd(), postUpdateApplyCmd())
 	return root
 }
 
@@ -601,6 +610,7 @@ func printEvent(e runstore.Event) {
 func runsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "runs", Short: "Inspect past and active workflow runs"}
 	var asJSON bool
+	var session string
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List runs, newest first",
@@ -609,9 +619,12 @@ func runsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if session != "" {
+				runs = slices.DeleteFunc(runs, func(run runstore.Meta) bool { return run.Session != session })
+			}
 			if asJSON {
 				b, _ := json.MarshalIndent(runs, "", "  ")
-				fmt.Println(string(b))
+				fmt.Fprintln(c.OutOrStdout(), string(b))
 				return nil
 			}
 			for _, r := range runs {
@@ -619,12 +632,13 @@ func runsCmd() *cobra.Command {
 				if status == "running" && runstore.IsPaused(r.ID) {
 					status = "paused"
 				}
-				fmt.Printf("%-32s %-9s %-20s %s\n", r.ID, status, r.StartedAt.Format("2006-01-02 15:04:05"), r.Name)
+				fmt.Fprintf(c.OutOrStdout(), "%-32s %-9s %-20s %s\n", r.ID, status, r.StartedAt.Format("2006-01-02 15:04:05"), r.Name)
 			}
 			return nil
 		},
 	}
 	list.Flags().BoolVar(&asJSON, "json", false, "machine-readable output")
+	list.Flags().StringVar(&session, "session", "", "only runs started from this session (DYNA_SESSION)")
 
 	var showJSON bool
 	show := &cobra.Command{

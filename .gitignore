@@ -1,3 +1,4 @@
 /dyna
 dist/
 *.log
+.references/
