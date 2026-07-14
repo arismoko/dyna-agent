@@ -743,16 +743,27 @@ func extractJSON(s string) (any, error) {
 	s = strings.TrimSpace(s)
 	// A response that is already a JSON value wins: markdown fences inside its
 	// strings (e.g. code examples in a report field) must not be re-extracted.
-	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
-		if v, err := decodeJSONFrom(s); err == nil {
-			return v, nil
-		}
+	if v, ok := decodeWholeJSON(s); ok {
+		return v, nil
 	}
 	// Otherwise prefer fenced blocks over prose.
 	if m := fenceRe.FindStringSubmatch(s); m != nil {
-		s = strings.TrimSpace(m[1])
+		if v, ok := decodeWholeJSON(strings.TrimSpace(m[1])); ok {
+			return v, nil
+		}
 	}
 	return decodeJSONFrom(s)
+}
+
+func decodeWholeJSON(s string) (any, bool) {
+	if !json.Valid([]byte(s)) {
+		return nil, false
+	}
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return nil, false
+	}
+	return v, true
 }
 
 func decodeJSONFrom(s string) (any, error) {
@@ -795,8 +806,8 @@ func truncate(s string, n int) string {
 func transform(src string) (string, error) {
 	src = metaRe.ReplaceAllString(src, "const meta = globalThis.__meta =")
 	return "(async () => {\n" + src + "\n})().then(" +
-		"r => __finish(JSON.stringify(r === undefined ? null : r) ?? 'null')," +
-		" e => __fail(String((e && e.stack) || e)));", nil
+		"r => __finish(JSON.stringify(r === undefined ? null : r) ?? 'null'))" +
+		".catch(e => __fail(String((e && e.stack) || e)));", nil
 }
 
 var metaRe = regexp.MustCompile(`(?m)^\s*export\s+const\s+meta\s*=`)

@@ -92,6 +92,18 @@ func (p *Profile) Validate() error {
 	if p.Harness == HarnessCustom && len(p.Command) == 0 {
 		return errors.New("custom harness requires a command")
 	}
+	for _, v := range []struct {
+		n string
+		v int
+	}{
+		{"timeoutSec", p.TimeoutSec},
+		{"maxConcurrent", p.MaxConcurrent},
+		{"maxCallsPerRun", p.MaxCallsPerRun},
+	} {
+		if v.v < 0 {
+			return fmt.Errorf("%s must be non-negative (got %d)", v.n, v.v)
+		}
+	}
 	return nil
 }
 
@@ -164,6 +176,11 @@ func Load(path string) (*Store, error) {
 	}
 	if s.refreshManaged() {
 		changed = true
+	}
+	for _, p := range s.Profiles {
+		if err := p.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid profile %q in %s: %w", p.Name, path, err)
+		}
 	}
 	if changed {
 		if err := s.Save(); err != nil {

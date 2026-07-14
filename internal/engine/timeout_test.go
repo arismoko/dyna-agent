@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,5 +78,22 @@ func TestExplicitShortAgentTimeoutIsClamped(t *testing.T) {
 	}
 	if result != `"finished"` {
 		t.Fatalf("Execute() = %s, want %q", result, "finished")
+	}
+}
+
+func TestExecuteReportsReturnSerializationFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := Execute(ctx, Options{
+		ScriptSrc: `const value = {}; value.self = value; return value;`,
+		Store:     &profile.Store{},
+		WorkDir:   t.TempDir(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "workflow failed:") {
+		t.Fatalf("Execute() error = %v, want serialization failure", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("Execute() waited for context cancellation instead of reporting serialization failure: %v", err)
 	}
 }

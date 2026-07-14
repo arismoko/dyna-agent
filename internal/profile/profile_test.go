@@ -208,3 +208,34 @@ func TestApplyBundledPreferencesAnswerCombinations(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadRejectsInvalidProfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "profiles.json")
+	contents := `{"version":2,"profiles":[{"name":"broken","harness":"custom","taste":5,"intelligence":5,"cost":5}]}`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), `invalid profile "broken"`) || !strings.Contains(err.Error(), "custom harness requires a command") {
+		t.Fatalf("Load() error = %v, want invalid custom profile", err)
+	}
+}
+
+func TestValidateRejectsNegativeExecutionLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*Profile)
+	}{
+		{name: "timeout", set: func(p *Profile) { p.TimeoutSec = -1 }},
+		{name: "concurrency", set: func(p *Profile) { p.MaxConcurrent = -1 }},
+		{name: "call cap", set: func(p *Profile) { p.MaxCallsPerRun = -1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Profile{Name: "valid", Harness: HarnessMock, Taste: 5, Intelligence: 5, Cost: 5}
+			tc.set(&p)
+			if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "must be non-negative") {
+				t.Fatalf("Validate() error = %v, want negative-limit rejection", err)
+			}
+		})
+	}
+}

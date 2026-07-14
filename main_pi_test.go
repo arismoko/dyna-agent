@@ -402,6 +402,183 @@ func TestPiDynaObserverStaticContract(t *testing.T) {
 	}
 }
 
+func TestPiDynaTerminalDeliveryStaticContract(t *testing.T) {
+	source := string(piExtensionTS)
+	for _, required := range []string{
+		`const launchedRunIDs = new Set<string>();`,
+		`const pendingRunUpdates = new Map<string, TerminalRunUpdate>();`,
+		`function watchLaunchedRun(id: string, ctx: ExtensionContext): void`,
+		`run.status === "ok" || run.status === "error" || run.status === "canceled"`,
+		`customType: "dyna_run_terminal"`,
+		`display: false`,
+		`{ triggerTurn: false }`,
+		`ctx.ui.notify(completionMessage(run), completionNotificationType(run));`,
+		`pi.on("agent_settled"`,
+		`if (ctx) watchLaunchedRun(detachedRunID, ctx);`,
+		`runCompletionAbort.abort()`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("Pi terminal delivery contract is missing %q", required)
+		}
+	}
+}
+
+func TestInstalledPiDeliversDetachedTerminalUpdates(t *testing.T) {
+	piPath, err := exec.LookPath("pi")
+	if err != nil {
+		t.Skip("pi is not installed")
+	}
+	extensionPath, err := provisionPiExtension()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fixtureDir := t.TempDir()
+	fakeDyna := filepath.Join(fixtureDir, "dyna")
+	runCount := filepath.Join(fixtureDir, "run-count")
+	statusFile := filepath.Join(fixtureDir, "status")
+	writeExecutable(t, fakeDyna, `#!/bin/sh
+case "$1:$2" in
+	run:*)
+		count=0
+		if [ -f "$PI_RUN_COUNT" ]; then count=$(cat "$PI_RUN_COUNT"); fi
+		count=$((count + 1))
+		printf '%s\n' "$count" > "$PI_RUN_COUNT"
+		printf 'wf_fixture_%s\n' "$count"
+		;;
+	runs:list)
+		count=$(cat "$PI_RUN_COUNT")
+		status=$(cat "$PI_STATUS_FILE")
+		printf '[{"id":"wf_fixture_%s","name":"fixture","status":"%s","session":"fixture-session","startedAt":"2026-07-14T00:00:00Z"}]\n' "$count" "$status"
+		;;
+	*)
+		printf 'unexpected fixture invocation: %s\n' "$*" >&2
+		exit 98
+		;;
+esac
+`)
+
+	marker := filepath.Join(fixtureDir, "updates.json")
+	extensionJSON, err := json.Marshal(extensionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probePath := filepath.Join(fixtureDir, "probe.ts")
+	probeSource := `import { readFile, writeFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
+import dynaExtension from ` + string(extensionJSON) + `;
+
+const tools = new Map<string, any>();
+const messages: any[] = [];
+const notifications: any[] = [];
+dynaExtension({
+	on: () => {},
+	registerTool: (tool: any) => tools.set(tool.name, tool),
+	registerCommand: () => {},
+	sendMessage: (message: any, options: any) => messages.push({ message, options }),
+} as any);
+
+async function waitForUpdates(count: number): Promise<void> {
+	for (let attempt = 0; attempt < 150; attempt++) {
+		if (messages.length === count && notifications.length === count) return;
+		await sleep(20);
+	}
+	throw new Error("timed out waiting for terminal update");
+}
+
+export default function (pi: any) {
+	pi.on("input", async () => {
+		try {
+			const context = {
+				isIdle: () => true,
+				ui: { notify: (message: string, type: string) => notifications.push({ message, type }) },
+			};
+			const signal = new AbortController().signal;
+			const run = tools.get("dyna_run");
+			for (const status of ["ok", "error", "canceled"]) {
+				await writeFile(process.env.PI_STATUS_FILE!, "running");
+				await run.execute("run-" + status, { workflow: "return 1", detach: true }, signal, undefined, context);
+				await writeFile(process.env.PI_STATUS_FILE!, status);
+				await waitForUpdates(messages.length + 1);
+			}
+			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({ ok: true, messages, notifications }));
+		} catch (error) {
+			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+		}
+		return { action: "handled" };
+	});
+}
+`
+	if err := os.WriteFile(probePath, []byte(probeSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, piPath,
+		"--offline", "--no-extensions",
+		"--extension", probePath,
+		"--provider", "openai-codex",
+		"--model", "gpt-5.6-terra",
+		"--api-key", "fixture-only",
+		"-p", "exercise terminal updates",
+	)
+	cmd.Env = os.Environ()
+	for key, value := range map[string]string{
+		"PI_OFFLINE":             "1",
+		"DYNA_SESSION":           "fixture-session",
+		"DYNA_BIN":               fakeDyna,
+		"DYNA_PI_CODEX_AUTH":     "0",
+		"PI_RUN_COUNT":           runCount,
+		"PI_STATUS_FILE":         statusFile,
+		"PI_UPDATE_PROBE_MARKER": marker,
+		"DYNA_NO_AUTO_UPDATE":    "1",
+		"OPENAI_API_KEY":         "",
+	} {
+		cmd.Env = setEnv(cmd.Env, key, value)
+	}
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("offline Pi terminal-update probe timed out: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("offline Pi terminal-update probe: %v\n%s", err, output)
+	}
+
+	var probe struct {
+		OK       bool `json:"ok"`
+		Messages []struct {
+			Message struct {
+				Details struct {
+					Status string `json:"status"`
+				} `json:"details"`
+			} `json:"message"`
+			Options struct {
+				TriggerTurn bool `json:"triggerTurn"`
+			} `json:"options"`
+		}
+		Notifications []struct {
+			Type string `json:"type"`
+		}
+	}
+	if err := json.Unmarshal([]byte(readFile(t, marker)), &probe); err != nil {
+		t.Fatal(err)
+	}
+	if !probe.OK || len(probe.Messages) != 3 || len(probe.Notifications) != 3 {
+		t.Fatalf("terminal-update probe = %#v", probe)
+	}
+	for i, want := range []struct {
+		status, notification string
+	}{{"ok", "info"}, {"error", "error"}, {"canceled", "warning"}} {
+		if probe.Messages[i].Message.Details.Status != want.status || probe.Messages[i].Options.TriggerTurn {
+			t.Fatalf("terminal message %d = %#v, want %s without a turn", i, probe.Messages[i], want.status)
+		}
+		if probe.Notifications[i].Type != want.notification {
+			t.Fatalf("terminal notification %d = %#v, want %s", i, probe.Notifications[i], want.notification)
+		}
+	}
+}
+
 func TestInstalledPiLoadsNativeWorkflowToolSchemasOffline(t *testing.T) {
 	piPath, err := exec.LookPath("pi")
 	if err != nil {

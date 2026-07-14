@@ -766,6 +766,9 @@ func ReadJournal(id string) ([]JournalEntry, error) {
 			out = append(out, e)
 		}
 	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("read journal %s: %w", id, err)
+	}
 	return out, nil
 }
 
@@ -851,6 +854,9 @@ func ReadEvents(id string) ([]Event, error) {
 		if json.Unmarshal(sc.Bytes(), &e) == nil {
 			out = append(out, e)
 		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("read events %s: %w", id, err)
 	}
 	return out, nil
 }

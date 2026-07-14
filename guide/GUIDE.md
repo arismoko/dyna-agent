@@ -118,7 +118,7 @@ not parse a JSON string nested inside that value.
 
 `agent()` starts one independent worker and returns a promise. Without a
 schema it resolves to the worker's final text. With a schema it resolves to the
-validated object or array.
+validated JSON value.
 
 Supported options are:
 
@@ -127,10 +127,11 @@ Supported options are:
 - `phase`: explicit progress group. Prefer this inside concurrent callbacks so
   global `phase()` changes cannot interleave groups.
 - `schema`: a JSON Schema object. Dyna appends a JSON-only response contract,
-  extracts an object or array from the result, validates it, and retries with
-  the validation error up to two times, for three attempts total. A bad schema
-  or a third invalid response rejects the call. Use object/array schemas; the
-  extractor does not accept a bare scalar result.
+  extracts a JSON value from the result, validates it, and retries with the
+  validation error up to two times, for three attempts total. A bad schema or
+  a third invalid response rejects the call. Bare scalar results must be the
+  complete response or a fenced JSON block; object and array results may also
+  be extracted from surrounding prose.
 - `cwd`: worker working directory. It defaults to the run's `--dir`, which
   defaults to the shell's current directory.
 - `timeout`: positive seconds. It overrides a profile timeout. With neither,

@@ -15,6 +15,7 @@ const MAX_WORKFLOW_SOURCE = 512 * 1024;
 const MAX_ERROR_DETAIL = 16 * 1024;
 const DETACHED_REGISTRATION_GRACE_MS = 15 * 1000;
 const DETACHED_REGISTRATION_POLL_MS = 300;
+const RUN_COMPLETION_POLL_MS = 1000;
 const MAX_EVENT_READ = 4 * 1024 * 1024;
 const MAX_JOURNAL_READ = 4 * 1024 * 1024;
 const MAX_OBSERVER_EVENTS = 2000;
@@ -339,6 +340,12 @@ type CLIResult = {
 	stdoutTruncated: boolean;
 	stderrTruncated: boolean;
 	spawnError?: string;
+};
+
+type TerminalRunUpdate = {
+	run: Run;
+	messageSent: boolean;
+	uiNotified: boolean;
 };
 
 function clipped(value: string, limit = MAX_TOOL_OUTPUT): { text: string; truncated: boolean } {
@@ -1248,6 +1255,85 @@ class DynaRunsOverlay implements Component {
 export default function (pi: ExtensionAPI) {
 	if (!SESSION) return;
 
+	// Only runs launched through this extension are eligible for delivery. This
+	// avoids treating pre-existing runs from the same Pi session as new work.
+	const launchedRunIDs = new Set<string>();
+	const pendingRunUpdates = new Map<string, TerminalRunUpdate>();
+	const runCompletionAbort = new AbortController();
+
+	function isTerminalRun(run: Run): boolean {
+		return run.status === "ok" || run.status === "error" || run.status === "canceled";
+	}
+
+	function completionMessage(run: Run): string {
+		return `Dyna workflow "${run.name}" (${run.id}) ${run.status}.`;
+	}
+
+	function completionNotificationType(run: Run): "info" | "warning" | "error" {
+		if (run.status === "error") return "error";
+		if (run.status === "canceled") return "warning";
+		return "info";
+	}
+
+	// Never inject a message while Pi is streaming: its default delivery mode
+	// would steer the current agent and cause an unwanted follow-up turn.
+	function flushTerminalRunUpdates(ctx: ExtensionContext): void {
+		if (!ctx.isIdle()) return;
+		for (const [id, update] of pendingRunUpdates) {
+			const { run } = update;
+			try {
+				if (!update.messageSent) {
+					pi.sendMessage({
+						customType: "dyna_run_terminal",
+						content: completionMessage(run),
+						display: false,
+						details: {
+							runId: run.id,
+							name: run.name,
+							status: run.status,
+							session: run.session,
+							startedAt: run.startedAt,
+							endedAt: run.endedAt,
+						},
+					}, { triggerTurn: false });
+					update.messageSent = true;
+				}
+				if (!update.uiNotified) {
+					ctx.ui.notify(completionMessage(run), completionNotificationType(run));
+					update.uiNotified = true;
+				}
+				if (update.messageSent && update.uiNotified) pendingRunUpdates.delete(id);
+			} catch {
+				// Keep the partially delivered update for the next safe flush.
+			}
+		}
+	}
+
+	function watchLaunchedRun(id: string, ctx: ExtensionContext): void {
+		if (launchedRunIDs.has(id)) return;
+		launchedRunIDs.add(id);
+		void (async () => {
+			while (!runCompletionAbort.signal.aborted) {
+				try {
+					const run = (await listRuns(runCompletionAbort.signal)).find((candidate) => candidate.id === id && candidate.session === SESSION);
+					if (run && isTerminalRun(run)) {
+						pendingRunUpdates.set(id, { run, messageSent: false, uiNotified: false });
+						flushTerminalRunUpdates(ctx);
+						return;
+					}
+				} catch {
+					if (runCompletionAbort.signal.aborted) return;
+					// Polling is best-effort; a transient CLI failure must not lose a completion.
+				}
+				try {
+					await sleep(RUN_COMPLETION_POLL_MS, undefined, { signal: runCompletionAbort.signal, ref: false });
+				} catch {
+					return;
+				}
+			}
+		})();
+	}
+
 	pi.on("input", async (_event, ctx) => {
 		if (!CODEX_AUTH_ENABLED || ctx.model?.provider !== CODEX_PROVIDER) return;
 		try {
@@ -1271,7 +1357,12 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("agent_settled", async (_event, ctx) => {
+		flushTerminalRunUpdates(ctx);
+	});
+
 	pi.on("session_shutdown", () => {
+		runCompletionAbort.abort();
 		if (codexRefreshTimer) clearTimeout(codexRefreshTimer);
 		codexRefreshTimer = undefined;
 	});
@@ -1297,7 +1388,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "dyna_run",
 		label: "Run Dyna Workflow",
-		description: "Run a bounded inline JavaScript Dyna workflow with typed options. The extension uses the exact Dyna binary without a shell and removes its private temporary script after launch.",
+		description: "Run a bounded inline JavaScript Dyna workflow with typed options. Detached workflows send one Pi session update when they finish, fail, or are canceled. The extension uses the exact Dyna binary without a shell and removes its private temporary script after launch.",
 		promptSnippet: "Run an inline Dyna JavaScript workflow",
 		promptGuidelines: ["Pass the complete workflow inline after calling dyna_profiles. Prefer detach for work that should continue while this Pi session remains interactive."],
 		parameters: Type.Object({
@@ -1310,7 +1401,7 @@ export default function (pi: ExtensionAPI) {
 			max_concurrent: Type.Optional(Type.Integer({ description: "Maximum simultaneous workers for this run", minimum: 1, maximum: 64 })),
 			call_cap: Type.Optional(Type.Integer({ description: "Maximum lifetime agent calls for this run", minimum: 1, maximum: 1000 })),
 		}),
-		async execute(_toolCallId, params, signal) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			requireSession();
 			checkedString(params.workflow, "workflow", MAX_WORKFLOW_SOURCE);
 			const cwd = checkedString(params.cwd, "cwd", 4096);
@@ -1349,6 +1440,7 @@ export default function (pi: ExtensionAPI) {
 					}
 					await waitForSessionRunRegistration(detachedRunID, signal);
 					runID = detachedRunID;
+					if (ctx) watchLaunchedRun(detachedRunID, ctx);
 				} else {
 					try {
 						const value = JSON.parse(result.stdout) as Record<string, unknown>;

@@ -225,6 +225,21 @@ func TestReadJSONLinesFromSkipsOversizedCompleteRecord(t *testing.T) {
 	}
 }
 
+func TestLegacyReadersRejectOversizedRecords(t *testing.T) {
+	t.Run("journal", func(t *testing.T) {
+		writeRunFile(t, "journal.jsonl", `{"result":"`+strings.Repeat("x", 16*1024*1024)+`"}`+"\n")
+		if _, err := ReadJournal("wf_test"); err == nil {
+			t.Fatal("ReadJournal() succeeded after scanner token limit")
+		}
+	})
+	t.Run("events", func(t *testing.T) {
+		writeRunFile(t, "events.jsonl", `{"msg":"`+strings.Repeat("x", 4*1024*1024)+`"}`+"\n")
+		if _, err := ReadEvents("wf_test"); err == nil {
+			t.Fatal("ReadEvents() succeeded after scanner token limit")
+		}
+	})
+}
+
 func writeRunFile(t *testing.T, name, contents string) string {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())

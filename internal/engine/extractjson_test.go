@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestExtractJSON(t *testing.T) {
 	cases := []struct {
@@ -51,6 +54,30 @@ func TestExtractJSON(t *testing.T) {
 			}
 			if got := obj[tc.wantKey]; got != tc.wantVal {
 				t.Fatalf("key %q = %#v, want %q", tc.wantKey, got, tc.wantVal)
+			}
+		})
+	}
+}
+
+func TestExtractJSONScalars(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want any
+	}{
+		{name: "string", in: `"value"`, want: "value"},
+		{name: "number", in: `42`, want: float64(42)},
+		{name: "boolean", in: `true`, want: true},
+		{name: "null", in: `null`, want: nil},
+		{name: "fenced boolean", in: "```json\nfalse\n```", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := extractJSON(tc.in)
+			if err != nil {
+				t.Fatalf("extractJSON(%q): %v", tc.in, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("extractJSON(%q) = %#v, want %#v", tc.in, got, tc.want)
 			}
 		})
 	}
