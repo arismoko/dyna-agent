@@ -221,13 +221,17 @@ dyna journal "mapped the parser boundary" --kind finding --next "check callers"
 dyna runs wait <id>                             # block until done, print the result
 dyna run review.js --resume <id>                # replay unchanged agent calls from a prior run
 dyna runs list                                  # inspect history
+dyna runs steer <id> <agent-id> "check the parser first" # steer the same live worker session
 dyna runs cancel <id>                           # stop a running workflow
 dyna runs pause <id> / unpause <id>             # hold new worker launches / resume
 dyna runs remove <id>... / clear                # delete finished runs
 ```
 
 Cancel, pause, and delete are also available in the TUI (`x`, `p`, `d` on the
-Workflows tab).
+Workflows tab). In a run's agent inspector, select a running worker and press
+`s` to send a short steering message. Dyna interrupts the current harness turn
+and continues its exact resumable session; profiles without that safe session
+contract reject steering instead of launching a replacement.
 
 Per-agent `isolation: 'worktree'` runs a worker in a detached git worktree,
 removed automatically if untouched and kept (with its path logged) if the
@@ -321,12 +325,17 @@ as or replaces that result.
   journal-first live timeline and per-agent **Journal**, **Task**, and
   **Result** modes. Agent rows show lifecycle status, journal-entry count,
   relative freshness, and whether a quiet-worker nudge was sent. Press
-  `enter` or `right` to focus, `left`/`right` to change mode, `j`/`k` or
+  `s` on a running worker to steer it, `enter` or `right` to focus,
+  `left`/`right` to change mode, `j`/`k` or
   arrows to scroll, `g`/`G` for top/bottom, `f` to follow new entries, and
   `esc` to return to the agent list. The selected run's events, completion
   ledger, and selected agent journal are tailed independently about every
   400 ms, so entries appear while the worker is still running, not only when
   it finishes.
+
+  The extension bundled by `dyna pi` also registers a model-visible
+  `dyna_steer` tool for active workflows owned by that pi session, so the
+  parent model can steer a worker without constructing a shell command.
 
   ![Run inspector: per-agent journal timeline while workers run](docs/img/tui-journal.png)
 - **Profiles**: the fleet at a glance, with descriptions and

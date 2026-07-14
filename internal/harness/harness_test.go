@@ -14,6 +14,79 @@ import (
 	"dyna-agent/internal/runstore"
 )
 
+func TestSteeringInterruptsAndResumesExactPiSession(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("DYNA_RUN_ID", "wf_harness-steering")
+	t.Setenv(runstore.AgentJournalRootEnv, "")
+	run, err := runstore.Create("harness steering", "return null", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.Finish("ok", "null", nil)
+	if _, err := run.StartAgentJournal(1, "pi worker", "pi-test", "Test", "original task"); err != nil {
+		t.Fatal(err)
+	}
+
+	logPath := installFakeCLI(t, "pi", `#!/bin/sh
+set -eu
+printf 'CALL %s\n' "$*" >> "$DYNA_FAKE_LOG"
+case " $* " in
+  *" --session "*)
+    printf '%s\n' 'steered exact-session result'
+    ;;
+  *)
+    trap 'exit 130' INT
+    printf '%s\n' READY >> "$DYNA_FAKE_LOG"
+    while :; do sleep 1; done
+    ;;
+esac
+`)
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	var delivered []runstore.SteeringMessage
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	go func() {
+		result, err := RunWithJournalAndSteering(ctx, profile.Profile{
+			Name: "pi-test", Harness: profile.HarnessPi,
+			Env: map[string]string{"DYNA_FAKE_LOG": logPath},
+		}, "original task", t.TempDir(), true, JournalOptions{}, SteeringOptions{
+			RunID: run.Meta.ID, AgentID: 1,
+			OnMessage: func(message runstore.SteeringMessage) { delivered = append(delivered, message) },
+		})
+		done <- outcome{result: result, err: err}
+	}()
+	if !waitForTestFile(logPath, "READY", 2*time.Second) {
+		t.Fatal("initial pi session did not start")
+	}
+	if err := runstore.SubmitAgentSteering(run.Meta.ID, 1, "prioritize the parser boundary"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-done:
+		if got.err != nil || got.result.Output != "steered exact-session result" {
+			t.Fatalf("steered result = %#v, %v", got.result, got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("steered worker did not resume")
+	}
+	if len(delivered) != 1 || delivered[0].Message != "prioritize the parser boundary" {
+		t.Fatalf("delivered messages = %#v", delivered)
+	}
+	log := readTestFile(t, logPath)
+	assertSameAssignedSession(t, log, "--session-id", "--session")
+	if !strings.Contains(log, "[DYNA STEERING]") || !strings.Contains(log, "prioritize the parser boundary") || strings.Contains(log, sessionNudgePrompt) {
+		t.Fatalf("steering prompt was not isolated from recovery:\n%s", log)
+	}
+	if err := runstore.SubmitAgentSteering(run.Meta.ID, 1, "too late"); err == nil {
+		t.Fatal("completed worker still accepted steering")
+	}
+}
+
 func TestJournalInactivityNudgesExactCodexSession(t *testing.T) {
 	journalPath := createHarnessJournal(t, 1)
 	logPath := installFakeCLI(t, "codex", `#!/bin/sh

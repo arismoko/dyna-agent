@@ -22,7 +22,7 @@ wide sweeps/audits, adversarial verification, judge panels, migrations) or
 when the user asks for a workflow.
 
 If your instructions include a run-owned dyna journal, you are a dyna worker:
-do not use this skill; the only permitted dyna command is ` + "`dyna journal`" + `.
+do not invoke Dyna workflows; the only permitted dyna command is ` + "`dyna journal`" + `.
 
 Pi users can launch an interactive dyna-enabled harness with ` + "`dyna pi`" + `.
 Runs started there are grouped to that launch and visible live with ` + "`/dyna`" + `.
@@ -92,13 +92,13 @@ const (
 
 const guidanceBody = `# Multi-model workflows with dyna
 
-You can orchestrate fleets of worker models with the dyna CLI (see the dyna skill).
+You can orchestrate fleets of worker models with the dyna CLI.
 
 - Reach for dyna when the user explicitly asks (mentions dyna, workflows, worker profiles, or multi-model orchestration) or when a task genuinely benefits from fanning out across models: parallel code review, wide audits or sweeps, adversarial verification, judge panels, or large migrations. Workflows can spawn many worker sessions and consume significant tokens, so the user should be requesting that scale rather than having it inferred from an ordinary task.
 - Prefer a hybrid approach: scout inline first (list files, scope the diff, find the work list), then orchestrate over what you found.
 - Scale to the ask: "find bugs" means a few finders and a single verification vote; "thoroughly audit" means a large finder pool, an adversarial multi-vote pass, and a synthesis stage.
 - For ordinary context-local delegation (a focused search or a scoped edit), use your harness's built-in subagents. Dyna is for cases where different models or deterministic fan-out add real value.
-- EXCEPTION: if you are yourself a dyna worker (your instructions mention the run-owned dyna journal), none of this applies. Never invoke dyna or its skill; use only ` + "`dyna journal`" + `.
+- EXCEPTION: if you are yourself a dyna worker (your instructions mention the run-owned dyna journal), none of this applies. Never invoke dyna workflow commands; use only ` + "`dyna journal`" + `.
 `
 
 // Every supported harness loads Claude-style skills (a directory holding a
@@ -116,9 +116,25 @@ type harnessTarget struct {
 	// legacyAgentsMD is a shared instructions file older versions managed a
 	// marker block in; cleaned up on install/uninstall. Empty = none.
 	legacyAgentsMD func() string
+	// legacyGuidancePath is an obsolete location for the current guidance
+	// marker block. Empty = none.
+	legacyGuidancePath func() string
 }
 
 func home() string { h, _ := os.UserHomeDir(); return h }
+
+func piAgentDir() string {
+	if dir := os.Getenv("PI_CODING_AGENT_DIR"); dir != "" {
+		if dir == "~" {
+			return home()
+		}
+		if strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
+			return filepath.Join(home(), dir[2:])
+		}
+		return dir
+	}
+	return filepath.Join(home(), ".pi", "agent")
+}
 
 func hasCLI(bin string) bool { _, err := exec.LookPath(bin); return err == nil }
 
@@ -145,11 +161,12 @@ func skillTargets() []harnessTarget {
 			legacyAgentsMD: func() string { return filepath.Join(home(), ".config", "opencode", "AGENTS.md") },
 		},
 		{
-			name:           "pi",
-			detect:         func() bool { return hasCLI("pi") || dirExists(filepath.Join(home(), ".pi")) },
-			path:           func() string { return filepath.Join(home(), ".pi", "agent", "skills", "dyna", "SKILL.md") },
-			guidancePath:   func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
-			legacyAgentsMD: func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
+			name:               "pi",
+			detect:             func() bool { return hasCLI("pi") || dirExists(filepath.Join(home(), ".pi")) },
+			path:               func() string { return filepath.Join(piAgentDir(), "skills", "dyna", "SKILL.md") },
+			guidancePath:       func() string { return filepath.Join(piAgentDir(), "AGENTS.md") },
+			legacyAgentsMD:     func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
+			legacyGuidancePath: func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
 		},
 	}
 }
@@ -307,6 +324,9 @@ func installSkill(t harnessTarget) error {
 		return err
 	}
 	removeLegacyBlock(t)
+	if _, err := removeLegacyGuidance(t); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -330,11 +350,33 @@ func uninstallSkill(t harnessTarget) (bool, error) {
 }
 
 func installGuidance(t harnessTarget) error {
-	return upsertManagedBlock(t.guidancePath(), guidanceMarkBegin, guidanceMarkEnd, guidanceBody)
+	path := t.guidancePath()
+	if err := upsertManagedBlock(path, guidanceMarkBegin, guidanceMarkEnd, guidanceBody); err != nil {
+		return err
+	}
+	_, err := removeLegacyGuidance(t)
+	return err
 }
 
 func uninstallGuidance(t harnessTarget) (bool, error) {
-	return removeManagedBlock(t.guidancePath(), guidanceMarkBegin, guidanceMarkEnd)
+	path := t.guidancePath()
+	removed, err := removeManagedBlock(path, guidanceMarkBegin, guidanceMarkEnd)
+	if err != nil {
+		return false, err
+	}
+	legacyRemoved, legacyErr := removeLegacyGuidance(t)
+	if legacyErr != nil {
+		return removed, legacyErr
+	}
+	removed = removed || legacyRemoved
+	return removed, nil
+}
+
+func removeLegacyGuidance(t harnessTarget) (bool, error) {
+	if t.legacyGuidancePath == nil || t.legacyGuidancePath() == t.guidancePath() {
+		return false, nil
+	}
+	return removeManagedBlock(t.legacyGuidancePath(), guidanceMarkBegin, guidanceMarkEnd)
 }
 
 func upsertManagedBlock(path, begin, end, body string) error {

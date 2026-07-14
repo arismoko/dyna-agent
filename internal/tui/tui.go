@@ -85,6 +85,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.runs.applyRefresh(msg, m.tab == tabRuns)
 		return m, cmd
 
+	case steerResultMsg:
+		m.runs.applySteerResult(msg)
+		return m, m.runs.requestRefresh(false)
+
 	case wizModelsMsg:
 		if m.profs.wiz != nil {
 			m.profs.wiz.setModels(msg)
@@ -96,6 +100,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tab == tabProfiles && (m.profs.editing || m.profs.wiz != nil) {
 			var cmd tea.Cmd
 			m.profs, cmd = m.profs.update(msg)
+			return m, cmd
+		}
+		if m.tab == tabRuns && m.runs.steering {
+			var cmd tea.Cmd
+			m.runs, cmd = m.runs.update(msg)
 			return m, cmd
 		}
 		switch msg.String() {
@@ -168,10 +177,12 @@ func (m model) View() string {
 	case tabRuns:
 		body = m.runs.view(m.frame)
 		if m.runs.inspecting {
-			if m.runs.inspectFocus {
+			if m.runs.steering {
+				help = helpLine("enter", "send", "esc", "cancel")
+			} else if m.runs.inspectFocus {
 				help = helpLine("j/k/↑/↓", "scroll detail", "←/→", "switch Journal/Task/Result", "f", "follow", "g/G", "top/bottom", "esc", "agents")
 			} else {
-				help = helpLine("j/k/↑/↓", "agent", "enter/→", "open detail", "esc", "back")
+				help = helpLine("j/k/↑/↓", "agent", "s", "steer running", "enter/→", "open detail", "esc", "back")
 			}
 		} else {
 			help = helpLine("↑/↓", "select", "enter", "inspect agents", "pgup/pgdn", "scroll run result", "p", "pause", "x", "cancel", "d", "delete", "q", "quit")

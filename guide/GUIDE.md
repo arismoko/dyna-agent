@@ -179,6 +179,7 @@ dyna run <script.js> [--args '<json>'] [--name x] [--dir path] [--json] [--quiet
 dyna runs list [--json] [--session <id>] # past/active runs, optionally by parent session
 dyna runs show <id> [--json]       # events, result
 dyna runs wait <id> [--timeout N]  # block until a run finishes, print result
+dyna runs steer <id> <agent-id> "message" # steer the exact active worker session
 dyna runs cancel <id>              # stop a running workflow (kills workers)
 dyna runs pause <id> / unpause <id> # hold new worker launches / resume
 dyna runs remove <id>... | clear   # delete finished runs
@@ -195,10 +196,15 @@ prompts and results), while each live worker writes progress to
 `agents/<agent-id>/journal.jsonl`; the final workflow value is in
 `result.json`.
 
-`dyna pi` launches pi with the dyna skill and bundled extension enabled. Every
+`dyna pi` launches pi with direct Dyna instructions and the bundled extension enabled. Every
 workflow started from that invocation is tagged with one session id; use
 `/dyna` inside pi to watch only those runs, or `dyna runs list --session <id>`
-to apply the same filter from a shell.
+to apply the same filter from a shell. Its model-visible `dyna_steer` tool can
+send a short instruction to a running worker from that session. In `dyna tui`,
+select a running worker in the agent inspector and press `s` for the same
+capability. Steering gracefully interrupts the current harness turn and
+continues the exact resumable session; unsupported profiles reject the request
+and never launch a replacement.
 
 - **Background runs**: `dyna run --detach script.js` prints the run id
   immediately; continue other work, then `dyna runs wait <id>` for the result.

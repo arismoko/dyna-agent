@@ -23,7 +23,7 @@ import (
 
 // Event is one line in events.jsonl.
 type Event struct {
-	T       string `json:"t"`  // run_start|phase|agent_start|agent_run|agent_journal|agent_nudge|agent_end|log|run_end
+	T       string `json:"t"`  // run_start|phase|agent_start|agent_run|agent_journal|agent_nudge|agent_steer|agent_end|log|run_end
 	TS      int64  `json:"ts"` // unix millis
 	Title   string `json:"title,omitempty"`
 	ID      int    `json:"id,omitempty"`
@@ -70,6 +70,10 @@ const (
 	agentJournalMaxRecordBytes  = 64 * 1024 * 1024
 	agentJournalMaxMessageBytes = 4096
 	agentJournalMaxKindBytes    = 32
+	// MaxSteeringMessageBytes keeps interactive steering deliberately short and
+	// bounds the prompt injected into an already-running worker session.
+	MaxSteeringMessageBytes = 2000
+	steeringMaxRecordBytes  = MaxSteeringMessageBytes*6 + 128
 )
 
 // AgentJournalEntry is one line in agents/<numeric-id>/journal.jsonl. Start
@@ -88,6 +92,21 @@ type AgentJournalEntry struct {
 	Profile string `json:"profile,omitempty"`
 	Phase   string `json:"phase,omitempty"`
 	Prompt  string `json:"prompt,omitempty"`
+}
+
+// SteeringMessage is one accepted instruction for an active worker. The
+// engine consumes these records in order from agents/<id>/steering.jsonl.
+type SteeringMessage struct {
+	TS      int64  `json:"ts"`
+	Message string `json:"message"`
+}
+
+type steeringState struct {
+	RunID     string `json:"runId"`
+	AgentID   int    `json:"agentId"`
+	Pid       int    `json:"pid"`
+	StartedAt int64  `json:"startedAt"`
+	Active    bool   `json:"active"`
 }
 
 // Meta is meta.json.
@@ -309,6 +328,217 @@ func ReadAgentJournalPathFrom(path string, offset int64) ([]AgentJournalEntry, i
 		return nil, offset, err
 	}
 	return readJSONLinesFrom[AgentJournalEntry](path, offset, agentJournalMaxRecordBytes)
+}
+
+func agentSteeringDir(runID string, agentID int) (string, error) {
+	if err := validateRunID(runID); err != nil {
+		return "", err
+	}
+	if err := validateAgentID(agentID); err != nil {
+		return "", err
+	}
+	return filepath.Join(RunsDir(), runID, "agents", strconv.Itoa(agentID)), nil
+}
+
+func withAgentSteeringLock(runID string, agentID int, fn func(string) error) error {
+	dir, err := agentSteeringDir(runID, agentID)
+	if err != nil {
+		return err
+	}
+	if info, err := os.Lstat(dir); err != nil {
+		return fmt.Errorf("agent %d is not active in run %s", agentID, runID)
+	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("agent steering directory must be a real directory")
+	}
+	lockPath := filepath.Join(dir, "steering.lock")
+	if info, err := os.Lstat(lockPath); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("agent steering lock must be a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open agent steering lock: %w", err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock agent steering mailbox: %w", err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	return fn(dir)
+}
+
+func readSteeringState(path string) (steeringState, error) {
+	var state steeringState
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return state, fmt.Errorf("worker does not support live steering or is no longer active")
+		}
+		return state, err
+	}
+	if !info.Mode().IsRegular() {
+		return state, fmt.Errorf("agent steering state must be a regular file")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return state, err
+	}
+	if err := json.Unmarshal(b, &state); err != nil {
+		return state, fmt.Errorf("parse agent steering state: %w", err)
+	}
+	return state, nil
+}
+
+func writeSteeringState(path string, state steeringState) error {
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("agent steering state must be a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	b, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(b, '\n'), 0o600)
+}
+
+// ActivateAgentSteering marks a resumable worker as ready to accept messages.
+// Only the process recorded as the run owner may activate the mailbox.
+func ActivateAgentSteering(runID string, agentID int) error {
+	return withAgentSteeringLock(runID, agentID, func(dir string) error {
+		meta, err := ReadMeta(runID)
+		if err != nil {
+			return err
+		}
+		if meta.Status != "running" || meta.Pid != os.Getpid() {
+			return fmt.Errorf("run %s is not owned by this active process", runID)
+		}
+		mailbox := filepath.Join(dir, "steering.jsonl")
+		if info, err := os.Lstat(mailbox); err == nil && !info.Mode().IsRegular() {
+			return fmt.Errorf("agent steering mailbox must be a regular file")
+		} else if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		f, err := os.OpenFile(mailbox, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("create agent steering mailbox: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+		return writeSteeringState(filepath.Join(dir, "steering-state.json"), steeringState{
+			RunID: runID, AgentID: agentID, Pid: meta.Pid,
+			StartedAt: meta.StartedAt.UnixNano(), Active: true,
+		})
+	})
+}
+
+// DeactivateAgentSteering closes a worker mailbox. Accepted messages are
+// drained atomically before this is called during normal worker completion.
+func DeactivateAgentSteering(runID string, agentID int) error {
+	return withAgentSteeringLock(runID, agentID, func(dir string) error {
+		path := filepath.Join(dir, "steering-state.json")
+		state, err := readSteeringState(path)
+		if err != nil {
+			return nil
+		}
+		state.Active = false
+		return writeSteeringState(path, state)
+	})
+}
+
+// SubmitAgentSteering validates and appends a message at the external command
+// boundary. The state check and append share a cross-process lock with worker
+// shutdown, so a successful submission cannot race behind deactivation.
+func SubmitAgentSteering(runID string, agentID int, message string) error {
+	if err := validateRunID(runID); err != nil {
+		return err
+	}
+	if err := validateAgentID(agentID); err != nil {
+		return err
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return fmt.Errorf("steering message must not be empty")
+	}
+	if !utf8.ValidString(message) {
+		return fmt.Errorf("steering message must be valid UTF-8")
+	}
+	if len(message) > MaxSteeringMessageBytes {
+		return fmt.Errorf("steering message is too long (maximum %d bytes)", MaxSteeringMessageBytes)
+	}
+	return withAgentSteeringLock(runID, agentID, func(dir string) error {
+		meta, err := ReadMeta(runID)
+		if err != nil {
+			return err
+		}
+		if meta.Status != "running" {
+			return fmt.Errorf("run %s is not running (status %s)", runID, meta.Status)
+		}
+		if meta.Pid <= 0 || syscall.Kill(meta.Pid, 0) != nil {
+			return fmt.Errorf("run %s is not running (process %d is unavailable)", runID, meta.Pid)
+		}
+		state, err := readSteeringState(filepath.Join(dir, "steering-state.json"))
+		if err != nil {
+			return err
+		}
+		if !state.Active || state.RunID != runID || state.AgentID != agentID || state.Pid != meta.Pid || state.StartedAt != meta.StartedAt.UnixNano() {
+			return fmt.Errorf("agent %d is not an active steerable worker in run %s", agentID, runID)
+		}
+		entry := SteeringMessage{TS: time.Now().UnixMilli(), Message: message}
+		b, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		f, err := os.OpenFile(filepath.Join(dir, "steering.jsonl"), os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("open agent steering mailbox: %w", err)
+		}
+		if n, writeErr := f.Write(append(b, '\n')); writeErr != nil {
+			f.Close()
+			return fmt.Errorf("append agent steering message: %w", writeErr)
+		} else if n != len(b)+1 {
+			f.Close()
+			return fmt.Errorf("append agent steering message: %w", io.ErrShortWrite)
+		}
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return err
+		}
+		return f.Close()
+	})
+}
+
+// ReadAgentSteeringFrom consumes accepted messages after offset. When
+// deactivateIfEmpty is true, the emptiness check and deactivation are atomic
+// with submissions; this closes the final completion race.
+func ReadAgentSteeringFrom(runID string, agentID int, offset int64, deactivateIfEmpty bool) ([]SteeringMessage, int64, error) {
+	var messages []SteeringMessage
+	next := offset
+	err := withAgentSteeringLock(runID, agentID, func(dir string) error {
+		statePath := filepath.Join(dir, "steering-state.json")
+		state, err := readSteeringState(statePath)
+		if err != nil {
+			return err
+		}
+		if state.RunID != runID || state.AgentID != agentID || state.Pid != os.Getpid() {
+			return fmt.Errorf("agent steering state does not belong to this worker process")
+		}
+		if !state.Active {
+			return nil
+		}
+		messages, next, err = readJSONLinesFrom[SteeringMessage](filepath.Join(dir, "steering.jsonl"), offset, steeringMaxRecordBytes)
+		if err != nil {
+			return err
+		}
+		if deactivateIfEmpty && len(messages) == 0 {
+			state.Active = false
+			return writeSteeringState(statePath, state)
+		}
+		return nil
+	})
+	return messages, next, err
 }
 
 func writeAgentJournalRecord(path string, entry AgentJournalEntry, flags int) error {

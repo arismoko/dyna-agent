@@ -38,6 +38,7 @@ const (
 	sessionNudgePrompt      = "Continue from where you left off. The previous turn was interrupted by a transient harness/API failure. Inspect the current state, do not redo completed work, and finish the original task. Return the final response requested by the original prompt."
 	journalNudgePrompt      = "Your dyna work journal has been quiet for five minutes. Write a brief progress entry now with `dyna journal` (one or two sentences plus an optional next step), then continue the original task. Do not stop after reporting status, do not redo completed work, and still return the final response requested by the original prompt."
 	journalCompletionPrompt = "Before finishing, write one brief entry to your dyna work journal now with `dyna journal` (one or two sentences plus an optional next step). Then return the same final response you already produced for the original task. Do not redo the task."
+	steeringPollInterval    = 100 * time.Millisecond
 
 	JournalNudgeIdle    = "idle"
 	JournalNudgeMissing = "missing-entry"
@@ -61,6 +62,14 @@ type JournalOptions struct {
 	OnEntry           func(runstore.AgentJournalEntry)
 	OnNudge           func(JournalNudge)
 	State             *JournalState
+}
+
+// SteeringOptions identifies the run-owned mailbox for one worker. It is
+// activated only after the harness has an exact resumable session ID.
+type SteeringOptions struct {
+	RunID     string
+	AgentID   int
+	OnMessage func(runstore.SteeringMessage)
 }
 
 // JournalState keeps the inactivity clock across multiple harness turns that
@@ -89,6 +98,7 @@ type commandSpec struct {
 	outFile               string
 	parseOutput           func(string) string
 	journalReminderReason string
+	steering              []runstore.SteeringMessage
 }
 
 type invocation struct {
@@ -99,13 +109,16 @@ type invocation struct {
 }
 
 type attempt struct {
-	output             string
-	stdout             string
-	stderr             string
-	runErr             error
-	started            bool
-	contextDone        bool
-	journalInterrupted bool
+	output              string
+	stdout              string
+	stderr              string
+	runErr              error
+	started             bool
+	contextDone         bool
+	journalInterrupted  bool
+	steering            []runstore.SteeringMessage
+	steeringInterrupted bool
+	steeringErr         error
 }
 
 // Run sends prompt to the worker described by p and returns its final message.
@@ -122,14 +135,20 @@ func RunWithRecovery(ctx context.Context, p profile.Profile, prompt, cwd string,
 // RunWithJournal adds live progress-journal supervision to RunWithRecovery.
 // It is kept separate so non-workflow callers retain the simple Run API.
 func RunWithJournal(ctx context.Context, p profile.Profile, prompt, cwd string, allowRecovery bool, journal JournalOptions) (Result, error) {
-	return runJournaled(ctx, p, prompt, cwd, allowRecovery, sessionNudgeDelay, journal)
+	return runJournaled(ctx, p, prompt, cwd, allowRecovery, sessionNudgeDelay, journal, SteeringOptions{})
+}
+
+// RunWithJournalAndSteering adds a run-owned steering mailbox to the normal
+// journaled invocation. Unsupported/non-resumable harnesses never activate it.
+func RunWithJournalAndSteering(ctx context.Context, p profile.Profile, prompt, cwd string, allowRecovery bool, journal JournalOptions, steering SteeringOptions) (Result, error) {
+	return runJournaled(ctx, p, prompt, cwd, allowRecovery, sessionNudgeDelay, journal, steering)
 }
 
 func run(ctx context.Context, p profile.Profile, prompt, cwd string, allowRecovery bool, nudgeDelay time.Duration) (Result, error) {
-	return runJournaled(ctx, p, prompt, cwd, allowRecovery, nudgeDelay, JournalOptions{})
+	return runJournaled(ctx, p, prompt, cwd, allowRecovery, nudgeDelay, JournalOptions{}, SteeringOptions{})
 }
 
-func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, allowRecovery bool, nudgeDelay time.Duration, journal JournalOptions) (Result, error) {
+func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, allowRecovery bool, nudgeDelay time.Duration, journal JournalOptions, steeringOpts SteeringOptions) (Result, error) {
 	start := time.Now()
 	if p.Harness == profile.HarnessMock {
 		if journal.Path != "" {
@@ -161,6 +180,13 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 	tracker := newSessionTracker(inv.sessionID)
 	tracker.observe("") // Claude/Pi preassign an id without reading stdout.
 	supervisor := newJournalSupervisor(journal)
+	steering := newSteeringSupervisor(steeringOpts, inv.resume != nil)
+	if steering != nil {
+		defer steering.close()
+		if err := steering.activateIfReady(tracker.idValue()); err != nil {
+			return Result{}, err
+		}
+	}
 	spec := inv.initial
 	var recoveryErr error
 	var lastOutput string
@@ -168,6 +194,39 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 	journalNudges := 0
 	completionReminderAttempted := false
 	completionOutput := ""
+	resumeSteering := func(messages []runstore.SteeringMessage) error {
+		if len(messages) == 0 {
+			return nil
+		}
+		sessionID := tracker.idValue()
+		if sessionID == "" || inv.resume == nil {
+			return fmt.Errorf("worker %s received steering but its exact session could not be resumed", p.Name)
+		}
+		if err := prepareResumeOutput(inv.initial.outFile); err != nil {
+			return err
+		}
+		if supervisor != nil {
+			supervisor.noteExternalResume()
+		}
+		completionReminderAttempted = false
+		completionOutput = ""
+		spec = inv.resume(sessionID, steeringPrompt(messages))
+		spec.steering = append([]runstore.SteeringMessage(nil), messages...)
+		return nil
+	}
+	finishOrSteer := func() (bool, error) {
+		if steering == nil {
+			return false, nil
+		}
+		messages, err := steering.finish()
+		if err != nil {
+			return false, err
+		}
+		if len(messages) == 0 {
+			return false, nil
+		}
+		return true, resumeSteering(messages)
+	}
 
 	for {
 		attemptCtx := ctx
@@ -179,7 +238,7 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 			}
 			attemptCtx, cancelAttempt = context.WithTimeout(ctx, limit)
 		}
-		a := runOnce(attemptCtx, p, cwd, spec, tracker, supervisor, inv.resume != nil)
+		a := runOnce(attemptCtx, p, cwd, spec, tracker, supervisor, steering, inv.resume != nil)
 		cancelAttempt()
 		if spec.journalReminderReason != "" && a.started {
 			journalNudges++
@@ -189,6 +248,18 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 		tracker.observe(a.stdout)
 		if a.output != "" {
 			lastOutput = a.output
+		}
+		if a.steeringInterrupted && ctx.Err() == nil {
+			if err := resumeSteering(a.steering); err != nil {
+				return Result{Output: lastOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, err
+			}
+			continue
+		}
+		if len(a.steering) > 0 && ctx.Err() == nil {
+			if err := resumeSteering(a.steering); err != nil {
+				return Result{Output: lastOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, err
+			}
+			continue
 		}
 
 		if a.journalInterrupted && ctx.Err() == nil {
@@ -213,19 +284,39 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 			if supervisor != nil && !supervisor.hasAgentEntry() {
 				if completionReminderAttempted {
 					supervisor.markNudged(false, JournalNudgeMissing)
+					if resume, finishErr := finishOrSteer(); finishErr != nil {
+						return Result{Output: completionOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+					} else if resume {
+						continue
+					}
 					return Result{Output: completionOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, nil
 				}
 				if !supervisor.claimCompletionReminder() {
+					if resume, finishErr := finishOrSteer(); finishErr != nil {
+						return Result{Output: a.output, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+					} else if resume {
+						continue
+					}
 					return Result{Output: a.output, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, nil
 				}
 				sessionID := tracker.idValue()
 				if sessionID == "" || inv.resume == nil {
 					supervisor.markNudged(false, JournalNudgeMissing)
+					if resume, finishErr := finishOrSteer(); finishErr != nil {
+						return Result{Output: a.output, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+					} else if resume {
+						continue
+					}
 					return Result{Output: a.output, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, nil
 				}
 				completionOutput = a.output
 				if err := prepareResumeOutput(inv.initial.outFile); err != nil {
 					supervisor.markNudged(false, JournalNudgeMissing)
+					if resume, finishErr := finishOrSteer(); finishErr != nil {
+						return Result{Output: completionOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+					} else if resume {
+						continue
+					}
 					return Result{Output: completionOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, nil
 				}
 				completionReminderAttempted = true
@@ -234,7 +325,17 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 				continue
 			}
 			if completionReminderAttempted {
+				if resume, finishErr := finishOrSteer(); finishErr != nil {
+					return Result{Output: completionOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+				} else if resume {
+					continue
+				}
 				return Result{Output: completionOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, nil
+			}
+			if resume, finishErr := finishOrSteer(); finishErr != nil {
+				return Result{Output: a.output, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+			} else if resume {
+				continue
 			}
 			return Result{Output: a.output, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, nil
 		}
@@ -245,12 +346,22 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 			// Journaling is a progress side channel. Do not turn an already-valid
 			// task result into a failure if its completion reminder cannot finish.
 			supervisor.markNudged(false, JournalNudgeMissing)
+			if resume, finishErr := finishOrSteer(); finishErr != nil {
+				return Result{Output: completionOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+			} else if resume {
+				continue
+			}
 			return Result{Output: completionOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, nil
 		}
 		if recoveryErr != nil {
 			out := a.output
 			if out == "" {
 				out = lastOutput
+			}
+			if resume, finishErr := finishOrSteer(); finishErr != nil {
+				return Result{Output: out, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+			} else if resume {
+				continue
 			}
 			return Result{Output: out, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges},
 				fmt.Errorf("%v; same-session nudge failed: %w", recoveryErr, attemptErr)
@@ -259,10 +370,22 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 		// A fresh retry can repeat edits or other side effects. Recover only when
 		// the CLI process started and exposed an exact resumable session.
 		if !allowRecovery || recovered || ctx.Err() != nil || !a.started || inv.resume == nil {
+			if ctx.Err() == nil {
+				if resume, finishErr := finishOrSteer(); finishErr != nil {
+					return Result{Output: lastOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+				} else if resume {
+					continue
+				}
+			}
 			return Result{Output: lastOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, attemptErr
 		}
 		sessionID := tracker.idValue()
 		if sessionID == "" {
+			if resume, finishErr := finishOrSteer(); finishErr != nil {
+				return Result{Output: lastOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, finishErr
+			} else if resume {
+				continue
+			}
 			return Result{Output: lastOutput, Duration: time.Since(start), Nudged: recovered, JournalNudges: journalNudges}, attemptErr
 		}
 		if err := waitForSessionNudge(ctx, nudgeDelay); err != nil {
@@ -297,7 +420,7 @@ func waitForSessionNudge(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpec, tracker *sessionTracker, journal *journalSupervisor, resumable bool) attempt {
+func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpec, tracker *sessionTracker, journal *journalSupervisor, steering *steeringSupervisor, resumable bool) attempt {
 	cmd := exec.Command(spec.argv[0], spec.argv[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = mergeEnv(os.Environ(), p.Env)
@@ -312,7 +435,12 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
-		return finishAttempt(spec, stdout.String(), stderr.String(), err, false, false, false)
+		return finishAttempt(spec, stdout.String(), stderr.String(), err, false, false, false, false, nil, nil)
+	}
+	if steering != nil && steering.opts.OnMessage != nil {
+		for _, message := range spec.steering {
+			steering.opts.OnMessage(message)
+		}
 	}
 	if spec.journalReminderReason != "" && journal != nil {
 		journal.markNudged(true, spec.journalReminderReason)
@@ -322,8 +450,12 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 
 	var tick <-chan time.Time
 	var ticker *time.Ticker
-	if journal != nil {
-		ticker = time.NewTicker(journal.pollInterval())
+	if journal != nil || steering != nil {
+		interval := steeringPollInterval
+		if journal != nil && journal.pollInterval() < interval {
+			interval = journal.pollInterval()
+		}
+		ticker = time.NewTicker(interval)
 		tick = ticker.C
 		defer ticker.Stop()
 	}
@@ -334,37 +466,62 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 			if journal != nil {
 				journal.poll()
 			}
-			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, false)
+			messages := []runstore.SteeringMessage(nil)
+			if steering != nil {
+				_ = steering.activateIfReady(tracker.idValue())
+				steering.poll()
+				messages = steering.take()
+			}
+			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, false, false, messages, steering.errValue())
 		case <-ctx.Done():
 			runErr := stopCanceledProcess(cmd, done)
 			if journal != nil {
 				journal.poll()
 			}
-			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false)
+			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false, false, nil, nil)
 		case <-tick:
-			journal.poll()
-			if !journal.reminderDue() {
-				continue
+			if steering != nil {
+				_ = steering.activateIfReady(tracker.idValue())
+				steering.poll()
+				if steering.errValue() != nil {
+					runErr := stopCanceledProcess(cmd, done)
+					return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, false, false, nil, steering.errValue())
+				}
+				if steering.hasPending() && resumable && tracker.idValue() != "" {
+					runErr, interrupted := interruptForContinuation(ctx, cmd, done)
+					messages := steering.take()
+					if ctx.Err() != nil {
+						return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false, false, nil, nil)
+					}
+					return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, false, interrupted, messages, steering.errValue())
+				}
 			}
-			if resumable {
-				if tracker.idValue() == "" {
+			if journal != nil {
+				journal.poll()
+				if !journal.reminderDue() {
 					continue
 				}
-				runErr, interrupted := interruptForJournal(ctx, cmd, done)
-				journal.poll()
-				if ctx.Err() != nil {
-					return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false)
+				if resumable {
+					if tracker.idValue() == "" {
+						continue
+					}
+					runErr, interrupted := interruptForContinuation(ctx, cmd, done)
+					journal.poll()
+					if ctx.Err() != nil {
+						return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false, false, nil, nil)
+					}
+					return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, interrupted, false, nil, nil)
 				}
-				return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, interrupted)
+				journal.markNudged(false, JournalNudgeIdle)
 			}
-			journal.markNudged(false, JournalNudgeIdle)
 		}
 	}
 }
 
-// interruptForJournal gives the CLI time to persist its exact session before
-// escalation. A completion already waiting in done wins and is never resumed.
-func interruptForJournal(ctx context.Context, cmd *exec.Cmd, done <-chan error) (error, bool) {
+// interruptForContinuation gives the CLI time to persist its exact session
+// before a journal or steering continuation. A completion already waiting in
+// done wins and can still be continued without interrupting it.
+func interruptForContinuation(ctx context.Context, cmd *exec.Cmd, done <-chan error) (error, bool) {
 	select {
 	case runErr := <-done:
 		return runErr, false
@@ -475,7 +632,7 @@ func mergeEnv(base []string, overrides map[string]string) []string {
 	return out
 }
 
-func finishAttempt(spec commandSpec, stdout, stderr string, runErr error, started, contextDone, journalInterrupted bool) attempt {
+func finishAttempt(spec commandSpec, stdout, stderr string, runErr error, started, contextDone, journalInterrupted, steeringInterrupted bool, steering []runstore.SteeringMessage, steeringErr error) attempt {
 	var out string
 	if spec.outFile != "" {
 		// stdout may be a JSON event stream used only to discover the session.
@@ -491,6 +648,7 @@ func finishAttempt(spec commandSpec, stdout, stderr string, runErr error, starte
 	return attempt{
 		output: out, stdout: stdout, stderr: stderr, runErr: runErr,
 		started: started, contextDone: contextDone, journalInterrupted: journalInterrupted,
+		steering: steering, steeringInterrupted: steeringInterrupted, steeringErr: steeringErr,
 	}
 }
 
@@ -570,6 +728,107 @@ func (b *observedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+type steeringSupervisor struct {
+	opts    SteeringOptions
+	offset  int64
+	active  bool
+	pending []runstore.SteeringMessage
+	err     error
+}
+
+func newSteeringSupervisor(opts SteeringOptions, resumable bool) *steeringSupervisor {
+	if !resumable || opts.RunID == "" || opts.AgentID <= 0 {
+		return nil
+	}
+	return &steeringSupervisor{opts: opts}
+}
+
+func (s *steeringSupervisor) activateIfReady(sessionID string) error {
+	if s == nil || s.active || sessionID == "" {
+		return nil
+	}
+	if err := runstore.ActivateAgentSteering(s.opts.RunID, s.opts.AgentID); err != nil {
+		s.err = err
+		return err
+	}
+	s.active = true
+	return nil
+}
+
+func (s *steeringSupervisor) poll() {
+	if s == nil || !s.active || s.err != nil {
+		return
+	}
+	messages, next, err := runstore.ReadAgentSteeringFrom(s.opts.RunID, s.opts.AgentID, s.offset, false)
+	if err != nil {
+		s.err = err
+		return
+	}
+	s.offset = next
+	s.pending = append(s.pending, messages...)
+}
+
+func (s *steeringSupervisor) hasPending() bool {
+	return s != nil && len(s.pending) > 0
+}
+
+func (s *steeringSupervisor) take() []runstore.SteeringMessage {
+	if s == nil || len(s.pending) == 0 {
+		return nil
+	}
+	messages := append([]runstore.SteeringMessage(nil), s.pending...)
+	s.pending = nil
+	return messages
+}
+
+func (s *steeringSupervisor) errValue() error {
+	if s == nil {
+		return nil
+	}
+	return s.err
+}
+
+func (s *steeringSupervisor) finish() ([]runstore.SteeringMessage, error) {
+	if s == nil || !s.active {
+		return nil, s.errValue()
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	messages, next, err := runstore.ReadAgentSteeringFrom(s.opts.RunID, s.opts.AgentID, s.offset, true)
+	if err != nil {
+		s.err = err
+		return nil, err
+	}
+	s.offset = next
+	if len(messages) == 0 {
+		s.active = false
+	}
+	s.pending = append(s.pending, messages...)
+	return s.take(), nil
+}
+
+func (s *steeringSupervisor) close() {
+	if s == nil || !s.active {
+		return
+	}
+	_ = runstore.DeactivateAgentSteering(s.opts.RunID, s.opts.AgentID)
+	s.active = false
+}
+
+func steeringPrompt(messages []runstore.SteeringMessage) string {
+	var b strings.Builder
+	b.WriteString("[DYNA STEERING]\nA human or parent model sent the following steering to this exact active worker session. Apply it to the original task, preserve completed work, and continue from the current state. The original final-response contract still applies.\n")
+	for i, message := range messages {
+		if len(messages) > 1 {
+			fmt.Fprintf(&b, "\n%d. %s", i+1, message.Message)
+		} else {
+			b.WriteString("\n" + message.Message)
+		}
+	}
+	return b.String()
 }
 
 type journalSupervisor struct {
@@ -678,6 +937,17 @@ func (j *journalSupervisor) reminderDue() bool {
 	return !j.state.reminded && time.Since(j.state.lastActivity) >= j.opts.IdleAfter
 }
 
+func (j *journalSupervisor) noteExternalResume() {
+	if j == nil {
+		return
+	}
+	j.state.mu.Lock()
+	j.state.lastActivity = time.Now()
+	j.state.reminded = false
+	j.state.unavailableNote = false
+	j.state.mu.Unlock()
+}
+
 func (j *journalSupervisor) hasAgentEntry() bool {
 	if j == nil {
 		return false
@@ -729,6 +999,9 @@ func (j *journalSupervisor) markNudged(delivered bool, reason string) {
 }
 
 func attemptError(ctx context.Context, p profile.Profile, argv []string, a attempt) error {
+	if a.steeringErr != nil {
+		return fmt.Errorf("worker %s steering mailbox failed: %w", p.Name, a.steeringErr)
+	}
 	if a.contextDone {
 		err := ctx.Err()
 		if err == nil {

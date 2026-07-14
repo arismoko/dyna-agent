@@ -46,6 +46,99 @@ func TestSkillDocumentsAgentJournalContract(t *testing.T) {
 	}
 }
 
+func TestPiTargetUsesPiAgentDirectory(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+
+	var pi harnessTarget
+	for _, target := range skillTargets() {
+		if target.name == "pi" {
+			pi = target
+			break
+		}
+	}
+	agentDir := filepath.Join(homeDir, ".pi", "agent")
+	if got, want := pi.path(), filepath.Join(agentDir, "skills", "dyna", "SKILL.md"); got != want {
+		t.Fatalf("pi skill path = %q, want %q", got, want)
+	}
+	if got, want := pi.guidancePath(), filepath.Join(agentDir, "AGENTS.md"); got != want {
+		t.Fatalf("pi guidance path = %q, want %q", got, want)
+	}
+}
+
+func TestPiTargetHonorsCustomAgentDirectory(t *testing.T) {
+	agentDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
+
+	for _, target := range skillTargets() {
+		if target.name != "pi" {
+			continue
+		}
+		if got, want := target.path(), filepath.Join(agentDir, "skills", "dyna", "SKILL.md"); got != want {
+			t.Fatalf("pi skill path = %q, want %q", got, want)
+		}
+		if got, want := target.guidancePath(), filepath.Join(agentDir, "AGENTS.md"); got != want {
+			t.Fatalf("pi guidance path = %q, want %q", got, want)
+		}
+		return
+	}
+	t.Fatal("pi target not found")
+}
+
+func TestPiTargetExpandsTildeInCustomAgentDirectory(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PI_CODING_AGENT_DIR", "~/.custom-pi")
+
+	for _, target := range skillTargets() {
+		if target.name != "pi" {
+			continue
+		}
+		if got, want := target.guidancePath(), filepath.Join(homeDir, ".custom-pi", "AGENTS.md"); got != want {
+			t.Fatalf("pi guidance path = %q, want %q", got, want)
+		}
+		return
+	}
+	t.Fatal("pi target not found")
+}
+
+func TestGuidanceInstallMigratesLegacyPath(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "agent", "AGENTS.md")
+	legacy := filepath.Join(dir, "AGENTS.md")
+	target := harnessTarget{
+		path:               func() string { return filepath.Join(dir, "agent", "skills", "dyna", "SKILL.md") },
+		guidancePath:       func() string { return current },
+		legacyGuidancePath: func() string { return legacy },
+	}
+	userContent := "# User guidance\n\nKeep this.\n"
+	if err := os.WriteFile(legacy, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertManagedBlock(legacy, guidanceMarkBegin, guidanceMarkEnd, guidanceBody); err != nil {
+		t.Fatal(err)
+	}
+	if err := installGuidance(target); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, current); !strings.Contains(got, guidanceMarkBegin) {
+		t.Fatalf("current guidance was not installed:\n%s", got)
+	}
+	if got := readFile(t, legacy); got != userContent {
+		t.Fatalf("legacy user guidance changed: got %q, want %q", got, userContent)
+	}
+	if err := upsertManagedBlock(legacy, guidanceMarkBegin, guidanceMarkEnd, guidanceBody); err != nil {
+		t.Fatal(err)
+	}
+	if err := installSkill(target); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, legacy); got != userContent {
+		t.Fatalf("skill install did not migrate legacy guidance: got %q, want %q", got, userContent)
+	}
+}
+
 func TestGuidanceInstallUninstallPreservesUserContent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "AGENTS.md")
 	userContent := "# My instructions\n\nKeep this line.\n"

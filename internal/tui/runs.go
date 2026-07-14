@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -73,12 +74,20 @@ type runsModel struct {
 	pollsUntilList  int
 	pauseGeneration uint64
 
-	confirm   string // pending confirmation: "delete" | "cancel" | "pause"
-	confirmID string
-	statusMsg string
+	confirm      string // pending confirmation: "delete" | "cancel" | "pause"
+	confirmID    string
+	statusMsg    string
+	steering     bool
+	steerInput   textinput.Model
+	steerRunID   string
+	steerAgentID int
 }
 
 func newRunsModel() runsModel {
+	steerInput := textinput.New()
+	steerInput.Prompt = "› "
+	steerInput.Placeholder = "Short instruction for this worker"
+	steerInput.CharLimit = runstore.MaxSteeringMessageBytes
 	return runsModel{
 		vp:             viewport.New(0, 0),
 		ivp:            viewport.New(0, 0),
@@ -88,6 +97,7 @@ func newRunsModel() runsModel {
 		agents:         make(map[int]*agentState),
 		completionByID: make(map[int]*runstore.JournalEntry),
 		journalFollow:  true,
+		steerInput:     steerInput,
 	}
 }
 
@@ -101,6 +111,7 @@ func (m *runsModel) setSize(w, h int) {
 	m.vp.Height = max(1, h-6) // two header lines + gap + pane border
 	m.ivp.Width = m.detailWidth() - 4
 	m.ivp.Height = max(1, h-6) // identity + Journal/Task/Result mode bar
+	m.steerInput.Width = max(10, m.detailWidth()-10)
 	if m.inspecting {
 		if widthChanged {
 			m.loadInspect(false)
@@ -175,6 +186,26 @@ type runsRefreshMsg struct {
 	resultFound         bool
 	resultRead          bool
 	pauseGeneration     uint64
+}
+
+type steerResultMsg struct {
+	runID   string
+	agentID int
+	err     error
+}
+
+func submitSteeringCmd(runID string, agentID int, message string) tea.Cmd {
+	return func() tea.Msg {
+		return steerResultMsg{runID: runID, agentID: agentID, err: runstore.SubmitAgentSteering(runID, agentID, message)}
+	}
+}
+
+func (m *runsModel) applySteerResult(msg steerResultMsg) {
+	if msg.err != nil {
+		m.statusMsg = "✗ " + msg.err.Error()
+		return
+	}
+	m.statusMsg = fmt.Sprintf("✓ steering queued for agent %d", msg.agentID)
 }
 
 func (m runsModel) initialRefresh() tea.Cmd {
@@ -614,6 +645,11 @@ func (m *runsModel) applyEvents(events []runstore.Event) {
 				a.nudgeStatus = e.Status
 				a.nudgeTS = e.TS
 			}
+		case "agent_steer":
+			if a := m.agents[e.ID]; a != nil {
+				a.steerPreview = e.Preview
+				a.steerTS = e.TS
+			}
 		case "log":
 			logCount++
 			if len(logBatch) < maxVisibleLogs {
@@ -668,6 +704,30 @@ func (m *runsModel) runningCount() int {
 }
 
 func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
+	if m.steering {
+		switch msg.String() {
+		case "esc":
+			m.steering = false
+			m.steerInput.Blur()
+			m.statusMsg = "steering canceled"
+			return m, nil
+		case "enter":
+			message := strings.TrimSpace(m.steerInput.Value())
+			if message == "" {
+				m.statusMsg = "✗ steering message must not be empty"
+				return m, nil
+			}
+			runID, agentID := m.steerRunID, m.steerAgentID
+			m.steering = false
+			m.steerInput.Blur()
+			m.statusMsg = "sending steering…"
+			return m, submitSteeringCmd(runID, agentID, message)
+		default:
+			var cmd tea.Cmd
+			m.steerInput, cmd = m.steerInput.Update(msg)
+			return m, cmd
+		}
+	}
 	if m.inspecting {
 		if m.inspectFocus {
 			switch msg.String() {
@@ -742,6 +802,15 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 				if m.inspectMode == inspectJournal && m.journalFollow {
 					m.ivp.GotoBottom()
 				}
+			}
+		case "s":
+			if a := m.selectedAgent(); a != nil && a.status == "running" && m.selectedStatus() == "running" {
+				m.steering = true
+				m.steerRunID = m.selectedID()
+				m.steerAgentID = a.id
+				m.steerInput.Reset()
+				m.statusMsg = ""
+				return m, m.steerInput.Focus()
 			}
 		}
 		return m, nil
@@ -862,7 +931,13 @@ func (m runsModel) view(frame int) string {
 		if m.inspectFocus {
 			rightStyle = sPaneR
 		}
-		content := m.renderInspectHeader() + "\n\n" + m.ivp.View()
+		content := m.renderInspectHeader()
+		if m.steering {
+			content += "\n\n" + sTitle.Render(fmt.Sprintf("Steer agent %d", m.steerAgentID)) + "\n" + m.steerInput.View()
+		} else if m.statusMsg != "" {
+			content += "\n" + sDim.Render(m.statusMsg)
+		}
+		content += "\n\n" + m.ivp.View()
 		right := rightStyle.Width(m.detailWidth()).Height(max(0, m.height-2)).Render(content)
 		return lipgloss.JoinHorizontal(lipgloss.Top, m.viewAgentList(), right)
 	}
@@ -916,6 +991,9 @@ func (m runsModel) viewAgentList() string {
 		b.WriteString(row + "\n")
 
 		meta := a.status + " · " + agentJournalSummary(a)
+		if a.steerTS > 0 {
+			meta += " · steered"
+		}
 		if a.phase != "" {
 			meta += " · " + a.phase
 		}
@@ -1043,6 +1121,8 @@ type agentState struct {
 	nudgeMsg         string
 	nudgeStatus      string
 	nudgeTS          int64
+	steerPreview     string
+	steerTS          int64
 }
 
 type phaseState struct {
@@ -1131,6 +1211,9 @@ func (m *runsModel) renderDetailBody() string {
 					badge = sNudgeUnavailable
 				}
 				b.WriteString("      " + badge.Render(nudgeLabel(a)) + "\n")
+			}
+			if a.steerTS > 0 {
+				b.WriteString("      " + sJournalKind.Render("STEER  "+truncLine(a.steerPreview, max(8, w-20))) + "\n")
 			}
 		}
 		b.WriteString("\n")

@@ -502,6 +502,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		journalOpts := harness.JournalOptions{
 			Path: journalPath, IdleAfter: journalIdle, State: harness.NewJournalState(),
 		}
+		steeringOpts := harness.SteeringOptions{}
 		if journalPath != "" {
 			nudgeSent := make(map[string]bool)
 			journalOpts.OnEntry = func(entry runstore.AgentJournalEntry) {
@@ -543,6 +544,18 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 					Kind: nudge.Reason, Status: status, Msg: msg,
 				})
 			}
+			steeringOpts = harness.SteeringOptions{
+				RunID: e.opts.Run.Meta.ID, AgentID: id,
+				OnMessage: func(message runstore.SteeringMessage) {
+					_ = e.opts.Run.AppendAgentJournal(id, runstore.AgentJournalEntry{
+						Kind: "steer", Message: message.Message,
+					})
+					e.emit(runstore.Event{
+						T: "agent_steer", ID: id, Label: label, Profile: prof.Name, Phase: phase,
+						Status: "delivered", Msg: truncate(message.Message, 2000), Preview: truncate(message.Message, 240),
+					})
+				},
+			}
 		}
 		workerTask := prompt
 		if prof.DisableSubagents {
@@ -560,10 +573,10 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			err       error
 		)
 		if schemaJSON != "" {
-			resultAny, rawOut, nudged, err = e.runWithSchema(actx, prof, workerPrompt, schemaJSON, cwd, journalOpts)
+			resultAny, rawOut, nudged, err = e.runWithSchema(actx, prof, workerPrompt, schemaJSON, cwd, journalOpts, steeringOpts)
 		} else {
 			var r harness.Result
-			r, err = harness.RunWithJournal(actx, prof, workerPrompt, cwd, true, journalOpts)
+			r, err = harness.RunWithJournalAndSteering(actx, prof, workerPrompt, cwd, true, journalOpts, steeringOpts)
 			rawOut = r.Output
 			resultAny = r.Output
 			nudged = r.Nudged
@@ -622,7 +635,7 @@ func resolveAgentTimeout(timeout time.Duration, timeoutSet bool, prof profile.Pr
 
 // runWithSchema wraps the prompt with JSON-output instructions, extracts and
 // validates the JSON, retrying up to 2 times with the validation error.
-func (e *engine) runWithSchema(ctx context.Context, prof profile.Profile, prompt, schemaJSON, cwd string, journal harness.JournalOptions) (any, string, bool, error) {
+func (e *engine) runWithSchema(ctx context.Context, prof profile.Profile, prompt, schemaJSON, cwd string, journal harness.JournalOptions, steering harness.SteeringOptions) (any, string, bool, error) {
 	sch, err := jsonschema.CompileString("schema.json", schemaJSON)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("invalid schema: %w", err)
@@ -633,7 +646,7 @@ func (e *engine) runWithSchema(ctx context.Context, prof profile.Profile, prompt
 	var raw string
 	var nudged bool
 	for attempt := 0; attempt < 3; attempt++ {
-		r, err := harness.RunWithJournal(ctx, prof, ask, cwd, !nudged, journal)
+		r, err := harness.RunWithJournalAndSteering(ctx, prof, ask, cwd, !nudged, journal, steering)
 		nudged = nudged || r.Nudged
 		if err != nil {
 			return nil, r.Output, nudged, err

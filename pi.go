@@ -19,10 +19,12 @@ import (
 //go:embed assets/pi-extension/dyna.ts
 var piExtensionTS []byte
 
+const piOrchestrationPrompt = "Dyna is enabled for this Pi launch. Treat these instructions as standing session guidance. The launcher provides the Dyna extension directly, so do not search for or load a separate dyna skill.\n\n" + skillBody + "\n" + guidanceBody
+
 func piCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:                "pi [-- pi-args...]",
-		Short:              "Launch pi with dyna workflows wired in (skill, extension, session-scoped /dyna)",
+		Short:              "Launch pi with dyna workflows wired in (extension, instructions, session-scoped /dyna)",
 		DisableFlagParsing: true,
 		RunE:               runPi,
 	}
@@ -34,16 +36,6 @@ func runPi(c *cobra.Command, args []string) error {
 	piPath, err := exec.LookPath("pi")
 	if err != nil {
 		return fmt.Errorf("pi is not installed (npm install -g @earendil-works/pi-coding-agent)")
-	}
-
-	for _, target := range skillTargets() {
-		if target.name != "pi" {
-			continue
-		}
-		if err := installSkill(target); err != nil {
-			fmt.Fprintf(c.ErrOrStderr(), "warning: could not install the dyna skill for pi: %v\n", err)
-		}
-		break
 	}
 
 	extPath, err := provisionPiExtension()
@@ -58,7 +50,7 @@ func runPi(c *cobra.Command, args []string) error {
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
-	piArgs := append([]string{"--extension", extPath}, args...)
+	piArgs := append([]string{"--extension", extPath, "--append-system-prompt", piOrchestrationPrompt}, args...)
 	cmd := exec.Command(piPath, piArgs...)
 	cmd.Env = setEnv(os.Environ(), runstore.SessionEnv, session)
 	if exe, err := os.Executable(); err == nil {

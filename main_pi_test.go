@@ -44,7 +44,7 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	data := t.TempDir()
 	capture := t.TempDir()
 	piPath := filepath.Join(binDir, "pi")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE_ARGS\"\nprintf '%s\\n' \"$DYNA_SESSION\" > \"$CAPTURE_SESSION\"\nprintf '%s\\n' \"$DYNA_BIN\" > \"$CAPTURE_BIN\"\n"
+	script := "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$CAPTURE_ARGS\"\nprintf '%s\\n' \"$DYNA_SESSION\" > \"$CAPTURE_SESSION\"\nprintf '%s\\n' \"$DYNA_BIN\" > \"$CAPTURE_BIN\"\n"
 	if err := os.WriteFile(piPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -61,14 +61,14 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	cmd := newRootCommand()
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
-	cmd.SetArgs([]string{"pi", "--model", "test-model", "-c"})
+	cmd.SetArgs([]string{"pi", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "-c"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
 
-	args := readLines(t, filepath.Join(capture, "args"))
+	args := readNULArgs(t, filepath.Join(capture, "args"))
 	wantExtension := filepath.Join(data, "dyna", "pi-extension", "dyna.ts")
-	wantArgs := []string{"--extension", wantExtension, "--model", "test-model", "-c"}
+	wantArgs := []string{"--extension", wantExtension, "--append-system-prompt", piOrchestrationPrompt, "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "-c"}
 	if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("pi args = %#v, want %#v", args, wantArgs)
 	}
@@ -79,8 +79,8 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	if got := strings.TrimSpace(readFile(t, filepath.Join(capture, "bin"))); got == "" || got == "stale-binary" {
 		t.Fatalf("DYNA_BIN = %q", got)
 	}
-	if got := readFile(t, filepath.Join(home, ".pi", "agent", "skills", "dyna", "SKILL.md")); got != skillFrontmatter+skillBody {
-		t.Fatal("pi skill was not installed with the current bundled content")
+	if _, err := os.Stat(filepath.Join(home, ".pi", "agent", "skills", "dyna", "SKILL.md")); !os.IsNotExist(err) {
+		t.Fatalf("dyna pi installed a redundant skill: %v", err)
 	}
 }
 
@@ -130,6 +130,29 @@ func TestProvisionPiExtension(t *testing.T) {
 	}
 }
 
+func TestPiExtensionRegistersModelVisibleSteeringTool(t *testing.T) {
+	source := string(piExtensionTS)
+	for _, required := range []string{
+		`import { Type } from "@earendil-works/pi-ai"`,
+		`pi.registerTool({`,
+		`name: "dyna_steer"`,
+		`run_id: Type.String`,
+		`agent_id: Type.Integer`,
+		`message: Type.String`,
+		`maxLength: 2000`,
+		`candidate.id === params.run_id`,
+		`["runs", "steer", params.run_id, String(params.agent_id), params.message]`,
+		`never starts a replacement`,
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("pi steering tool contract is missing %q", required)
+		}
+	}
+	if strings.Contains(source, `execute(_toolCallId, params) { return pi.sendUserMessage`) {
+		t.Fatal("pi steering tool delegates to prose instead of invoking the command boundary")
+	}
+}
+
 func TestRunsListSessionFilter(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("DYNA_RUN_ID", "wf_session-one")
@@ -176,6 +199,11 @@ func readFile(t *testing.T, path string) string {
 func readLines(t *testing.T, path string) []string {
 	t.Helper()
 	return strings.Split(strings.TrimSuffix(readFile(t, path), "\n"), "\n")
+}
+
+func readNULArgs(t *testing.T, path string) []string {
+	t.Helper()
+	return strings.Split(strings.TrimSuffix(readFile(t, path), "\x00"), "\x00")
 }
 
 func writeExecutable(t *testing.T, path, contents string) {

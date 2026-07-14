@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -590,6 +591,8 @@ func printEvent(e runstore.Event) {
 		fmt.Fprintln(w, stDim.Render("  ◌ queued  ")+stName.Render(e.Label)+stDim.Render("  ["+e.Profile+"]  "+e.Preview))
 	case "agent_run":
 		fmt.Fprintln(w, stDim.Render("  ▶ running ")+stName.Render(e.Label)+stDim.Render("  ["+e.Profile+"]"))
+	case "agent_steer":
+		fmt.Fprintln(w, stPhase.Render("  ↪ steered ")+stName.Render(e.Label)+stDim.Render("  "+e.Preview))
 	case "agent_end":
 		d := time.Duration(e.DurMs) * time.Millisecond
 		switch {
@@ -703,6 +706,23 @@ func runsCmd() *cobra.Command {
 	}
 	wait.Flags().IntVar(&waitTimeout, "timeout", 0, "give up after N seconds (0 = wait forever)")
 
+	steer := &cobra.Command{
+		Use:   "steer <run-id> <agent-id> <message>",
+		Short: "Send a short instruction to an active resumable worker",
+		Args:  cobra.MinimumNArgs(3),
+		RunE: func(c *cobra.Command, a []string) error {
+			agentID, err := strconv.Atoi(a[1])
+			if err != nil {
+				return fmt.Errorf("agent id must be a positive integer")
+			}
+			if err := runstore.SubmitAgentSteering(a[0], agentID, strings.Join(a[2:], " ")); err != nil {
+				return err
+			}
+			fmt.Fprintf(c.OutOrStdout(), "queued steering for %s agent %d\n", a[0], agentID)
+			return nil
+		},
+	}
+
 	cancel := &cobra.Command{
 		Use:   "cancel <run-id>",
 		Short: "Stop a running workflow (in-flight workers are killed)",
@@ -778,7 +798,7 @@ func runsCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(list, show, wait, cancel, pause, unpause, remove, clear)
+	cmd.AddCommand(list, show, wait, steer, cancel, pause, unpause, remove, clear)
 	return cmd
 }
 

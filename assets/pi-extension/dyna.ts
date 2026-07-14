@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
@@ -388,6 +389,29 @@ class DynaRunsOverlay implements Component {
 
 export default function (pi: ExtensionAPI) {
 	if (!SESSION) return;
+
+	pi.registerTool({
+		name: "dyna_steer",
+		label: "Steer Dyna Worker",
+		description: "Send a short steering message to an active worker in a Dyna workflow launched by this pi session. Dyna continues the existing resumable worker session and never starts a replacement.",
+		promptSnippet: "Steer an active Dyna workflow worker in its existing session",
+		promptGuidelines: ["Use dyna_steer when the user asks to redirect or clarify work for a running Dyna worker; provide the run ID and numeric agent ID shown by Dyna."],
+		parameters: Type.Object({
+			run_id: Type.String({ description: "Dyna workflow run ID (wf_...)", minLength: 4 }),
+			agent_id: Type.Integer({ description: "Numeric ID of the running worker", minimum: 1 }),
+			message: Type.String({ description: "Short instruction to apply to the worker's current task", minLength: 1, maxLength: 2000 }),
+		}),
+		async execute(_toolCallId, params) {
+			const run = (await listRuns()).find((candidate) => candidate.id === params.run_id);
+			if (!run) throw new Error(`run ${params.run_id} does not belong to this pi session`);
+			if (run.status !== "running") throw new Error(`run ${params.run_id} is not running (status ${run.status})`);
+			const output = (await dyna(["runs", "steer", params.run_id, String(params.agent_id), params.message])).trim();
+			return {
+				content: [{ type: "text", text: output || `Queued steering for ${params.run_id} agent ${params.agent_id}.` }],
+				details: { runId: params.run_id, agentId: params.agent_id, queued: true },
+			};
+		},
+	});
 
 	pi.registerCommand("dyna", {
 		description: "Show live dyna workflow runs from this session",

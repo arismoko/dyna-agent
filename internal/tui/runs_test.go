@@ -47,6 +47,62 @@ func TestApplyEventsIncrementallyMatchesOneShot(t *testing.T) {
 	}
 }
 
+func TestInspectorSteeringInputQueuesSelectedRunningAgent(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("DYNA_RUN_ID", "wf_tui-steering")
+	t.Setenv(runstore.AgentJournalRootEnv, "")
+	run, err := runstore.Create("tui steering", "return null", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.Finish("ok", "null", nil)
+	if _, err := run.StartAgentJournal(4, "selected worker", "test", "", "task"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runstore.ActivateAgentSteering(run.Meta.ID, 4); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newRunsModel()
+	m.setSize(120, 30)
+	m.runs = []runstore.Meta{run.Meta}
+	m.catalogLoaded = true
+	m.resetLoaded(run.Meta.ID)
+	m.applyEvents([]runstore.Event{
+		{T: "agent_start", ID: 4, Label: "selected worker", Profile: "test"},
+		{T: "agent_run", ID: 4},
+	})
+	m.inspecting = true
+	m.loadInspect(true)
+
+	m, _ = m.update(runeKey('s'))
+	if !m.steering || m.steerRunID != run.Meta.ID || m.steerAgentID != 4 || !strings.Contains(m.view(0), "Steer agent 4") {
+		t.Fatalf("steering input did not open for selected agent: %#v", m)
+	}
+	m, _ = m.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("check cancellation first")})
+	m, cmd := m.update(key(tea.KeyEnter))
+	if cmd == nil || m.steering || m.statusMsg != "sending steering…" {
+		t.Fatalf("steering submit state = steering:%v status:%q cmd:%v", m.steering, m.statusMsg, cmd != nil)
+	}
+	resultMsg := cmd()
+	result, ok := resultMsg.(steerResultMsg)
+	if !ok {
+		t.Fatalf("submit command returned %T", resultMsg)
+	}
+	m.applySteerResult(result)
+	if result.err != nil || !strings.Contains(m.statusMsg, "queued") {
+		t.Fatalf("steering result = %#v status=%q", result, m.statusMsg)
+	}
+	messages, _, err := runstore.ReadAgentSteeringFrom(run.Meta.ID, 4, 0, false)
+	if err != nil || len(messages) != 1 || messages[0].Message != "check cancellation first" {
+		t.Fatalf("queued messages = %#v, %v", messages, err)
+	}
+	m.applyEvents([]runstore.Event{{T: "agent_steer", ID: 4, Status: "delivered", Preview: messages[0].Message, TS: time.Now().UnixMilli()}})
+	if m.selectedAgent().steerTS == 0 || m.selectedAgent().steerPreview != "check cancellation first" || !strings.Contains(m.renderDetailBody(), "STEER") {
+		t.Fatal("delivered steering update was not reflected in the run model")
+	}
+}
+
 func TestApplyRefreshRejectsStaleSelection(t *testing.T) {
 	m := testRunsModel()
 	m.runs = append(m.runs, runstore.Meta{ID: "wf_other", Name: "other", Status: "running", StartedAt: time.Now()})
