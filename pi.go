@@ -2,9 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
 	_ "embed"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,10 +28,12 @@ journal and obey any disableSubagents restriction.
 
 Call dyna_profiles first. It returns only enabled profiles; route by the 1-10
 stats (cost for breadth, intelligence for hard implementation, taste for review
-and synthesis) and respect maxConcurrent and maxCallsPerRun. Then pass the
-complete workflow as inline JavaScript to dyna_run; do not use shell commands or
-CLI documentation for normal discovery. Scripts support top-level await and return a
-JSON value. Their globals are args and enabled profiles. Optional
+and synthesis) and respect maxConcurrent and maxCallsPerRun. Then use write to
+create the complete workflow at a unique /tmp/dyna-workflow-*.js path and call
+dyna_run with workflow_path; do not put source in the dyna_run call or use shell
+commands or CLI documentation for normal discovery. dyna_run always starts in
+the background and promptly returns its run id. Scripts support top-level await
+and return a JSON value. Their globals are args and enabled profiles. Optional
 export const meta = { name: 'review' } names the run.
 
 agent(prompt, opts) supports profile, label, phase, schema, cwd, timeout seconds,
@@ -43,7 +43,7 @@ is an all-results barrier and converts rejected thunks to null. pipeline streams
 each item through stages independently; a throwing stage makes only that item
 null. Uncaught agent errors fail the workflow, so filter and account for nulls.
 
-Minimal inline fan-out:
+Write this source to the temporary workflow file before calling dyna_run:
 
 ` + "```js" + `
 const profile = profiles.find(p => p.default) ?? profiles[0];
@@ -61,11 +61,11 @@ properties: { ok: { type: 'boolean' } } }. Use explicit phase options inside
 concurrent callbacks; phase(title), log(message), and sleep(ms) are also global.
 
 Use dyna_runs to list, show, wait for, or cancel runs belonging to this Pi
-launch, and dyna_steer to redirect an active worker in its existing session.
-dyna_run with detach true returns a run id; resume reuses successful calls whose
-profile, exact prompt, and schema match. The CLI is an implementation-detail
-fallback. In the interactive TUI, type /dyna for runs from this Pi launch; dyna
-tui is the full cross-session dashboard and is never opened automatically.
+session, and dyna_steer to redirect an active worker in its existing session.
+resume reuses successful calls whose profile, exact prompt, and schema match.
+The CLI is an implementation-detail fallback. In the interactive TUI, type /dyna
+for runs from this Pi session, including runs after resuming the same Pi session;
+dyna tui is the full cross-session dashboard and is never opened automatically.
 
 Dyna gives every worker an append-only agents/<agent-id>/journal.jsonl progress
 side channel. Workers journal after orientation, meaningful findings or
@@ -102,11 +102,6 @@ func runPi(c *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("provision pi extension: %w", err)
 	}
-	session, err := newPiSessionID()
-	if err != nil {
-		return fmt.Errorf("create pi session id: %w", err)
-	}
-
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
@@ -115,7 +110,10 @@ func runPi(c *cobra.Command, args []string) error {
 	piArgs = append(piArgs, piDefaultArgs(args)...)
 	piArgs = append(piArgs, args...)
 	cmd := exec.Command(piPath, piArgs...)
-	cmd.Env = setEnv(os.Environ(), runstore.SessionEnv, session)
+	// Each Pi session has a persisted UUID. The extension reads that UUID from
+	// SessionManager and passes it only to child Dyna runs, so resumed sessions
+	// retain their run ownership across separate `dyna pi` processes.
+	cmd.Env = unsetEnv(os.Environ(), runstore.SessionEnv)
 	if piHasExplicitToolControl(args) {
 		cmd.Env = unsetEnv(cmd.Env, piActivateAllToolsEnv)
 	} else {
@@ -219,14 +217,6 @@ func piThinkingSuffix(model string) bool {
 	default:
 		return false
 	}
-}
-
-func newPiSessionID() (string, error) {
-	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "pisess_" + hex.EncodeToString(b), nil
 }
 
 func provisionPiExtension() (string, error) {

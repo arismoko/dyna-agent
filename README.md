@@ -361,11 +361,13 @@ as or replaces that result.
   its frontmatter because the launcher supplies the Dyna contract directly.
 
   The extension registers model-visible `dyna_profiles`, `dyna_run`,
-  `dyna_runs`, and `dyna_steer` tools. They list enabled profiles, run bounded
-  inline workflows through a private temporary script, manage only runs owned
-  by that Pi launch, and steer active workers without shell command assembly.
-  Type `/dyna` for the launch-scoped interactive overlay; `dyna tui` remains
-  the full cross-session dashboard.
+  `dyna_runs`, and `dyna_steer` tools. The orchestrator writes each bounded
+  workflow to a unique `/tmp/dyna-workflow-*.js` file and passes that path to
+  `dyna_run`, which always starts it detached and promptly returns its run ID.
+  The tools manage only runs owned by the persisted Pi session and steer active
+  workers without shell command assembly. Type `/dyna` for that session's
+  interactive overlay, including after resuming the same Pi session; `dyna tui`
+  remains the full cross-session dashboard.
 
   Pi 0.80.7 already reports `openai-codex/gpt-5.6-terra` with its correct 372K
   context window, so Dyna leaves that model metadata untouched. Pi's public

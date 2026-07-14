@@ -106,7 +106,8 @@ func TestPiOrchestrationPromptIsCompactAndSelfContained(t *testing.T) {
 		"Use Dyna workflows by default for code changes",
 		"Work directly only when",
 		"Call dyna_profiles first",
-		"inline JavaScript to dyna_run",
+		"/tmp/dyna-workflow-*.js path and call",
+		"dyna_run with workflow_path",
 		"profiles.find(p => p.default) ?? profiles[0]",
 		"profile: profile.name",
 		"pipeline(items",
@@ -122,7 +123,7 @@ func TestPiOrchestrationPromptIsCompactAndSelfContained(t *testing.T) {
 			t.Errorf("Pi orchestration prompt is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"dyna guide", "profile: 'reviewer'", "dyna run workflow.js", "dyna profiles list --json", "Use Dyna only when the user explicitly requests"} {
+	for _, forbidden := range []string{"dyna guide", "profile: 'reviewer'", "dyna run workflow.js", "dyna profiles list --json", "Use Dyna only when the user explicitly requests", "inline JavaScript to dyna_run", "dyna_run with detach true"} {
 		if strings.Contains(piOrchestrationPrompt, forbidden) {
 			t.Errorf("Pi orchestration prompt contains forbidden fallback %q", forbidden)
 		}

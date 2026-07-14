@@ -68,7 +68,7 @@ func TestBundledProfilesPolicy(t *testing.T) {
 		t.Fatalf("bundled profile count = %d, want 5", len(bundle.Profiles))
 	}
 
-	disable := map[string]bool{"luna": true, "terra": true, "sol-max": true}
+	disable := map[string]bool{"luna": true, "sol": true, "terra": true}
 	efforts := map[string]string{"luna": "high", "terra": "high", "sol": "high", "sol-max": "xhigh"}
 	seen := make(map[string]bool)
 	var raw struct {

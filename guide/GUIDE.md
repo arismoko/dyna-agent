@@ -475,13 +475,14 @@ controls override that default. A separately installed Dyna Pi skill uses
 `/skill:dyna` use in plain Pi without duplicating the launch prompt in model
 discovery.
 
-The model calls `dyna_profiles` to route work, passes complete inline JavaScript
-to `dyna_run`, and uses `dyna_runs` or `dyna_steer` for launch-scoped run
-management. The extension invokes the exact Dyna binary without a shell,
-privately stages bounded workflow input, cleans its temporary directory, and
-rejects show/wait/cancel/resume/steer requests for runs outside the launch's
-session. Type `/dyna` for the launch-scoped overlay; `dyna tui` is the full
-cross-session dashboard.
+The model calls `dyna_profiles` to route work, uses `write` to create complete
+workflow JavaScript at a unique `/tmp/dyna-workflow-*.js` path, then passes that
+path to `dyna_run`. Every `dyna_run` invocation is detached and promptly returns
+its run ID, so `dyna_runs` and `dyna_steer` remain available while it runs. The
+extension invokes the exact Dyna binary without a shell, privately consumes
+bounded workflow input, and rejects show/wait/cancel/resume/steer requests for
+runs outside the persisted Pi session. Type `/dyna` for that session's overlay,
+including after resuming it; `dyna tui` is the full cross-session dashboard.
 
 Pi's bundled `openai-codex/gpt-5.6-terra` metadata already reports the correct
 372K context window. Pi 0.80.7 exposes context usage and manual compaction to

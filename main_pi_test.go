@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -78,9 +77,8 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("pi args = %#v, want %#v", args, wantArgs)
 	}
-	session := strings.TrimSpace(readFile(t, filepath.Join(capture, "session")))
-	if !regexp.MustCompile(`^pisess_[0-9a-f]{16}$`).MatchString(session) {
-		t.Fatalf("DYNA_SESSION = %q", session)
+	if session := strings.TrimSpace(readFile(t, filepath.Join(capture, "session"))); session != "" {
+		t.Fatalf("dyna pi leaked process-scoped DYNA_SESSION = %q", session)
 	}
 	if got := strings.TrimSpace(readFile(t, filepath.Join(capture, "bin"))); got == "" || got == "stale-binary" {
 		t.Fatalf("DYNA_BIN = %q", got)
@@ -303,7 +301,7 @@ func TestPiExtensionRegistersModelVisibleSteeringTool(t *testing.T) {
 		`agent_id: Type.Integer`,
 		`message: Type.String`,
 		`maxLength: 2000`,
-		`const run = await requireSessionRun(params.run_id, signal)`,
+		`const run = await requireSessionRun(params.run_id, session, signal, launchedRunIDs.has(params.run_id))`,
 		`["runs", "steer", params.run_id, String(params.agent_id), params.message]`,
 		`never starts a replacement`,
 	} {
@@ -326,22 +324,23 @@ func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 		`name: "dyna_profiles"`,
 		`name: "dyna_run"`,
 		`name: "dyna_runs"`,
-		`workflow: Type.String`,
+		`workflow_path: Type.String`,
 		`args: Type.Optional(Type.Unknown`,
 		`max_concurrent: Type.Optional(Type.Integer`,
 		`call_cap: Type.Optional(Type.Integer`,
-		`await mkdtemp(join(tmpdir(), "dyna-pi-"))`,
-		`await writeFile(scriptPath, params.workflow, { mode: 0o600, flag: "wx" })`,
+		`async function consumeWorkflow(workflowPath: string)`,
+		`await rename(sourcePath, scriptPath)`,
+		`const cliArgs = ["run", scriptPath, "--json", "--detach"]`,
 		`await rm(tempDir, { recursive: true, force: true })`,
 		`execFile(DYNA, args`,
-		`await requireSessionRun(params.resume, signal)`,
-		`await requireSessionRun(params.run_id, signal)`,
+		`ctx.sessionManager.getSessionId()`,
+		`const session = sessionID(ctx)`,
+		`sessionEnv(session)`,
+		`await requireSessionRun(params.resume, session, signal)`,
+		`await requireSessionRun(params.run_id, session, signal, launchedRunIDs.has(params.run_id))`,
 		`DETACHED_REGISTRATION_GRACE_MS = 15 * 1000`,
-		`await waitForSessionRunRegistration(detachedRunID, signal)`,
 		`Type.Literal("cancel")`,
 		`redactSecrets`,
-		`function requireSession(): string`,
-		`const session = requireSession()`,
 		`["runs", "list", "--json", "--session", session]`,
 		`checkedString(params.message, "message", 2000)`,
 	} {
@@ -349,7 +348,7 @@ func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 			t.Errorf("Pi native workflow tool contract is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{`name: "dyna_guide"`, `exec(`, `shell: true`} {
+	for _, forbidden := range []string{`name: "dyna_guide"`, `exec(`, `shell: true`, `workflow: Type.String`, `detach: Type.Optional`, `if (!SESSION) return`, `await waitForSessionRunRegistration(runID, signal)`} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("Pi native workflow tools contain forbidden implementation %q", forbidden)
 		}
@@ -407,14 +406,14 @@ func TestPiDynaTerminalDeliveryStaticContract(t *testing.T) {
 	for _, required := range []string{
 		`const launchedRunIDs = new Set<string>();`,
 		`const pendingRunUpdates = new Map<string, TerminalRunUpdate>();`,
-		`function watchLaunchedRun(id: string, ctx: ExtensionContext): void`,
+		`function watchLaunchedRun(id: string, session: string, ctx: ExtensionContext): void`,
 		`run.status === "ok" || run.status === "error" || run.status === "canceled"`,
 		`customType: "dyna_run_terminal"`,
 		`display: false`,
 		`{ triggerTurn: false }`,
 		`ctx.ui.notify(completionMessage(run), completionNotificationType(run));`,
 		`pi.on("agent_settled"`,
-		`if (ctx) watchLaunchedRun(detachedRunID, ctx);`,
+		`watchLaunchedRun(runID, session, ctx);`,
 		`runCompletionAbort.abort()`,
 	} {
 		if !strings.Contains(source, required) {
@@ -437,9 +436,11 @@ func TestInstalledPiDeliversDetachedTerminalUpdates(t *testing.T) {
 	fakeDyna := filepath.Join(fixtureDir, "dyna")
 	runCount := filepath.Join(fixtureDir, "run-count")
 	statusFile := filepath.Join(fixtureDir, "status")
+	launchSession := filepath.Join(fixtureDir, "launch-session")
 	writeExecutable(t, fakeDyna, `#!/bin/sh
 case "$1:$2" in
 	run:*)
+		printf '%s\n' "$DYNA_SESSION" > "$PI_LAUNCH_SESSION"
 		count=0
 		if [ -f "$PI_RUN_COUNT" ]; then count=$(cat "$PI_RUN_COUNT"); fi
 		count=$((count + 1))
@@ -491,13 +492,16 @@ export default function (pi: any) {
 		try {
 			const context = {
 				isIdle: () => true,
+				sessionManager: { getSessionId: () => "fixture-session" },
 				ui: { notify: (message: string, type: string) => notifications.push({ message, type }) },
 			};
 			const signal = new AbortController().signal;
 			const run = tools.get("dyna_run");
 			for (const status of ["ok", "error", "canceled"]) {
+				const workflowPath = "/tmp/dyna-workflow-fixture-" + status + ".js";
+				await writeFile(workflowPath, "return 1");
 				await writeFile(process.env.PI_STATUS_FILE!, "running");
-				await run.execute("run-" + status, { workflow: "return 1", detach: true }, signal, undefined, context);
+				await run.execute("run-" + status, { workflow_path: workflowPath }, signal, undefined, context);
 				await writeFile(process.env.PI_STATUS_FILE!, status);
 				await waitForUpdates(messages.length + 1);
 			}
@@ -531,6 +535,7 @@ export default function (pi: any) {
 		"DYNA_PI_CODEX_AUTH":     "0",
 		"PI_RUN_COUNT":           runCount,
 		"PI_STATUS_FILE":         statusFile,
+		"PI_LAUNCH_SESSION":      launchSession,
 		"PI_UPDATE_PROBE_MARKER": marker,
 		"DYNA_NO_AUTO_UPDATE":    "1",
 		"OPENAI_API_KEY":         "",
@@ -566,6 +571,9 @@ export default function (pi: any) {
 	}
 	if !probe.OK || len(probe.Messages) != 3 || len(probe.Notifications) != 3 {
 		t.Fatalf("terminal-update probe = %#v", probe)
+	}
+	if got := strings.TrimSpace(readFile(t, launchSession)); got != "fixture-session" {
+		t.Fatalf("detached Dyna run session = %q, want persisted Pi session", got)
 	}
 	for i, want := range []struct {
 		status, notification string
@@ -666,7 +674,7 @@ export default function (pi: any) {
 		}
 	}
 	runProperties, _ := byName["dyna_run"]["properties"].(map[string]any)
-	for _, field := range []string{"workflow", "cwd", "args", "name", "detach", "resume", "max_concurrent", "call_cap"} {
+	for _, field := range []string{"workflow_path", "cwd", "args", "name", "resume", "max_concurrent", "call_cap"} {
 		if runProperties[field] == nil {
 			t.Errorf("installed dyna_run schema is missing %s", field)
 		}
@@ -694,8 +702,8 @@ export default function (pi: any) {
 	if err := json.Unmarshal([]byte(readFile(t, missingSessionMarker)), &withoutSession); err != nil {
 		t.Fatal(err)
 	}
-	if len(withoutSession) != 0 {
-		t.Fatalf("Pi exposed session-scoped Dyna tools without DYNA_SESSION: %#v", withoutSession)
+	if len(withoutSession) != 4 {
+		t.Fatalf("Pi tools must derive ownership from SessionManager, not DYNA_SESSION: %#v", withoutSession)
 	}
 }
 
@@ -834,7 +842,7 @@ case "$1:$2" in
 		fi
 		;;
 	runs:list)
-		if [ "$3" != "--json" ] || [ "$4" != "--session" ] || [ "$5" != "fixture-session" ]; then
+		if [ "$3" != "--json" ] || [ "$4" != "--session" ] || [ -z "$5" ]; then
 			printf '%s\n' 'missing exact session filter' >&2
 			exit 97
 		fi
@@ -842,13 +850,7 @@ case "$1:$2" in
 		if [ -f "$PI_LIST_COUNT" ]; then count=$(cat "$PI_LIST_COUNT"); fi
 		count=$((count + 1))
 		printf '%s\n' "$count" > "$PI_LIST_COUNT"
-		if [ "$count" -eq 1 ]; then
-			printf '%s\n' '[{"id":"wf_fixture_detached","name":"foreign","status":"running","session":"other-session","startedAt":"2026-07-14T00:00:00Z"}]'
-		elif [ "$count" -eq 2 ]; then
-			printf '%s\n' '[]'
-		else
-			printf '%s\n' '[{"id":"wf_fixture_detached","name":"owned","status":"running","session":"fixture-session","startedAt":"2026-07-14T00:00:00Z"}]'
-		fi
+		printf '[{"id":"wf_fixture_detached","name":"owned","status":"running","session":"%s","startedAt":"2026-07-14T00:00:00Z"}]\n' "$5"
 		;;
 	runs:show)
 		printf '{"output":"%s"}\n' "$PI_RUNTIME_SECRET"
@@ -880,20 +882,23 @@ dynaExtension({
 } as any);
 
 export default function (pi: any) {
-	pi.on("input", async () => {
+	pi.on("input", async (_event: any, ctx: any) => {
 		try {
 			const signal = new AbortController().signal;
-			const run = await tools.get("dyna_run").execute("run-call", { workflow: "return 1", detach: true }, signal);
-			const registrationListCount = Number((await readFile(process.env.PI_LIST_COUNT, "utf8")).trim());
-			const show = await tools.get("dyna_runs").execute("show-call", { action: "show", run_id: "wf_fixture_detached" }, signal);
-			const steer = await tools.get("dyna_steer").execute("steer-call", { run_id: "wf_fixture_detached", agent_id: 1, message: "continue" }, signal);
+			const firstPath = "/tmp/dyna-workflow-runtime-first.js";
+			await writeFile(firstPath, "return 1");
+			const run = await tools.get("dyna_run").execute("run-call", { workflow_path: firstPath }, signal, undefined, ctx);
+			const show = await tools.get("dyna_runs").execute("show-call", { action: "show", run_id: "wf_fixture_detached" }, signal, undefined, ctx);
+			const steer = await tools.get("dyna_steer").execute("steer-call", { run_id: "wf_fixture_detached", agent_id: 1, message: "continue" }, signal, undefined, ctx);
 			let malformedError = "";
 			try {
-				await tools.get("dyna_run").execute("bad-run-call", { workflow: "return 2", detach: true }, signal);
+				const secondPath = "/tmp/dyna-workflow-runtime-second.js";
+				await writeFile(secondPath, "return 2");
+				await tools.get("dyna_run").execute("bad-run-call", { workflow_path: secondPath }, signal, undefined, ctx);
 			} catch (error) {
 				malformedError = error instanceof Error ? error.message : String(error);
 			}
-			await writeFile(process.env.PI_TOOL_PROBE_MARKER, JSON.stringify({ ok: true, registrationListCount, run, show, steer, malformedError }));
+			await writeFile(process.env.PI_TOOL_PROBE_MARKER, JSON.stringify({ ok: true, run, show, steer, malformedError }));
 		} catch (error) {
 			await writeFile(process.env.PI_TOOL_PROBE_MARKER, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
 		}
@@ -952,9 +957,6 @@ export default function (pi: any) {
 	}
 	if probe["ok"] != true {
 		t.Fatalf("native tool runtime probe failed: %s", raw)
-	}
-	if probe["registrationListCount"] != float64(3) {
-		t.Fatalf("detached registration list calls = %v, want 3", probe["registrationListCount"])
 	}
 	if !strings.Contains(raw, "[REDACTED]") {
 		t.Fatalf("native tool runtime did not redact successful output: %s", raw)
