@@ -726,10 +726,21 @@ func gitRun(ctx context.Context, dir string, args ...string) ([]byte, error) {
 // and markdown fences around it.
 func extractJSON(s string) (any, error) {
 	s = strings.TrimSpace(s)
-	// Prefer fenced blocks if present.
+	// A response that is already a JSON value wins: markdown fences inside its
+	// strings (e.g. code examples in a report field) must not be re-extracted.
+	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
+		if v, err := decodeJSONFrom(s); err == nil {
+			return v, nil
+		}
+	}
+	// Otherwise prefer fenced blocks over prose.
 	if m := fenceRe.FindStringSubmatch(s); m != nil {
 		s = strings.TrimSpace(m[1])
 	}
+	return decodeJSONFrom(s)
+}
+
+func decodeJSONFrom(s string) (any, error) {
 	start := strings.IndexAny(s, "{[")
 	if start < 0 {
 		return nil, fmt.Errorf("no JSON object/array found in output")
