@@ -355,206 +355,55 @@ func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 	}
 }
 
-func TestPiDynaDashboardHandoffStaticContract(t *testing.T) {
+func TestPiDynaObserverStaticContract(t *testing.T) {
 	source := string(piExtensionTS)
 	for _, required := range []string{
-		`import { execFile, spawn } from "node:child_process"`,
-		`description: "Open the Dyna dashboard for this Pi session"`,
+		`type ObserverFocus = "runs" | "agents" | "journal"`,
+		`private selectedRunID = ""`,
+		`private selectedAgentID: number | undefined`,
+		`private journalFollow = true`,
+		`private journalUnseen = 0`,
+		`private refreshQueued = false`,
+		`private selectionGeneration = 0`,
+		`private abortController: AbortController | undefined`,
+		`function safeText(value: unknown, fallback = "")`,
+		`async function readAgentJournal(id: string, agentID: number, offset: number)`,
+		`const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1)`,
+		`if (lastNewline < 0) return { entries: [], next: offset, reset, missing: false }`,
+		`const reset = offset < 0 || offset > stat.size`,
+		`eventGeneration !== this.selectionGeneration`,
+		`journalGeneration !== this.selectionGeneration`,
+		`this.journalUnseen += batch.entries.length`,
+		`this.keys.matches(data, "tui.select.up")`,
+		`this.keys.matches(data, "tui.select.pageDown")`,
+		`this.keys.matches(data, "tui.select.cancel")`,
+		`this.tui.terminal.rows * 0.9`,
+		`safeWidth >= 72`,
+		`wrapTextWithAnsi(entry.message`,
+		`visibleWidth(clipped)`,
+		`map((line) => truncateToWidth(line, safeWidth, ""))`,
+		`this.abortController?.abort()`,
 		`const session = sessionID(ctx);`,
-		`await ctx.ui.custom<void>`,
-		`tui.stop();`,
-		`process.stdout.write("\x1b[2J\x1b[H");`,
-		`const child = spawn(DYNA, ["tui", "--session", session], {`,
-		`stdio: "inherit"`,
-		`env: process.env`,
-		`child.once("error", (error) => finish(error.message));`,
-		`child.once("close", (code, signal) => {`,
-		`tui.start();`,
-		`tui.requestRender(true);`,
-		`done(undefined);`,
-		`dashboardActive = true;`,
-		`dashboardActive = false;`,
-		`flushTerminalRunUpdates(ctx);`,
-		`Unable to run Dyna dashboard`,
+		`new DynaRunsOverlay(tui, theme, keys, session`,
+		`width: "92%", maxHeight: "90%"`,
 	} {
 		if !strings.Contains(source, required) {
-			t.Errorf("Pi Dyna dashboard handoff contract is missing %q", required)
+			t.Errorf("Pi Dyna observer contract is missing %q", required)
 		}
 	}
 	for _, forbidden := range []string{
-		`class DynaRunsOverlay`,
-		`type ObserverFocus`,
-		`readAgentJournal`,
-		`width: "92%"`,
-		`@earendil-works/pi-tui`,
-		`spawnSync`,
+		`function journalTail(`,
+		`this.journal.slice(-5)`,
+		`_keys, done`,
+		`width: "80%", maxHeight: "80%"`,
+		`tui.stop();`,
+		`spawn(DYNA, ["tui"`,
+		`dashboardActive`,
 	} {
 		if strings.Contains(source, forbidden) {
-			t.Errorf("Pi Dyna dashboard handoff retains obsolete observer behavior %q", forbidden)
+			t.Errorf("Pi Dyna observer retains obsolete behavior %q", forbidden)
 		}
 	}
-}
-
-func TestInstalledPiDynaDashboardHandoffLifecycle(t *testing.T) {
-	piPath, err := exec.LookPath("pi")
-	if err != nil {
-		t.Skip("pi is not installed")
-	}
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	extensionPath, err := provisionPiExtension()
-	if err != nil {
-		t.Fatal(err)
-	}
-	extensionJSON, err := json.Marshal(extensionPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	runProbe := func(t *testing.T, dynaBin string) (map[string]any, []byte, []byte) {
-		t.Helper()
-		marker := filepath.Join(t.TempDir(), "handoff.json")
-		probePath := filepath.Join(t.TempDir(), "probe.ts")
-		probeSource := `import { writeFile } from "node:fs/promises";
-import dynaExtension from ` + string(extensionJSON) + `;
-
-let command: any;
-dynaExtension({
-	on: () => {},
-	registerTool: () => {},
-	registerCommand: (_name: string, spec: any) => { command = spec; },
-} as any);
-
-export default function (pi: any) {
-	pi.on("input", async () => {
-		const events: string[] = [];
-		const notifications: Array<{ message: string; type: string }> = [];
-		const tui = {
-			stop: () => events.push("stop"),
-			start: () => events.push("start"),
-			requestRender: (full: boolean) => events.push("render:" + full),
-		};
-		const context = {
-			mode: "tui",
-			sessionManager: { getSessionId: () => "fixture-persisted-session" },
-			ui: {
-				notify: (message: string, type: string) => notifications.push({ message, type }),
-				custom: async (factory: any) => await new Promise((resolve, reject) => {
-					try {
-						factory(tui, {}, {}, (result: unknown) => {
-							events.push("done");
-							resolve(result);
-						});
-					} catch (error) {
-						reject(error);
-					}
-				}),
-			},
-		};
-		try {
-			await command.handler("", context);
-			await writeFile(process.env.PI_HANDOFF_MARKER!, JSON.stringify({ ok: true, events, notifications }));
-		} catch (error) {
-			await writeFile(process.env.PI_HANDOFF_MARKER!, JSON.stringify({ ok: false, events, notifications, error: error instanceof Error ? error.message : String(error) }));
-		}
-		return { action: "handled" };
-	});
-}
-`
-		if err := os.WriteFile(probePath, []byte(probeSource), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, piPath,
-			"--offline", "--no-extensions",
-			"--extension", probePath,
-			"--provider", "openai-codex",
-			"--model", "gpt-5.6-terra",
-			"--api-key", "fixture-only",
-			"-p", "exercise dashboard handoff",
-		)
-		cmd.Env = os.Environ()
-		for key, value := range map[string]string{
-			"PI_OFFLINE":          "1",
-			"DYNA_BIN":            dynaBin,
-			"DYNA_PI_CODEX_AUTH":  "0",
-			"PI_HANDOFF_MARKER":   marker,
-			"PI_HANDOFF_SENTINEL": "inherited-environment",
-			"OPENAI_API_KEY":      "",
-			"DYNA_NO_AUTO_UPDATE": "1",
-		} {
-			cmd.Env = setEnv(cmd.Env, key, value)
-		}
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		if ctx.Err() != nil {
-			t.Fatalf("offline Pi dashboard handoff timed out: %v", ctx.Err())
-		}
-		if err != nil {
-			t.Fatalf("offline Pi dashboard handoff: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.Bytes(), stderr.Bytes())
-		}
-		var probe map[string]any
-		if err := json.Unmarshal([]byte(readFile(t, marker)), &probe); err != nil {
-			t.Fatal(err)
-		}
-		return probe, stdout.Bytes(), stderr.Bytes()
-	}
-
-	t.Run("success", func(t *testing.T) {
-		fixtureDir := t.TempDir()
-		argsPath := filepath.Join(fixtureDir, "args")
-		envPath := filepath.Join(fixtureDir, "env")
-		fakeDyna := filepath.Join(fixtureDir, "exact-dyna")
-		writeExecutable(t, fakeDyna, `#!/bin/sh
-printf '%s\0' "$@" > "$PI_HANDOFF_ARGS"
-printf '%s\n' "$PI_HANDOFF_SENTINEL" > "$PI_HANDOFF_ENV"
-printf '%s\n' 'handoff-stdout'
-printf '%s\n' 'handoff-stderr' >&2
-`)
-		t.Setenv("PI_HANDOFF_ARGS", argsPath)
-		t.Setenv("PI_HANDOFF_ENV", envPath)
-
-		probe, stdout, stderr := runProbe(t, fakeDyna)
-		if probe["ok"] != true {
-			t.Fatalf("successful handoff probe = %#v", probe)
-		}
-		if got := strings.Join(anyStrings(t, probe["events"]), ","); got != "stop,start,render:true,done" {
-			t.Fatalf("successful handoff lifecycle = %q", got)
-		}
-		if notifications := probe["notifications"].([]any); len(notifications) != 0 {
-			t.Fatalf("successful handoff notifications = %#v", notifications)
-		}
-		if got := readNULArgs(t, argsPath); !slices.Equal(got, []string{"tui", "--session", "fixture-persisted-session"}) {
-			t.Fatalf("dashboard argv = %#v, want session-scoped TUI args", got)
-		}
-		if got := strings.TrimSpace(readFile(t, envPath)); got != "inherited-environment" {
-			t.Fatalf("dashboard environment = %q", got)
-		}
-		if !bytes.Contains(stdout, []byte("handoff-stdout")) || !bytes.Contains(stderr, []byte("handoff-stderr")) {
-			t.Fatalf("dashboard did not inherit streams: stdout=%q stderr=%q", stdout, stderr)
-		}
-	})
-
-	t.Run("spawn failure", func(t *testing.T) {
-		probe, _, _ := runProbe(t, filepath.Join(t.TempDir(), "missing-dyna"))
-		if probe["ok"] != true {
-			t.Fatalf("failed-spawn handoff probe = %#v", probe)
-		}
-		if got := strings.Join(anyStrings(t, probe["events"]), ","); got != "stop,start,render:true,done" {
-			t.Fatalf("failed-spawn handoff lifecycle = %q", got)
-		}
-		notifications := probe["notifications"].([]any)
-		if len(notifications) != 1 {
-			t.Fatalf("failed-spawn handoff notifications = %#v", notifications)
-		}
-		notification := notifications[0].(map[string]any)
-		if notification["type"] != "error" || !strings.Contains(notification["message"].(string), "Unable to run Dyna dashboard") {
-			t.Fatalf("failed-spawn handoff notification = %#v", notification)
-		}
-	})
 }
 
 func TestPiDynaTerminalDeliveryStaticContract(t *testing.T) {
@@ -562,13 +411,12 @@ func TestPiDynaTerminalDeliveryStaticContract(t *testing.T) {
 	for _, required := range []string{
 		`const launchedRunIDs = new Set<string>();`,
 		`const pendingRunUpdates = new Map<string, TerminalRunUpdate>();`,
-		`let dashboardActive = false;`,
-		`if (dashboardActive || pendingRunUpdates.size === 0 || !ctx.isIdle()) return;`,
+		`if (pendingRunUpdates.size === 0 || !ctx.isIdle()) return;`,
 		`function watchLaunchedRun(id: string, session: string, ctx: ExtensionContext): void`,
 		`run.status === "ok" || run.status === "error" || run.status === "canceled"`,
 		`customType: "dyna_run_terminal"`,
 		`display: false`,
-		`{ triggerTurn: false }`,
+		`{ triggerTurn: true, deliverAs: "followUp" }`,
 		`ctx.ui.notify(completionMessage(run), completionNotificationType(run));`,
 		`pi.on("agent_settled"`,
 		`watchLaunchedRun(runID, session, ctx);`,
@@ -595,8 +443,6 @@ func TestInstalledPiDeliversDetachedTerminalUpdates(t *testing.T) {
 	runCount := filepath.Join(fixtureDir, "run-count")
 	statusFile := filepath.Join(fixtureDir, "status")
 	launchSession := filepath.Join(fixtureDir, "launch-session")
-	dashboardStarted := filepath.Join(fixtureDir, "dashboard-started")
-	dashboardRelease := filepath.Join(fixtureDir, "dashboard-release")
 	writeExecutable(t, fakeDyna, `#!/bin/sh
 case "$1:$2" in
 	run:*)
@@ -612,10 +458,6 @@ case "$1:$2" in
 		status=$(cat "$PI_STATUS_FILE")
 		printf '[{"id":"wf_fixture_%s","name":"fixture","status":"%s","session":"fixture-session","startedAt":"2026-07-14T00:00:00Z"}]\n' "$count" "$status"
 		;;
-	tui:*)
-		: > "$PI_DASHBOARD_STARTED"
-		while [ ! -f "$PI_DASHBOARD_RELEASE" ]; do /bin/sleep 0.02; done
-		;;
 	*)
 		printf 'unexpected fixture invocation: %s\n' "$*" >&2
 		exit 98
@@ -629,32 +471,22 @@ esac
 		t.Fatal(err)
 	}
 	probePath := filepath.Join(fixtureDir, "probe.ts")
-	probeSource := `import { access, writeFile } from "node:fs/promises";
+	probeSource := `import { writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import dynaExtension from ` + string(extensionJSON) + `;
 
 const tools = new Map<string, any>();
+const handlers = new Map<string, any>();
 const messages: any[] = [];
 const notifications: any[] = [];
 let command: any;
+let dashboardOpen = false;
 dynaExtension({
-	on: () => {},
+	on: (name: string, handler: any) => handlers.set(name, handler),
 	registerTool: (tool: any) => tools.set(tool.name, tool),
 	registerCommand: (_name: string, spec: any) => { command = spec; },
-	sendMessage: (message: any, options: any) => messages.push({ message, options }),
+	sendMessage: (message: any, options: any) => messages.push({ message, options, duringDashboard: dashboardOpen }),
 } as any);
-
-async function waitForFile(path: string): Promise<void> {
-	for (let attempt = 0; attempt < 250; attempt++) {
-		try {
-			await access(path);
-			return;
-		} catch {
-			await sleep(20);
-		}
-	}
-	throw new Error("timed out waiting for " + path);
-}
 
 async function waitForUpdates(count: number): Promise<void> {
 	for (let attempt = 0; attempt < 150; attempt++) {
@@ -666,57 +498,77 @@ async function waitForUpdates(count: number): Promise<void> {
 
 export default function (pi: any) {
 	pi.on("input", async () => {
-		const dashboardEvents: string[] = [];
+		let idle = false;
+		let overlay: any;
+		let rendererStops = 0;
+		let dashboardRendered = false;
+		let whileStreaming: { messages: number; notifications: number } | undefined;
+		let afterSettledWhileStreaming: { messages: number; notifications: number } | undefined;
 		let whileDashboard: { messages: number; notifications: number } | undefined;
 		try {
 			const tui = {
-				stop: () => dashboardEvents.push("stop"),
-				start: () => dashboardEvents.push("start"),
-				requestRender: (full: boolean) => dashboardEvents.push("render:" + full),
+				terminal: { rows: 40 },
+				requestRender: () => {},
+				stop: () => { rendererStops++; },
 			};
+			const theme = {
+				fg: (_color: string, text: string) => text,
+				bold: (text: string) => text,
+			};
+			const keys = { matches: () => false };
 			const context = {
 				mode: "tui",
-				isIdle: () => true,
+				isIdle: () => idle,
 				sessionManager: { getSessionId: () => "fixture-session" },
 				ui: {
 					notify: (message: string, type: string) => notifications.push({ message, type }),
-					custom: async (factory: any) => await new Promise((resolve, reject) => {
-						try {
-							factory(tui, {}, {}, (result: unknown) => {
-								dashboardEvents.push("done");
-								resolve(result);
-							});
-						} catch (error) {
-							reject(error);
-						}
+					custom: async (factory: any, options: any) => await new Promise((resolve) => {
+						overlay = factory(tui, theme, keys, (result: unknown) => {
+							dashboardOpen = false;
+							resolve(result);
+						});
+						dashboardOpen = true;
+						dashboardRendered = options?.overlay === true && Array.isArray(overlay.render(100));
 					}),
 				},
 			};
 			const signal = new AbortController().signal;
 			const run = tools.get("dyna_run");
+			const settled = handlers.get("agent_settled");
 			for (const status of ["ok", "error", "canceled"]) {
 				const expectedUpdates = messages.length + 1;
 				const workflowPath = "/tmp/dyna-workflow-fixture-" + status + ".js";
 				await writeFile(workflowPath, "return 1");
 				await writeFile(process.env.PI_STATUS_FILE!, "running");
 				await run.execute("run-" + status, { workflow_path: workflowPath }, signal, undefined, context);
+				await writeFile(process.env.PI_STATUS_FILE!, status);
 				if (status === "ok") {
-					const dashboard = command.handler("", context);
-					await waitForFile(process.env.PI_DASHBOARD_STARTED!);
-					await writeFile(process.env.PI_STATUS_FILE!, status);
 					await sleep(1300);
+					whileStreaming = { messages: messages.length, notifications: notifications.length };
+					await settled({}, context);
+					afterSettledWhileStreaming = { messages: messages.length, notifications: notifications.length };
+					idle = true;
+					const dashboard = command.handler("", context);
+					for (let attempt = 0; attempt < 100 && !dashboardOpen; attempt++) await sleep(10);
+					if (!dashboardOpen) throw new Error("Pi-native dashboard did not open");
+					await settled({}, context);
+					await waitForUpdates(expectedUpdates);
 					whileDashboard = { messages: messages.length, notifications: notifications.length };
-					await writeFile(process.env.PI_DASHBOARD_RELEASE!, "release");
+					overlay.handleInput("q");
 					await dashboard;
-					dashboardEvents.push("pi-alive");
 				} else {
-					await writeFile(process.env.PI_STATUS_FILE!, status);
+					await waitForUpdates(expectedUpdates);
 				}
-				await waitForUpdates(expectedUpdates);
 			}
-			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({ ok: true, messages, notifications, whileDashboard, dashboardEvents }));
+			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({
+				ok: true, messages, notifications, whileStreaming, afterSettledWhileStreaming,
+				whileDashboard, dashboardOpen, dashboardRendered, rendererStops,
+			}));
 		} catch (error) {
-			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error), messages, notifications, whileDashboard, dashboardEvents }));
+			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({
+				ok: false, error: error instanceof Error ? error.message : String(error), messages, notifications,
+				whileStreaming, afterSettledWhileStreaming, whileDashboard, dashboardOpen, dashboardRendered, rendererStops,
+			}));
 		}
 		return { action: "handled" };
 	});
@@ -745,8 +597,6 @@ export default function (pi: any) {
 		"PI_RUN_COUNT":           runCount,
 		"PI_STATUS_FILE":         statusFile,
 		"PI_LAUNCH_SESSION":      launchSession,
-		"PI_DASHBOARD_STARTED":   dashboardStarted,
-		"PI_DASHBOARD_RELEASE":   dashboardRelease,
 		"PI_UPDATE_PROBE_MARKER": marker,
 		"DYNA_NO_AUTO_UPDATE":    "1",
 		"OPENAI_API_KEY":         "",
@@ -770,17 +620,29 @@ export default function (pi: any) {
 				} `json:"details"`
 			} `json:"message"`
 			Options struct {
-				TriggerTurn bool `json:"triggerTurn"`
+				TriggerTurn bool   `json:"triggerTurn"`
+				DeliverAs   string `json:"deliverAs"`
 			} `json:"options"`
+			DuringDashboard bool `json:"duringDashboard"`
 		}
 		Notifications []struct {
 			Type string `json:"type"`
 		}
+		WhileStreaming struct {
+			Messages      int `json:"messages"`
+			Notifications int `json:"notifications"`
+		} `json:"whileStreaming"`
+		AfterSettledWhileStreaming struct {
+			Messages      int `json:"messages"`
+			Notifications int `json:"notifications"`
+		} `json:"afterSettledWhileStreaming"`
 		WhileDashboard struct {
 			Messages      int `json:"messages"`
 			Notifications int `json:"notifications"`
 		} `json:"whileDashboard"`
-		DashboardEvents []string `json:"dashboardEvents"`
+		DashboardOpen     bool `json:"dashboardOpen"`
+		DashboardRendered bool `json:"dashboardRendered"`
+		RendererStops     int  `json:"rendererStops"`
 	}
 	if err := json.Unmarshal([]byte(readFile(t, marker)), &probe); err != nil {
 		t.Fatal(err)
@@ -791,17 +653,24 @@ export default function (pi: any) {
 	if got := strings.TrimSpace(readFile(t, launchSession)); got != "fixture-session" {
 		t.Fatalf("detached Dyna run session = %q, want persisted Pi session", got)
 	}
-	if probe.WhileDashboard.Messages != 0 || probe.WhileDashboard.Notifications != 0 {
-		t.Fatalf("terminal update was delivered while dashboard owned terminal: %#v", probe.WhileDashboard)
+	if probe.WhileStreaming.Messages != 0 || probe.WhileStreaming.Notifications != 0 ||
+		probe.AfterSettledWhileStreaming.Messages != 0 || probe.AfterSettledWhileStreaming.Notifications != 0 {
+		t.Fatalf("terminal update was injected while Pi was streaming: before=%#v after-settled=%#v", probe.WhileStreaming, probe.AfterSettledWhileStreaming)
 	}
-	if got := strings.Join(probe.DashboardEvents, ","); got != "stop,start,render:true,done,pi-alive" {
-		t.Fatalf("Pi post-dashboard lifecycle = %q", got)
+	if probe.WhileDashboard.Messages != 1 || probe.WhileDashboard.Notifications != 1 {
+		t.Fatalf("terminal update did not deliver while the Pi-native dashboard was open: %#v", probe.WhileDashboard)
+	}
+	if probe.DashboardOpen || !probe.DashboardRendered || probe.RendererStops != 0 {
+		t.Fatalf("Pi-native dashboard lifecycle = open:%v rendered:%v renderer-stops:%d", probe.DashboardOpen, probe.DashboardRendered, probe.RendererStops)
 	}
 	for i, want := range []struct {
 		status, notification string
 	}{{"ok", "info"}, {"error", "error"}, {"canceled", "warning"}} {
-		if probe.Messages[i].Message.Details.Status != want.status || probe.Messages[i].Options.TriggerTurn {
-			t.Fatalf("terminal message %d = %#v, want %s without a turn", i, probe.Messages[i], want.status)
+		if probe.Messages[i].Message.Details.Status != want.status || !probe.Messages[i].Options.TriggerTurn || probe.Messages[i].Options.DeliverAs != "followUp" {
+			t.Fatalf("terminal message %d = %#v, want %s with a follow-up turn", i, probe.Messages[i], want.status)
+		}
+		if i == 0 && !probe.Messages[i].DuringDashboard {
+			t.Fatalf("first terminal message = %#v, want delivery while Pi-native dashboard remained open", probe.Messages[i])
 		}
 		if probe.Notifications[i].Type != want.notification {
 			t.Fatalf("terminal notification %d = %#v, want %s", i, probe.Notifications[i], want.notification)
