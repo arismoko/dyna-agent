@@ -341,9 +341,17 @@ as or replaces that result.
   400 ms, so entries appear while the worker is still running, not only when
   it finishes.
 
-  `dyna pi` defaults its root Pi process to Pi's existing
-  `openai-codex/gpt-5.6-terra` model at `xhigh`, while explicit provider, model,
-  and thinking flags still win. It reuses Codex's ChatGPT OAuth in memory and
+  `dyna pi` launches the built-in root agent preset `dyna-orchestrator`, names
+  new sessions after that preset unless `--name`/`-n` is supplied, and keeps an
+  `agent:dyna-orchestrator` footer status visible without a startup message. By
+  default it activates every tool registered when Pi starts, including Pi's
+  normally opt-in built-ins, the native Dyna tools, and tools from other loaded
+  extensions. Explicit `--tools`/`-t`, `--exclude-tools`/`-xt`, `--no-tools`/`-nt`,
+  and `--no-builtin-tools`/`-nbt` selections remain authoritative.
+
+  The preset uses Pi's existing `openai-codex/gpt-5.6-terra` model at `xhigh`,
+  while explicit provider, model, and thinking flags still win. It reuses
+  Codex's ChatGPT OAuth in memory and
   delegates refresh to Codex's app server, so no second Pi login or credential
   copy is required. Unsupported or missing Codex auth fails with a `codex login`
   instruction rather than falling back to another provider. Other Pi skills

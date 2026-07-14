@@ -462,9 +462,15 @@ gracefully interrupts an active resumable worker and continues that exact
 session with the message; unsupported sessions reject instead of launching a
 replacement.
 
-`dyna pi` launches Pi with the bundled extension and a compact, self-contained
-Dyna prompt while preserving every other Pi skill. A separately installed Dyna
-Pi skill uses `disable-model-invocation: true`, which retains manual
+`dyna pi` launches the built-in root agent preset `dyna-orchestrator` with the
+bundled extension and a compact, self-contained Dyna prompt while preserving
+every other Pi skill. Its sessions default to the `dyna-orchestrator` display
+name and show `agent:dyna-orchestrator` in the footer. At session start the
+preset activates every registered Pi tool, including all built-ins, the four
+native Dyna tools, and tools from other extensions; explicit `--tools`/`-t`,
+`--exclude-tools`/`-xt`, `--no-tools`/`-nt`, and `--no-builtin-tools`/`-nbt`
+controls override that default. A separately installed Dyna Pi skill uses
+`disable-model-invocation: true`, which retains manual
 `/skill:dyna` use in plain Pi without duplicating the launch prompt in model
 discovery.
 

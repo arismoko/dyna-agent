@@ -72,10 +72,12 @@ decisions, before long operations, after verification, on blockers, and before
 finishing. The journal never replaces the worker's final response.`
 
 const (
-	piDefaultProvider = "openai-codex"
-	piDefaultModel    = "gpt-5.6-terra"
-	piDefaultThinking = "xhigh"
-	piCodexAuthEnv    = "DYNA_PI_CODEX_AUTH"
+	piDefaultProvider     = "openai-codex"
+	piDefaultModel        = "gpt-5.6-terra"
+	piDefaultThinking     = "xhigh"
+	piRootAgent           = "dyna-orchestrator"
+	piCodexAuthEnv        = "DYNA_PI_CODEX_AUTH"
+	piActivateAllToolsEnv = "DYNA_PI_ACTIVATE_ALL_TOOLS"
 )
 
 func piCmd() *cobra.Command {
@@ -113,6 +115,11 @@ func runPi(c *cobra.Command, args []string) error {
 	piArgs = append(piArgs, args...)
 	cmd := exec.Command(piPath, piArgs...)
 	cmd.Env = setEnv(os.Environ(), runstore.SessionEnv, session)
+	if piHasExplicitToolControl(args) {
+		cmd.Env = unsetEnv(cmd.Env, piActivateAllToolsEnv)
+	} else {
+		cmd.Env = setEnv(cmd.Env, piActivateAllToolsEnv, "1")
+	}
 	if !piHasFlag(args, "--api-key") {
 		cmd.Env = setEnv(cmd.Env, piCodexAuthEnv, "1")
 	} else {
@@ -131,7 +138,7 @@ func piNormalizeArgs(args []string) []string {
 		name, value, equals := strings.Cut(arg, "=")
 		if equals {
 			switch name {
-			case "--provider", "--model", "--models", "--thinking", "--api-key":
+			case "--provider", "--model", "--models", "--thinking", "--api-key", "--name", "-n", "--tools", "-t", "--exclude-tools", "-xt":
 				normalized = append(normalized, name, value)
 				continue
 			}
@@ -142,14 +149,26 @@ func piNormalizeArgs(args []string) []string {
 }
 
 func piDefaultArgs(args []string) []string {
-	defaults := make([]string, 0, 6)
+	defaults := make([]string, 0, 8)
 	if !piHasFlag(args, "--provider") && !piHasFlag(args, "--model") && !piHasFlag(args, "--models") {
 		defaults = append(defaults, "--provider", piDefaultProvider, "--model", piDefaultModel)
 	}
 	if !piHasFlag(args, "--thinking") && !piModelHasThinking(args) && !piModelScopeHasThinking(args) {
 		defaults = append(defaults, "--thinking", piDefaultThinking)
 	}
+	if !piHasFlag(args, "--name") && !piHasFlag(args, "-n") {
+		defaults = append(defaults, "--name", piRootAgent)
+	}
 	return defaults
+}
+
+func piHasExplicitToolControl(args []string) bool {
+	for _, name := range []string{"--tools", "-t", "--exclude-tools", "-xt", "--no-tools", "-nt", "--no-builtin-tools", "-nbt"} {
+		if piHasFlag(args, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func piHasFlag(args []string, name string) bool {
@@ -232,4 +251,15 @@ func setEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(out, prefix+value)
+}
+
+func unsetEnv(env []string, key string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return out
 }

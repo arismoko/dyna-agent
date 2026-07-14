@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	data := t.TempDir()
 	capture := t.TempDir()
 	piPath := filepath.Join(binDir, "pi")
-	script := "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$CAPTURE_ARGS\"\nprintf '%s\\n' \"$DYNA_SESSION\" > \"$CAPTURE_SESSION\"\nprintf '%s\\n' \"$DYNA_BIN\" > \"$CAPTURE_BIN\"\nprintf '%s\\n' \"$DYNA_PI_CODEX_AUTH\" > \"$CAPTURE_AUTH\"\n"
+	script := "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$CAPTURE_ARGS\"\nprintf '%s\\n' \"$DYNA_SESSION\" > \"$CAPTURE_SESSION\"\nprintf '%s\\n' \"$DYNA_BIN\" > \"$CAPTURE_BIN\"\nprintf '%s\\n' \"$DYNA_PI_CODEX_AUTH\" > \"$CAPTURE_AUTH\"\nprintf '%s\\n' \"$DYNA_PI_ACTIVATE_ALL_TOOLS\" > \"$CAPTURE_TOOLS\"\n"
 	if err := os.WriteFile(piPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +61,7 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 		"CAPTURE_SESSION":     filepath.Join(capture, "session"),
 		"CAPTURE_BIN":         filepath.Join(capture, "bin"),
 		"CAPTURE_AUTH":        filepath.Join(capture, "auth"),
+		"CAPTURE_TOOLS":       filepath.Join(capture, "tools"),
 		runstore.SessionEnv:   "stale-session",
 		"DYNA_BIN":            "stale-binary",
 		"DYNA_NO_AUTO_UPDATE": "1",
@@ -72,7 +74,7 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 
 	args := readNULArgs(t, filepath.Join(capture, "args"))
 	wantExtension := filepath.Join(data, "dyna", "pi-extension", "dyna.ts")
-	wantArgs := []string{"--extension", wantExtension, "--append-system-prompt", piOrchestrationPrompt, "--thinking", "xhigh", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "--skill", "user-skill", "-c"}
+	wantArgs := []string{"--extension", wantExtension, "--append-system-prompt", piOrchestrationPrompt, "--thinking", "xhigh", "--name", piRootAgent, "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "--skill", "user-skill", "-c"}
 	if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("pi args = %#v, want %#v", args, wantArgs)
 	}
@@ -86,8 +88,54 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	if got := strings.TrimSpace(readFile(t, filepath.Join(capture, "auth"))); got != "1" {
 		t.Fatalf("DYNA_PI_CODEX_AUTH = %q, want 1", got)
 	}
+	if got := strings.TrimSpace(readFile(t, filepath.Join(capture, "tools"))); got != "1" {
+		t.Fatalf("DYNA_PI_ACTIVATE_ALL_TOOLS = %q, want 1", got)
+	}
 	if _, err := os.Stat(filepath.Join(home, ".pi", "agent", "skills", "dyna", "SKILL.md")); !os.IsNotExist(err) {
 		t.Fatalf("dyna pi installed a redundant skill: %v", err)
+	}
+}
+
+func TestPiCmdPreservesExplicitNameAndToolControls(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		args        []string
+		want        []string
+		activateAll bool
+	}{
+		{name: "long name", args: []string{"--name=fixture"}, want: []string{"--name", "fixture"}, activateAll: true},
+		{name: "short name", args: []string{"-n=fixture"}, want: []string{"-n", "fixture"}, activateAll: true},
+		{name: "tools equals", args: []string{"--tools=read,fixture_extension_tool"}, want: []string{"--tools", "read,fixture_extension_tool"}},
+		{name: "short tools equals", args: []string{"-t=read"}, want: []string{"-t", "read"}},
+		{name: "exclude tools equals", args: []string{"--exclude-tools=write"}, want: []string{"--exclude-tools", "write"}},
+		{name: "short exclude tools equals", args: []string{"-xt=write"}, want: []string{"-xt", "write"}},
+		{name: "no tools", args: []string{"--no-tools"}, want: []string{"--no-tools"}},
+		{name: "short no tools", args: []string{"-nt"}, want: []string{"-nt"}},
+		{name: "no builtin tools", args: []string{"--no-builtin-tools"}, want: []string{"--no-builtin-tools"}},
+		{name: "short no builtin tools", args: []string{"-nbt"}, want: []string{"-nbt"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			capture := t.TempDir()
+			writeExecutable(t, filepath.Join(binDir, "pi"), "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$CAPTURE_ARGS\"\nprintf '%s\\n' \"${DYNA_PI_ACTIVATE_ALL_TOOLS-unset}\" > \"$CAPTURE_TOOLS\"\n")
+			cmd := piCommandSubprocess(t, binDir, append([]string{"pi"}, tt.args...)...)
+			cmd.Env = setEnv(cmd.Env, "CAPTURE_ARGS", filepath.Join(capture, "args"))
+			cmd.Env = setEnv(cmd.Env, "CAPTURE_TOOLS", filepath.Join(capture, "tools"))
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("pi subprocess: %v\n%s", err, output)
+			}
+			got := readNULArgs(t, filepath.Join(capture, "args"))
+			if !containsArgs(got, tt.want) {
+				t.Fatalf("pi args = %#v, missing %#v", got, tt.want)
+			}
+			wantActivation := "unset"
+			if tt.activateAll {
+				wantActivation = "1"
+			}
+			if got := strings.TrimSpace(readFile(t, filepath.Join(capture, "tools"))); got != wantActivation {
+				t.Fatalf("DYNA_PI_ACTIVATE_ALL_TOOLS = %q, want %q", got, wantActivation)
+			}
+		})
 	}
 }
 
@@ -117,6 +165,7 @@ func TestPiCmdNormalizesRecognizedEqualsArgs(t *testing.T) {
 	wantArgs := []string{
 		"--extension", filepath.Join(data, "dyna", "pi-extension", "dyna.ts"),
 		"--append-system-prompt", piOrchestrationPrompt,
+		"--name", piRootAgent,
 		"--provider", "fixture-provider",
 		"--model", "fixture-model",
 		"--models", "fixture-provider/*:high",
@@ -139,15 +188,17 @@ func TestPiDefaultArgsPreserveExplicitSelection(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{name: "all defaults", want: []string{"--provider", "openai-codex", "--model", "gpt-5.6-terra", "--thinking", "xhigh"}},
-		{name: "model", args: []string{"--model", "anthropic/claude"}, want: []string{"--thinking", "xhigh"}},
-		{name: "provider", args: []string{"--provider=anthropic"}, want: []string{"--thinking", "xhigh"}},
-		{name: "model thinking suffix", args: []string{"--model", "openai-codex/gpt-5.6-terra:high"}},
-		{name: "model scope", args: []string{"--models", "anthropic/*"}, want: []string{"--thinking", "xhigh"}},
-		{name: "model scope thinking suffix", args: []string{"--models", "sonnet:high,haiku:low"}},
-		{name: "thinking", args: []string{"--thinking", "low"}, want: []string{"--provider", "openai-codex", "--model", "gpt-5.6-terra"}},
-		{name: "equals forms", args: []string{"--model=other/model", "--thinking=xhigh"}},
-		{name: "last model wins", args: []string{"--model", "first:high", "--model", "second"}, want: []string{"--thinking", "xhigh"}},
+		{name: "all defaults", want: []string{"--provider", "openai-codex", "--model", "gpt-5.6-terra", "--thinking", "xhigh", "--name", piRootAgent}},
+		{name: "model", args: []string{"--model", "anthropic/claude"}, want: []string{"--thinking", "xhigh", "--name", piRootAgent}},
+		{name: "provider", args: []string{"--provider=anthropic"}, want: []string{"--thinking", "xhigh", "--name", piRootAgent}},
+		{name: "model thinking suffix", args: []string{"--model", "openai-codex/gpt-5.6-terra:high"}, want: []string{"--name", piRootAgent}},
+		{name: "model scope", args: []string{"--models", "anthropic/*"}, want: []string{"--thinking", "xhigh", "--name", piRootAgent}},
+		{name: "model scope thinking suffix", args: []string{"--models", "sonnet:high,haiku:low"}, want: []string{"--name", piRootAgent}},
+		{name: "thinking", args: []string{"--thinking", "low"}, want: []string{"--provider", "openai-codex", "--model", "gpt-5.6-terra", "--name", piRootAgent}},
+		{name: "equals forms", args: []string{"--model=other/model", "--thinking=xhigh"}, want: []string{"--name", piRootAgent}},
+		{name: "last model wins", args: []string{"--model", "first:high", "--model", "second"}, want: []string{"--thinking", "xhigh", "--name", piRootAgent}},
+		{name: "long name", args: []string{"--name", "fixture"}, want: []string{"--provider", "openai-codex", "--model", "gpt-5.6-terra", "--thinking", "xhigh"}},
+		{name: "short name equals", args: []string{"-n=fixture"}, want: []string{"--provider", "openai-codex", "--model", "gpt-5.6-terra", "--thinking", "xhigh"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -268,6 +319,10 @@ func TestPiExtensionRegistersModelVisibleSteeringTool(t *testing.T) {
 func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 	source := string(piExtensionTS)
 	for _, required := range []string{
+		`const ROOT_AGENT = "dyna-orchestrator"`,
+		`const ACTIVATE_ALL_TOOLS = process.env.DYNA_PI_ACTIVATE_ALL_TOOLS === "1"`,
+		`pi.setActiveTools(pi.getAllTools().map((tool) => tool.name));`,
+		"ctx.ui.setStatus(\"dyna-agent\", `agent:${ROOT_AGENT}`);",
 		`name: "dyna_profiles"`,
 		`name: "dyna_run"`,
 		`name: "dyna_runs"`,
@@ -418,6 +473,109 @@ export default function (pi: any) {
 	}
 	if len(withoutSession) != 0 {
 		t.Fatalf("Pi exposed session-scoped Dyna tools without DYNA_SESSION: %#v", withoutSession)
+	}
+}
+
+func TestInstalledPiActivatesRootPresetToolsWithoutOverridingExplicitControls(t *testing.T) {
+	piPath, err := exec.LookPath("pi")
+	if err != nil {
+		t.Skip("pi is not installed")
+	}
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	extensionPath, err := provisionPiExtension()
+	if err != nil {
+		t.Fatal(err)
+	}
+	probePath := filepath.Join(t.TempDir(), "active-tools.ts")
+	probeSource := `import { writeFile } from "node:fs/promises";
+import { Type } from "@earendil-works/pi-ai";
+export default function (pi: any) {
+	pi.registerTool({
+		name: "fixture_extension_tool",
+		description: "Fixture extension tool",
+		parameters: Type.Object({}),
+		async execute() { return { content: [{ type: "text", text: "fixture" }] }; },
+	});
+	pi.on("session_start", async () => {
+		await writeFile(process.env.TOOL_PROBE_MARKER!, JSON.stringify({
+			active: pi.getActiveTools(),
+			all: pi.getAllTools().map((tool: any) => tool.name),
+		}));
+	});
+	pi.on("input", async () => ({ action: "handled" }));
+}
+`
+	if err := os.WriteFile(probePath, []byte(probeSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runProbe := func(t *testing.T, activeAll bool, args ...string) struct {
+		Active []string `json:"active"`
+		All    []string `json:"all"`
+	} {
+		t.Helper()
+		marker := filepath.Join(t.TempDir(), "active-tools.json")
+		piArgs := []string{
+			"--offline", "--no-extensions",
+			"--extension", extensionPath,
+			"--extension", probePath,
+			"--provider", "openai-codex",
+			"--model", "gpt-5.6-terra",
+			"--api-key", "fixture-only",
+		}
+		piArgs = append(piArgs, args...)
+		piArgs = append(piArgs, "-p", "probe active tools")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, piPath, piArgs...)
+		cmd.Env = os.Environ()
+		for key, value := range map[string]string{
+			"HOME":                       home,
+			"PI_CODING_AGENT_DIR":        filepath.Join(home, ".pi-fixture"),
+			"PI_OFFLINE":                 "1",
+			"DYNA_SESSION":               "fixture-session",
+			"DYNA_BIN":                   "/bin/false",
+			"DYNA_PI_CODEX_AUTH":         "0",
+			"TOOL_PROBE_MARKER":          marker,
+			"OPENAI_API_KEY":             "",
+			"CODEX_HOME":                 filepath.Join(home, ".codex-fixture"),
+			"DYNA_CODEX_BIN":             "/bin/false",
+			"DYNA_NO_AUTO_UPDATE":        "1",
+			"DYNA_PI_ACTIVATE_ALL_TOOLS": map[bool]string{true: "1", false: ""}[activeAll],
+		} {
+			cmd.Env = setEnv(cmd.Env, key, value)
+		}
+		output, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatalf("offline Pi active-tool probe timed out: %v", ctx.Err())
+		}
+		if err != nil {
+			t.Fatalf("offline Pi active-tool probe: %v\n%s", err, output)
+		}
+		var result struct {
+			Active []string `json:"active"`
+			All    []string `json:"all"`
+		}
+		if err := json.Unmarshal([]byte(readFile(t, marker)), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	defaultTools := runProbe(t, true)
+	for _, name := range []string{"read", "bash", "edit", "write", "grep", "find", "ls", "dyna_profiles", "dyna_run", "dyna_runs", "dyna_steer", "fixture_extension_tool"} {
+		if !slices.Contains(defaultTools.Active, name) {
+			t.Errorf("default root preset active tools = %#v, missing %s", defaultTools.Active, name)
+		}
+	}
+	if !slices.Contains(defaultTools.All, "fixture_extension_tool") {
+		t.Fatalf("root preset did not register fixture extension tool: %#v", defaultTools.All)
+	}
+
+	restrictedTools := runProbe(t, false, "--tools", "read")
+	if strings.Join(restrictedTools.Active, ",") != "read" {
+		t.Fatalf("explicit --tools selection was overridden: %#v", restrictedTools.Active)
 	}
 }
 
@@ -1041,6 +1199,15 @@ func readLines(t *testing.T, path string) []string {
 func readNULArgs(t *testing.T, path string) []string {
 	t.Helper()
 	return strings.Split(strings.TrimSuffix(readFile(t, path), "\x00"), "\x00")
+}
+
+func containsArgs(args, want []string) bool {
+	for i := 0; i+len(want) <= len(args); i++ {
+		if slices.Equal(args[i:i+len(want)], want) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeExecutable(t *testing.T, path, contents string) {

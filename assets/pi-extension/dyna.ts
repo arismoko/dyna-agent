@@ -18,6 +18,8 @@ const DETACHED_REGISTRATION_POLL_MS = 300;
 const MAX_EVENT_READ = 4 * 1024 * 1024;
 const MAX_JOURNAL_TAIL = 256 * 1024;
 const LIST_POLL_TICKS = 5;
+const ROOT_AGENT = "dyna-orchestrator";
+const ACTIVATE_ALL_TOOLS = process.env.DYNA_PI_ACTIVATE_ALL_TOOLS === "1";
 const CODEX_AUTH_ENABLED = process.env.DYNA_PI_CODEX_AUTH === "1";
 const CODEX = process.env.DYNA_CODEX_BIN || "codex";
 const CODEX_PROVIDER = "openai-codex";
@@ -949,6 +951,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		if (ACTIVATE_ALL_TOOLS) {
+			pi.setActiveTools(pi.getAllTools().map((tool) => tool.name));
+		}
+		ctx.ui.setStatus("dyna-agent", `agent:${ROOT_AGENT}`);
+
 		if (CODEX_AUTH_ENABLED && ctx.model?.provider === CODEX_PROVIDER) {
 			try {
 				await installCodexAccess(ctx);
