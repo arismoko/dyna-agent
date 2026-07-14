@@ -372,6 +372,9 @@ func TestPiDynaDashboardHandoffStaticContract(t *testing.T) {
 		`tui.start();`,
 		`tui.requestRender(true);`,
 		`done(undefined);`,
+		`dashboardActive = true;`,
+		`dashboardActive = false;`,
+		`flushTerminalRunUpdates(ctx);`,
 		`Unable to run Dyna dashboard`,
 	} {
 		if !strings.Contains(source, required) {
@@ -559,6 +562,8 @@ func TestPiDynaTerminalDeliveryStaticContract(t *testing.T) {
 	for _, required := range []string{
 		`const launchedRunIDs = new Set<string>();`,
 		`const pendingRunUpdates = new Map<string, TerminalRunUpdate>();`,
+		`let dashboardActive = false;`,
+		`if (dashboardActive || pendingRunUpdates.size === 0 || !ctx.isIdle()) return;`,
 		`function watchLaunchedRun(id: string, session: string, ctx: ExtensionContext): void`,
 		`run.status === "ok" || run.status === "error" || run.status === "canceled"`,
 		`customType: "dyna_run_terminal"`,
@@ -590,6 +595,8 @@ func TestInstalledPiDeliversDetachedTerminalUpdates(t *testing.T) {
 	runCount := filepath.Join(fixtureDir, "run-count")
 	statusFile := filepath.Join(fixtureDir, "status")
 	launchSession := filepath.Join(fixtureDir, "launch-session")
+	dashboardStarted := filepath.Join(fixtureDir, "dashboard-started")
+	dashboardRelease := filepath.Join(fixtureDir, "dashboard-release")
 	writeExecutable(t, fakeDyna, `#!/bin/sh
 case "$1:$2" in
 	run:*)
@@ -605,6 +612,10 @@ case "$1:$2" in
 		status=$(cat "$PI_STATUS_FILE")
 		printf '[{"id":"wf_fixture_%s","name":"fixture","status":"%s","session":"fixture-session","startedAt":"2026-07-14T00:00:00Z"}]\n' "$count" "$status"
 		;;
+	tui:*)
+		: > "$PI_DASHBOARD_STARTED"
+		while [ ! -f "$PI_DASHBOARD_RELEASE" ]; do /bin/sleep 0.02; done
+		;;
 	*)
 		printf 'unexpected fixture invocation: %s\n' "$*" >&2
 		exit 98
@@ -618,19 +629,32 @@ esac
 		t.Fatal(err)
 	}
 	probePath := filepath.Join(fixtureDir, "probe.ts")
-	probeSource := `import { readFile, writeFile } from "node:fs/promises";
+	probeSource := `import { access, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import dynaExtension from ` + string(extensionJSON) + `;
 
 const tools = new Map<string, any>();
 const messages: any[] = [];
 const notifications: any[] = [];
+let command: any;
 dynaExtension({
 	on: () => {},
 	registerTool: (tool: any) => tools.set(tool.name, tool),
-	registerCommand: () => {},
+	registerCommand: (_name: string, spec: any) => { command = spec; },
 	sendMessage: (message: any, options: any) => messages.push({ message, options }),
 } as any);
+
+async function waitForFile(path: string): Promise<void> {
+	for (let attempt = 0; attempt < 250; attempt++) {
+		try {
+			await access(path);
+			return;
+		} catch {
+			await sleep(20);
+		}
+	}
+	throw new Error("timed out waiting for " + path);
+}
 
 async function waitForUpdates(count: number): Promise<void> {
 	for (let attempt = 0; attempt < 150; attempt++) {
@@ -642,25 +666,57 @@ async function waitForUpdates(count: number): Promise<void> {
 
 export default function (pi: any) {
 	pi.on("input", async () => {
+		const dashboardEvents: string[] = [];
+		let whileDashboard: { messages: number; notifications: number } | undefined;
 		try {
+			const tui = {
+				stop: () => dashboardEvents.push("stop"),
+				start: () => dashboardEvents.push("start"),
+				requestRender: (full: boolean) => dashboardEvents.push("render:" + full),
+			};
 			const context = {
+				mode: "tui",
 				isIdle: () => true,
 				sessionManager: { getSessionId: () => "fixture-session" },
-				ui: { notify: (message: string, type: string) => notifications.push({ message, type }) },
+				ui: {
+					notify: (message: string, type: string) => notifications.push({ message, type }),
+					custom: async (factory: any) => await new Promise((resolve, reject) => {
+						try {
+							factory(tui, {}, {}, (result: unknown) => {
+								dashboardEvents.push("done");
+								resolve(result);
+							});
+						} catch (error) {
+							reject(error);
+						}
+					}),
+				},
 			};
 			const signal = new AbortController().signal;
 			const run = tools.get("dyna_run");
 			for (const status of ["ok", "error", "canceled"]) {
+				const expectedUpdates = messages.length + 1;
 				const workflowPath = "/tmp/dyna-workflow-fixture-" + status + ".js";
 				await writeFile(workflowPath, "return 1");
 				await writeFile(process.env.PI_STATUS_FILE!, "running");
 				await run.execute("run-" + status, { workflow_path: workflowPath }, signal, undefined, context);
-				await writeFile(process.env.PI_STATUS_FILE!, status);
-				await waitForUpdates(messages.length + 1);
+				if (status === "ok") {
+					const dashboard = command.handler("", context);
+					await waitForFile(process.env.PI_DASHBOARD_STARTED!);
+					await writeFile(process.env.PI_STATUS_FILE!, status);
+					await sleep(1300);
+					whileDashboard = { messages: messages.length, notifications: notifications.length };
+					await writeFile(process.env.PI_DASHBOARD_RELEASE!, "release");
+					await dashboard;
+					dashboardEvents.push("pi-alive");
+				} else {
+					await writeFile(process.env.PI_STATUS_FILE!, status);
+				}
+				await waitForUpdates(expectedUpdates);
 			}
-			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({ ok: true, messages, notifications }));
+			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({ ok: true, messages, notifications, whileDashboard, dashboardEvents }));
 		} catch (error) {
-			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error), messages, notifications, whileDashboard, dashboardEvents }));
 		}
 		return { action: "handled" };
 	});
@@ -689,6 +745,8 @@ export default function (pi: any) {
 		"PI_RUN_COUNT":           runCount,
 		"PI_STATUS_FILE":         statusFile,
 		"PI_LAUNCH_SESSION":      launchSession,
+		"PI_DASHBOARD_STARTED":   dashboardStarted,
+		"PI_DASHBOARD_RELEASE":   dashboardRelease,
 		"PI_UPDATE_PROBE_MARKER": marker,
 		"DYNA_NO_AUTO_UPDATE":    "1",
 		"OPENAI_API_KEY":         "",
@@ -718,6 +776,11 @@ export default function (pi: any) {
 		Notifications []struct {
 			Type string `json:"type"`
 		}
+		WhileDashboard struct {
+			Messages      int `json:"messages"`
+			Notifications int `json:"notifications"`
+		} `json:"whileDashboard"`
+		DashboardEvents []string `json:"dashboardEvents"`
 	}
 	if err := json.Unmarshal([]byte(readFile(t, marker)), &probe); err != nil {
 		t.Fatal(err)
@@ -727,6 +790,12 @@ export default function (pi: any) {
 	}
 	if got := strings.TrimSpace(readFile(t, launchSession)); got != "fixture-session" {
 		t.Fatalf("detached Dyna run session = %q, want persisted Pi session", got)
+	}
+	if probe.WhileDashboard.Messages != 0 || probe.WhileDashboard.Notifications != 0 {
+		t.Fatalf("terminal update was delivered while dashboard owned terminal: %#v", probe.WhileDashboard)
+	}
+	if got := strings.Join(probe.DashboardEvents, ","); got != "stop,start,render:true,done,pi-alive" {
+		t.Fatalf("Pi post-dashboard lifecycle = %q", got)
 	}
 	for i, want := range []struct {
 		status, notification string

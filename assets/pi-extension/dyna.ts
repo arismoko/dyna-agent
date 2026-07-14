@@ -474,6 +474,7 @@ export default function (pi: ExtensionAPI) {
 	const launchedRunIDs = new Set<string>();
 	const pendingRunUpdates = new Map<string, TerminalRunUpdate>();
 	const runCompletionAbort = new AbortController();
+	let dashboardActive = false;
 
 	function isTerminalRun(run: Run): boolean {
 		return run.status === "ok" || run.status === "error" || run.status === "canceled";
@@ -490,9 +491,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// Never inject a message while Pi is streaming: its default delivery mode
-	// would steer the current agent and cause an unwanted follow-up turn.
+	// would steer the current agent and cause an unwanted follow-up turn. The
+	// dashboard also owns the terminal while Pi's renderer is stopped, so wait
+	// until Pi resumes before mutating either its session or UI.
 	function flushTerminalRunUpdates(ctx: ExtensionContext): void {
-		if (!ctx.isIdle()) return;
+		if (dashboardActive || pendingRunUpdates.size === 0 || !ctx.isIdle()) return;
 		for (const [id, update] of pendingRunUpdates) {
 			const { run } = update;
 			try {
@@ -721,38 +724,44 @@ export default function (pi: ExtensionAPI) {
 			const session = sessionID(ctx);
 
 			let launchFailure = "";
-			await ctx.ui.custom<void>((tui, _theme, _keys, done) => {
-				let finished = false;
-				const finish = (failure = "") => {
-					if (finished) return;
-					finished = true;
-					launchFailure = failure;
-					try {
-						tui.start();
-						tui.requestRender(true);
-					} finally {
-						done(undefined);
-					}
-				};
+			dashboardActive = true;
+			try {
+				await ctx.ui.custom<void>((tui, _theme, _keys, done) => {
+					let finished = false;
+					const finish = (failure = "") => {
+						if (finished) return;
+						finished = true;
+						launchFailure = failure;
+						try {
+							tui.start();
+							tui.requestRender(true);
+						} finally {
+							done(undefined);
+						}
+					};
 
-				tui.stop();
-				try {
-					process.stdout.write("\x1b[2J\x1b[H");
-					const child = spawn(DYNA, ["tui", "--session", session], {
-						stdio: "inherit",
-						env: process.env,
-					});
-					child.once("error", (error) => finish(error.message));
-					child.once("close", (code, signal) => {
-						if (signal) finish(`dyna tui exited on signal ${signal}`);
-						else if (code !== 0) finish(`dyna tui exited with code ${code}`);
-						else finish();
-					});
-				} catch (error) {
-					finish(error instanceof Error ? error.message : String(error));
-				}
-				return { render: () => [], invalidate: () => {} };
-			});
+					tui.stop();
+					try {
+						process.stdout.write("\x1b[2J\x1b[H");
+						const child = spawn(DYNA, ["tui", "--session", session], {
+							stdio: "inherit",
+							env: process.env,
+						});
+						child.once("error", (error) => finish(error.message));
+						child.once("close", (code, signal) => {
+							if (signal) finish(`dyna tui exited on signal ${signal}`);
+							else if (code !== 0) finish(`dyna tui exited with code ${code}`);
+							else finish();
+						});
+					} catch (error) {
+						finish(error instanceof Error ? error.message : String(error));
+					}
+					return { render: () => [], invalidate: () => {} };
+				});
+			} finally {
+				dashboardActive = false;
+				flushTerminalRunUpdates(ctx);
+			}
 			if (launchFailure) ctx.ui.notify(`Unable to run Dyna dashboard: ${launchFailure}`, "error");
 		},
 	});
