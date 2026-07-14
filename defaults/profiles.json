@@ -6,7 +6,7 @@
       "harness": "claude-code",
       "model": "fable",
       "taste": 10,
-      "intelligence": 10,
+      "intelligence": 8,
       "cost": 2,
       "env": {
         "MAX_THINKING_TOKENS": "63999"
@@ -64,7 +64,7 @@
       "harness": "codex",
       "model": "gpt-5.6-terra",
       "taste": 6,
-      "intelligence": 8,
+      "intelligence": 7,
       "cost": 9,
       "extraArgs": [
         "-c",
