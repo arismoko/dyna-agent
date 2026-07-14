@@ -546,10 +546,12 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			}
 			steeringOpts = harness.SteeringOptions{
 				RunID: e.opts.Run.Meta.ID, AgentID: id,
-				OnMessage: func(message runstore.SteeringMessage) {
-					_ = e.opts.Run.AppendAgentJournal(id, runstore.AgentJournalEntry{
+				OnDispatch: func(message runstore.SteeringMessage) error {
+					return e.opts.Run.AppendAgentJournal(id, runstore.AgentJournalEntry{
 						Kind: "steer", Message: message.Message,
 					})
+				},
+				OnMessage: func(message runstore.SteeringMessage) {
 					e.emit(runstore.Event{
 						T: "agent_steer", ID: id, Label: label, Profile: prof.Name, Phase: phase,
 						Status: "delivered", Msg: truncate(message.Message, 2000), Preview: truncate(message.Message, 240),

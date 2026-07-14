@@ -50,7 +50,7 @@ func runPi(c *cobra.Command, args []string) error {
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
-	piArgs := append([]string{"--extension", extPath, "--append-system-prompt", piOrchestrationPrompt}, args...)
+	piArgs := append([]string{"--extension", extPath, "--append-system-prompt", piOrchestrationPrompt, "--no-skills"}, args...)
 	cmd := exec.Command(piPath, piArgs...)
 	cmd.Env = setEnv(os.Environ(), runstore.SessionEnv, session)
 	if exe, err := os.Executable(); err == nil {

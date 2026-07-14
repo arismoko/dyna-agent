@@ -87,6 +87,63 @@ esac
 	}
 }
 
+func TestCancellationAfterFinalSteeringPollDoesNotResume(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("DYNA_RUN_ID", "wf_harness-final-steering-cancel")
+	t.Setenv(runstore.AgentJournalRootEnv, "")
+	run, err := runstore.Create("final steering cancellation", "return null", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.Finish("canceled", "", context.Canceled)
+	if _, err := run.StartAgentJournal(1, "pi worker", "pi-test", "Test", "original task"); err != nil {
+		t.Fatal(err)
+	}
+
+	mailbox := filepath.Join(run.Dir, "agents", "1", "steering.jsonl")
+	logPath := installFakeCLI(t, "pi", `#!/bin/sh
+set -eu
+printf 'CALL %s\n' "$*" >> "$DYNA_FAKE_LOG"
+case " $* " in
+  *" --session "*)
+    printf '%s\n' UNEXPECTED_RESUME >> "$DYNA_FAKE_LOG"
+    printf '%s\n' 'unexpected resumed result'
+    ;;
+  *)
+    printf '%s\n' '{"ts":1,"message":"cancel before resume"}' >> "$STEERING_MAILBOX"
+    printf '%s\n' 'original completed result'
+    ;;
+esac
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	var dispatched, delivered []runstore.SteeringMessage
+	result, err := RunWithJournalAndSteering(ctx, profile.Profile{
+		Name: "pi-test", Harness: profile.HarnessPi,
+		Env: map[string]string{"DYNA_FAKE_LOG": logPath, "STEERING_MAILBOX": mailbox},
+	}, "original task", t.TempDir(), true, JournalOptions{}, SteeringOptions{
+		RunID: run.Meta.ID, AgentID: 1, pollEvery: time.Hour,
+		OnDispatch: func(message runstore.SteeringMessage) error {
+			dispatched = append(dispatched, message)
+			cancel()
+			return nil
+		},
+		OnMessage: func(message runstore.SteeringMessage) { delivered = append(delivered, message) },
+	})
+	if err == nil || !strings.Contains(err.Error(), "canceled/timed out") {
+		t.Fatalf("RunWithJournalAndSteering() = %#v, %v; want cancellation", result, err)
+	}
+	if len(dispatched) != 1 || dispatched[0].Message != "cancel before resume" {
+		t.Fatalf("dispatched messages = %#v", dispatched)
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("delivered messages = %#v, want none", delivered)
+	}
+	log := readTestFile(t, logPath)
+	if strings.Count(log, "CALL ") != 1 || strings.Contains(log, "UNEXPECTED_RESUME") {
+		t.Fatalf("cancellation launched a steering continuation:\n%s", log)
+	}
+}
+
 func TestJournalInactivityNudgesExactCodexSession(t *testing.T) {
 	journalPath := createHarnessJournal(t, 1)
 	logPath := installFakeCLI(t, "codex", `#!/bin/sh

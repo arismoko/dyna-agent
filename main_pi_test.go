@@ -61,14 +61,14 @@ func TestPiCmdLaunchesWithExtensionSessionAndArgs(t *testing.T) {
 	cmd := newRootCommand()
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
-	cmd.SetArgs([]string{"pi", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "-c"})
+	cmd.SetArgs([]string{"pi", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "--skill", "user-skill", "-c"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
 
 	args := readNULArgs(t, filepath.Join(capture, "args"))
 	wantExtension := filepath.Join(data, "dyna", "pi-extension", "dyna.ts")
-	wantArgs := []string{"--extension", wantExtension, "--append-system-prompt", piOrchestrationPrompt, "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "-c"}
+	wantArgs := []string{"--extension", wantExtension, "--append-system-prompt", piOrchestrationPrompt, "--no-skills", "--model", "test-model", "--system-prompt", "user prompt", "--append-system-prompt", "user addition", "--skill", "user-skill", "-c"}
 	if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("pi args = %#v, want %#v", args, wantArgs)
 	}

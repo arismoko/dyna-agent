@@ -67,9 +67,14 @@ type JournalOptions struct {
 // SteeringOptions identifies the run-owned mailbox for one worker. It is
 // activated only after the harness has an exact resumable session ID.
 type SteeringOptions struct {
-	RunID     string
-	AgentID   int
+	RunID   string
+	AgentID int
+	// OnDispatch records an accepted message before its exact-session
+	// continuation can start. Returning an error prevents that continuation.
+	OnDispatch func(runstore.SteeringMessage) error
+	// OnMessage confirms delivery only after the continuation process starts.
 	OnMessage func(runstore.SteeringMessage)
+	pollEvery time.Duration
 }
 
 // JournalState keeps the inactivity clock across multiple harness turns that
@@ -198,12 +203,24 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 		if len(messages) == 0 {
 			return nil
 		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("worker %s canceled/timed out before steering continuation: %w", p.Name, err)
+		}
 		sessionID := tracker.idValue()
 		if sessionID == "" || inv.resume == nil {
 			return fmt.Errorf("worker %s received steering but its exact session could not be resumed", p.Name)
 		}
 		if err := prepareResumeOutput(inv.initial.outFile); err != nil {
 			return err
+		}
+		if err := steering.dispatch(messages); err != nil {
+			return fmt.Errorf("record steering dispatch for worker %s: %w", p.Name, err)
+		}
+		// Dispatch callbacks may race with external cancellation. CommandContext
+		// below is the final pre-Start gate, but avoid preparing a continuation
+		// at all when cancellation is already visible here.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("worker %s canceled/timed out before steering continuation: %w", p.Name, err)
 		}
 		if supervisor != nil {
 			supervisor.noteExternalResume()
@@ -221,6 +238,9 @@ func runJournaled(ctx context.Context, p profile.Profile, prompt, cwd string, al
 		messages, err := steering.finish()
 		if err != nil {
 			return false, err
+		}
+		if err := ctx.Err(); err != nil {
+			return false, fmt.Errorf("worker %s canceled/timed out after final steering poll: %w", p.Name, err)
 		}
 		if len(messages) == 0 {
 			return false, nil
@@ -421,7 +441,7 @@ func waitForSessionNudge(ctx context.Context, delay time.Duration) error {
 }
 
 func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpec, tracker *sessionTracker, journal *journalSupervisor, steering *steeringSupervisor, resumable bool) attempt {
-	cmd := exec.Command(spec.argv[0], spec.argv[1:]...)
+	cmd := exec.CommandContext(ctx, spec.argv[0], spec.argv[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = mergeEnv(os.Environ(), p.Env)
 	if spec.stdinPrompt {
@@ -433,9 +453,12 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 	cmd.Stderr = &stderr
 	// Own process group so a timeout/cancel kills the whole worker tree.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return signalProcessGroup(cmd, syscall.SIGTERM)
+	}
 
 	if err := cmd.Start(); err != nil {
-		return finishAttempt(spec, stdout.String(), stderr.String(), err, false, false, false, false, nil, nil)
+		return finishAttempt(spec, stdout.String(), stderr.String(), err, false, ctx.Err() != nil, false, false, nil, nil)
 	}
 	if steering != nil && steering.opts.OnMessage != nil {
 		for _, message := range spec.steering {
@@ -452,6 +475,9 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 	var ticker *time.Ticker
 	if journal != nil || steering != nil {
 		interval := steeringPollInterval
+		if steering != nil && steering.opts.pollEvery > 0 {
+			interval = steering.opts.pollEvery
+		}
 		if journal != nil && journal.pollInterval() < interval {
 			interval = journal.pollInterval()
 		}
@@ -466,10 +492,16 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 			if journal != nil {
 				journal.poll()
 			}
+			if ctx.Err() != nil {
+				return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false, false, nil, nil)
+			}
 			messages := []runstore.SteeringMessage(nil)
 			if steering != nil {
 				_ = steering.activateIfReady(tracker.idValue())
 				steering.poll()
+				if ctx.Err() != nil {
+					return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, true, false, false, nil, nil)
+				}
 				messages = steering.take()
 			}
 			return finishAttempt(spec, stdout.String(), stderr.String(), runErr, true, false, false, false, messages, steering.errValue())
@@ -781,6 +813,18 @@ func (s *steeringSupervisor) take() []runstore.SteeringMessage {
 	messages := append([]runstore.SteeringMessage(nil), s.pending...)
 	s.pending = nil
 	return messages
+}
+
+func (s *steeringSupervisor) dispatch(messages []runstore.SteeringMessage) error {
+	if s == nil || s.opts.OnDispatch == nil {
+		return nil
+	}
+	for _, message := range messages {
+		if err := s.opts.OnDispatch(message); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *steeringSupervisor) errValue() error {

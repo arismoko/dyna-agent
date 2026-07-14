@@ -333,7 +333,9 @@ as or replaces that result.
   400 ms, so entries appear while the worker is still running, not only when
   it finishes.
 
-  The extension bundled by `dyna pi` also registers a model-visible
+  `dyna pi` passes `--no-skills` because its Dyna instructions and extension
+  are supplied directly; explicit pi arguments are still appended unchanged.
+  The bundled extension also registers a model-visible
   `dyna_steer` tool for active workflows owned by that pi session, so the
   parent model can steer a worker without constructing a shell command.
 

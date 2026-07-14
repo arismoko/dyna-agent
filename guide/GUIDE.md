@@ -196,8 +196,9 @@ prompts and results), while each live worker writes progress to
 `agents/<agent-id>/journal.jsonl`; the final workflow value is in
 `result.json`.
 
-`dyna pi` launches pi with direct Dyna instructions and the bundled extension enabled. Every
-workflow started from that invocation is tagged with one session id; use
+`dyna pi` launches pi with direct Dyna instructions and the bundled extension enabled. It
+passes `--no-skills`, so the harness has no runtime skill dependency; explicit pi arguments
+are appended unchanged. Every workflow started from that invocation is tagged with one session id; use
 `/dyna` inside pi to watch only those runs, or `dyna runs list --session <id>`
 to apply the same filter from a shell. Its model-visible `dyna_steer` tool can
 send a short instruction to a running worker from that session. In `dyna tui`,
