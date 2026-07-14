@@ -355,50 +355,203 @@ func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 	}
 }
 
-func TestPiDynaObserverStaticContract(t *testing.T) {
+func TestPiDynaDashboardHandoffStaticContract(t *testing.T) {
 	source := string(piExtensionTS)
 	for _, required := range []string{
-		`type ObserverFocus = "runs" | "agents" | "journal"`,
-		`private selectedRunID = ""`,
-		`private selectedAgentID: number | undefined`,
-		`private journalFollow = true`,
-		`private journalUnseen = 0`,
-		`private refreshQueued = false`,
-		`private selectionGeneration = 0`,
-		`private abortController: AbortController | undefined`,
-		`function safeText(value: unknown, fallback = "")`,
-		`async function readAgentJournal(id: string, agentID: number, offset: number)`,
-		`const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1)`,
-		`if (lastNewline < 0) return { entries: [], next: offset, reset, missing: false }`,
-		`const reset = offset < 0 || offset > stat.size`,
-		`eventGeneration !== this.selectionGeneration`,
-		`journalGeneration !== this.selectionGeneration`,
-		`this.journalUnseen += batch.entries.length`,
-		`this.keys.matches(data, "tui.select.up")`,
-		`this.keys.matches(data, "tui.select.pageDown")`,
-		`this.keys.matches(data, "tui.select.cancel")`,
-		`this.tui.terminal.rows * 0.9`,
-		`safeWidth >= 72`,
-		`wrapTextWithAnsi(entry.message`,
-		`visibleWidth(clipped)`,
-		`map((line) => truncateToWidth(line, safeWidth, ""))`,
-		`this.abortController?.abort()`,
-		`width: "92%", maxHeight: "90%"`,
+		`import { execFile, spawn } from "node:child_process"`,
+		`description: "Open the Dyna dashboard for this Pi session"`,
+		`const session = sessionID(ctx);`,
+		`await ctx.ui.custom<void>`,
+		`tui.stop();`,
+		`process.stdout.write("\x1b[2J\x1b[H");`,
+		`const child = spawn(DYNA, ["tui", "--session", session], {`,
+		`stdio: "inherit"`,
+		`env: process.env`,
+		`child.once("error", (error) => finish(error.message));`,
+		`child.once("close", (code, signal) => {`,
+		`tui.start();`,
+		`tui.requestRender(true);`,
+		`done(undefined);`,
+		`Unable to run Dyna dashboard`,
 	} {
 		if !strings.Contains(source, required) {
-			t.Errorf("Pi Dyna observer contract is missing %q", required)
+			t.Errorf("Pi Dyna dashboard handoff contract is missing %q", required)
 		}
 	}
 	for _, forbidden := range []string{
-		`function journalTail(`,
-		`this.journal.slice(-5)`,
-		`_keys, done`,
-		`width: "80%", maxHeight: "80%"`,
+		`class DynaRunsOverlay`,
+		`type ObserverFocus`,
+		`readAgentJournal`,
+		`width: "92%"`,
+		`@earendil-works/pi-tui`,
+		`spawnSync`,
 	} {
 		if strings.Contains(source, forbidden) {
-			t.Errorf("Pi Dyna observer retains obsolete behavior %q", forbidden)
+			t.Errorf("Pi Dyna dashboard handoff retains obsolete observer behavior %q", forbidden)
 		}
 	}
+}
+
+func TestInstalledPiDynaDashboardHandoffLifecycle(t *testing.T) {
+	piPath, err := exec.LookPath("pi")
+	if err != nil {
+		t.Skip("pi is not installed")
+	}
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	extensionPath, err := provisionPiExtension()
+	if err != nil {
+		t.Fatal(err)
+	}
+	extensionJSON, err := json.Marshal(extensionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runProbe := func(t *testing.T, dynaBin string) (map[string]any, []byte, []byte) {
+		t.Helper()
+		marker := filepath.Join(t.TempDir(), "handoff.json")
+		probePath := filepath.Join(t.TempDir(), "probe.ts")
+		probeSource := `import { writeFile } from "node:fs/promises";
+import dynaExtension from ` + string(extensionJSON) + `;
+
+let command: any;
+dynaExtension({
+	on: () => {},
+	registerTool: () => {},
+	registerCommand: (_name: string, spec: any) => { command = spec; },
+} as any);
+
+export default function (pi: any) {
+	pi.on("input", async () => {
+		const events: string[] = [];
+		const notifications: Array<{ message: string; type: string }> = [];
+		const tui = {
+			stop: () => events.push("stop"),
+			start: () => events.push("start"),
+			requestRender: (full: boolean) => events.push("render:" + full),
+		};
+		const context = {
+			mode: "tui",
+			sessionManager: { getSessionId: () => "fixture-persisted-session" },
+			ui: {
+				notify: (message: string, type: string) => notifications.push({ message, type }),
+				custom: async (factory: any) => await new Promise((resolve, reject) => {
+					try {
+						factory(tui, {}, {}, (result: unknown) => {
+							events.push("done");
+							resolve(result);
+						});
+					} catch (error) {
+						reject(error);
+					}
+				}),
+			},
+		};
+		try {
+			await command.handler("", context);
+			await writeFile(process.env.PI_HANDOFF_MARKER!, JSON.stringify({ ok: true, events, notifications }));
+		} catch (error) {
+			await writeFile(process.env.PI_HANDOFF_MARKER!, JSON.stringify({ ok: false, events, notifications, error: error instanceof Error ? error.message : String(error) }));
+		}
+		return { action: "handled" };
+	});
+}
+`
+		if err := os.WriteFile(probePath, []byte(probeSource), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, piPath,
+			"--offline", "--no-extensions",
+			"--extension", probePath,
+			"--provider", "openai-codex",
+			"--model", "gpt-5.6-terra",
+			"--api-key", "fixture-only",
+			"-p", "exercise dashboard handoff",
+		)
+		cmd.Env = os.Environ()
+		for key, value := range map[string]string{
+			"PI_OFFLINE":          "1",
+			"DYNA_BIN":            dynaBin,
+			"DYNA_PI_CODEX_AUTH":  "0",
+			"PI_HANDOFF_MARKER":   marker,
+			"PI_HANDOFF_SENTINEL": "inherited-environment",
+			"OPENAI_API_KEY":      "",
+			"DYNA_NO_AUTO_UPDATE": "1",
+		} {
+			cmd.Env = setEnv(cmd.Env, key, value)
+		}
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if ctx.Err() != nil {
+			t.Fatalf("offline Pi dashboard handoff timed out: %v", ctx.Err())
+		}
+		if err != nil {
+			t.Fatalf("offline Pi dashboard handoff: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.Bytes(), stderr.Bytes())
+		}
+		var probe map[string]any
+		if err := json.Unmarshal([]byte(readFile(t, marker)), &probe); err != nil {
+			t.Fatal(err)
+		}
+		return probe, stdout.Bytes(), stderr.Bytes()
+	}
+
+	t.Run("success", func(t *testing.T) {
+		fixtureDir := t.TempDir()
+		argsPath := filepath.Join(fixtureDir, "args")
+		envPath := filepath.Join(fixtureDir, "env")
+		fakeDyna := filepath.Join(fixtureDir, "exact-dyna")
+		writeExecutable(t, fakeDyna, `#!/bin/sh
+printf '%s\0' "$@" > "$PI_HANDOFF_ARGS"
+printf '%s\n' "$PI_HANDOFF_SENTINEL" > "$PI_HANDOFF_ENV"
+printf '%s\n' 'handoff-stdout'
+printf '%s\n' 'handoff-stderr' >&2
+`)
+		t.Setenv("PI_HANDOFF_ARGS", argsPath)
+		t.Setenv("PI_HANDOFF_ENV", envPath)
+
+		probe, stdout, stderr := runProbe(t, fakeDyna)
+		if probe["ok"] != true {
+			t.Fatalf("successful handoff probe = %#v", probe)
+		}
+		if got := strings.Join(anyStrings(t, probe["events"]), ","); got != "stop,start,render:true,done" {
+			t.Fatalf("successful handoff lifecycle = %q", got)
+		}
+		if notifications := probe["notifications"].([]any); len(notifications) != 0 {
+			t.Fatalf("successful handoff notifications = %#v", notifications)
+		}
+		if got := readNULArgs(t, argsPath); !slices.Equal(got, []string{"tui", "--session", "fixture-persisted-session"}) {
+			t.Fatalf("dashboard argv = %#v, want session-scoped TUI args", got)
+		}
+		if got := strings.TrimSpace(readFile(t, envPath)); got != "inherited-environment" {
+			t.Fatalf("dashboard environment = %q", got)
+		}
+		if !bytes.Contains(stdout, []byte("handoff-stdout")) || !bytes.Contains(stderr, []byte("handoff-stderr")) {
+			t.Fatalf("dashboard did not inherit streams: stdout=%q stderr=%q", stdout, stderr)
+		}
+	})
+
+	t.Run("spawn failure", func(t *testing.T) {
+		probe, _, _ := runProbe(t, filepath.Join(t.TempDir(), "missing-dyna"))
+		if probe["ok"] != true {
+			t.Fatalf("failed-spawn handoff probe = %#v", probe)
+		}
+		if got := strings.Join(anyStrings(t, probe["events"]), ","); got != "stop,start,render:true,done" {
+			t.Fatalf("failed-spawn handoff lifecycle = %q", got)
+		}
+		notifications := probe["notifications"].([]any)
+		if len(notifications) != 1 {
+			t.Fatalf("failed-spawn handoff notifications = %#v", notifications)
+		}
+		notification := notifications[0].(map[string]any)
+		if notification["type"] != "error" || !strings.Contains(notification["message"].(string), "Unable to run Dyna dashboard") {
+			t.Fatalf("failed-spawn handoff notification = %#v", notification)
+		}
+	})
 }
 
 func TestPiDynaTerminalDeliveryStaticContract(t *testing.T) {
@@ -1407,6 +1560,25 @@ func TestRunsListSessionFilter(t *testing.T) {
 	}
 }
 
+func TestTuiCmdSessionFilterIsOptionalAndValidated(t *testing.T) {
+	cmd := tuiCmd()
+	flag := cmd.Flags().Lookup("session")
+	if flag == nil || flag.DefValue != "" {
+		t.Fatalf("tui session flag = %#v, want optional empty default", flag)
+	}
+
+	cmd.SetArgs([]string{"--session", ""})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "invalid session filter") {
+		t.Fatalf("empty explicit TUI session error = %v", err)
+	}
+
+	cmd = tuiCmd()
+	cmd.SetArgs([]string{"--session", strings.Repeat("s", 129)})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "maximum 128 bytes") {
+		t.Fatalf("oversized TUI session error = %v", err)
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -1424,6 +1596,23 @@ func readLines(t *testing.T, path string) []string {
 func readNULArgs(t *testing.T, path string) []string {
 	t.Helper()
 	return strings.Split(strings.TrimSuffix(readFile(t, path), "\x00"), "\x00")
+}
+
+func anyStrings(t *testing.T, value any) []string {
+	t.Helper()
+	values, ok := value.([]any)
+	if !ok {
+		t.Fatalf("value = %#v, want string array", value)
+	}
+	result := make([]string, len(values))
+	for i, value := range values {
+		text, ok := value.(string)
+		if !ok {
+			t.Fatalf("value[%d] = %#v, want string", i, value)
+		}
+		result[i] = text
+	}
+	return result
 }
 
 func containsArgs(args, want []string) bool {

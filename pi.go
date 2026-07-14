@@ -63,9 +63,10 @@ concurrent callbacks; phase(title), log(message), and sleep(ms) are also global.
 Use dyna_runs to list, show, wait for, or cancel runs belonging to this Pi
 session, and dyna_steer to redirect an active worker in its existing session.
 resume reuses successful calls whose profile, exact prompt, and schema match.
-The CLI is an implementation-detail fallback. In the interactive TUI, type /dyna
-for runs from this Pi session, including runs after resuming the same Pi session;
-dyna tui is the full cross-session dashboard and is never opened automatically.
+The CLI is an implementation-detail fallback. In interactive Pi, type /dyna to
+suspend Pi and open the built-in Dyna dashboard scoped to this persisted Pi
+session. Exiting the dashboard restores and redraws Pi. A direct dyna tui
+invocation remains global unless its optional session filter is supplied.
 
 Dyna gives every worker an append-only agents/<agent-id>/journal.jsonl progress
 side channel. Workers journal after orientation, meaningful findings or
@@ -84,7 +85,7 @@ const (
 func piCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:                "pi [-- pi-args...]",
-		Short:              "Launch pi with dyna workflows wired in (extension, instructions, session-scoped /dyna)",
+		Short:              "Launch pi with dyna workflows wired in (extension, instructions, session-dashboard /dyna)",
 		DisableFlagParsing: true,
 		RunE:               runPi,
 	}

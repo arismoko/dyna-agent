@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"dyna-agent/internal/profile"
+	"dyna-agent/internal/runstore"
 )
 
 type tab int
@@ -37,14 +38,20 @@ type model struct {
 	guide guideModel
 }
 
-// Run starts the dashboard.
-func Run(guideMD string) error {
+// Run starts the dashboard. An empty session keeps the normal global catalog;
+// a non-empty session scopes every workflow read and action to that owner.
+func Run(guideMD, session string) error {
+	if session != "" {
+		if err := runstore.ValidateSessionID(session); err != nil {
+			return err
+		}
+	}
 	store, err := profile.Load(profile.DefaultPath())
 	if err != nil {
 		return err
 	}
 	m := model{
-		runs:  newRunsModel(),
+		runs:  newRunsModel(session),
 		profs: newProfilesModel(store),
 		guide: newGuideModel(guideMD),
 	}

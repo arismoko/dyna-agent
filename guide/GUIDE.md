@@ -446,7 +446,7 @@ dyna runs steer <run-id> <agent-id> "message"
 dyna runs pause <run-id> | dyna runs unpause <run-id>
 dyna runs cancel <run-id>
 dyna runs remove <run-id>... | dyna runs clear
-dyna tui
+dyna tui [--session <id>]
 ```
 
 Foreground `dyna run` streams progress to stderr and prints the workflow result
@@ -481,8 +481,11 @@ path to `dyna_run`. Every `dyna_run` invocation is detached and promptly returns
 its run ID, so `dyna_runs` and `dyna_steer` remain available while it runs. The
 extension invokes the exact Dyna binary without a shell, privately consumes
 bounded workflow input, and rejects show/wait/cancel/resume/steer requests for
-runs outside the persisted Pi session. Type `/dyna` for that session's overlay,
-including after resuming it; `dyna tui` is the full cross-session dashboard.
+runs outside the persisted Pi session. Type `/dyna` to suspend Pi and open the
+built-in `dyna tui` dashboard filtered to that persisted Pi session, including
+every refresh and dashboard action; exiting the dashboard restores and redraws
+Pi. A direct `dyna tui` remains a global cross-session dashboard unless
+`--session <id>` is supplied explicitly.
 
 Pi's bundled `openai-codex/gpt-5.6-terra` metadata already reports the correct
 372K context window. Pi 0.80.7 exposes context usage and manual compaction to

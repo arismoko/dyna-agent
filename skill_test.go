@@ -116,8 +116,9 @@ func TestPiOrchestrationPromptIsCompactAndSelfContained(t *testing.T) {
 		"Use dyna_runs to list, show, wait for, or cancel",
 		"dyna_steer",
 		"type /dyna",
-		"full cross-session dashboard",
-		"never opened automatically",
+		"dashboard scoped to this persisted Pi",
+		"direct dyna tui",
+		"restores and redraws Pi",
 	} {
 		if !strings.Contains(piOrchestrationPrompt, required) {
 			t.Errorf("Pi orchestration prompt is missing %q", required)

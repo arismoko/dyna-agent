@@ -63,7 +63,7 @@ func TestInspectorSteeringInputQueuesSelectedRunningAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := newRunsModel()
+	m := newRunsModel("")
 	m.setSize(120, 30)
 	m.runs = []runstore.Meta{run.Meta}
 	m.catalogLoaded = true
@@ -149,7 +149,7 @@ func TestCatalogRefreshPreservesSelectionByID(t *testing.T) {
 }
 
 func TestInitialCatalogLoadQueuesSelectedRunTail(t *testing.T) {
-	m := newRunsModel()
+	m := newRunsModel("")
 	m.setSize(120, 30)
 	m.refreshing = true // mirrors Run while initialRefresh is in flight
 	cmd := m.applyRefresh(runsRefreshMsg{
@@ -969,6 +969,92 @@ func TestReadRunsRefreshTailsRequestedFile(t *testing.T) {
 	}
 }
 
+func TestSessionScopedRefreshAndActionsRejectOtherRuns(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	t.Setenv("DYNA_RUN_ID", "wf_tui-owned")
+	t.Setenv(runstore.SessionEnv, "pi-session-one")
+	owned, err := runstore.Create("owned", "return 1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned.Append(runstore.Event{T: "log", Msg: "owned detail"})
+	owned.Finish("ok", `"owned"`, nil)
+
+	t.Setenv("DYNA_RUN_ID", "wf_tui-foreign")
+	t.Setenv(runstore.SessionEnv, "pi-session-two")
+	foreign, err := runstore.Create("foreign", "return 2", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign.Append(runstore.Event{T: "log", Msg: "foreign secret"})
+	foreign.Finish("ok", `"foreign secret"`, nil)
+
+	m := newRunsModel("pi-session-one")
+	initial := m.initialRefresh()().(runsRefreshMsg)
+	if !initial.listLoaded || len(initial.runs) != 1 || initial.runs[0].ID != owned.Meta.ID {
+		t.Fatalf("session-scoped initial catalog = %#v", initial.runs)
+	}
+
+	global := readRunsRefresh(runsRefreshRequest{includeList: true})
+	if !global.listLoaded || len(global.runs) != 2 {
+		t.Fatalf("global catalog = %#v, want both runs", global.runs)
+	}
+
+	denied := readRunsRefresh(runsRefreshRequest{
+		session:     "pi-session-one",
+		runID:       foreign.Meta.ID,
+		readEvents:  true,
+		readJournal: true,
+		readResult:  true,
+		includeList: true,
+		generation:  7,
+	})
+	if !denied.runDenied || denied.eventRead || denied.journalRead || denied.resultRead {
+		t.Fatalf("cross-session refresh was not denied before detail reads: %#v", denied)
+	}
+	if len(denied.runs) != 1 || denied.runs[0].ID != owned.Meta.ID {
+		t.Fatalf("cross-session refresh catalog = %#v", denied.runs)
+	}
+	allowed := readRunsRefresh(runsRefreshRequest{
+		session:    "pi-session-one",
+		runID:      owned.Meta.ID,
+		readEvents: true,
+		readResult: true,
+	})
+	if allowed.runDenied || !allowed.eventRead || len(allowed.events) != 1 || allowed.events[0].Msg != "owned detail" || !allowed.resultRead {
+		t.Fatalf("owned detail refresh = %#v", allowed)
+	}
+
+	stale := newRunsModel("pi-session-one")
+	stale.setSize(120, 30)
+	stale.runs = []runstore.Meta{foreign.Meta}
+	stale.catalogLoaded = true
+	stale.resetLoaded(foreign.Meta.ID)
+	stale.applyEvents([]runstore.Event{{T: "log", Msg: "foreign secret"}})
+	denied = readRunsRefresh(runsRefreshRequest{session: stale.session, runID: foreign.Meta.ID, generation: stale.generation, readEvents: true})
+	stale.applyRefresh(denied, false)
+	if len(stale.runs) != 0 || stale.selectedID() != "" || len(stale.logs) != 0 {
+		t.Fatalf("denied selected run remained visible: runs=%#v selected=%q logs=%#v", stale.runs, stale.selectedID(), stale.logs)
+	}
+
+	for _, action := range []runAction{runActionDelete, runActionCancel, runActionPause, runActionUnpause} {
+		if err := applyRunAction("pi-session-one", foreign.Meta.ID, action); err == nil || !strings.Contains(err.Error(), "does not belong") {
+			t.Errorf("cross-session action %d error = %v", action, err)
+		}
+	}
+	steer := submitSteeringCmd("pi-session-one", foreign.Meta.ID, 1, "continue")().(steerResultMsg)
+	if steer.err == nil || !strings.Contains(steer.err.Error(), "does not belong") {
+		t.Fatalf("cross-session steering error = %v", steer.err)
+	}
+	if _, err := runstore.ReadMeta(foreign.Meta.ID); err != nil {
+		t.Fatalf("cross-session actions changed the foreign run: %v", err)
+	}
+	if runstore.IsPaused(foreign.Meta.ID) {
+		t.Fatal("cross-session pause changed the foreign run")
+	}
+}
+
 func TestTicksStopOutsideRunsTab(t *testing.T) {
 	m := model{tab: tabProfiles, runs: testRunsModel()}
 	updated, cmd := m.Update(tickMsg{generation: m.tickGeneration})
@@ -1001,7 +1087,7 @@ func TestVisibleLogsAreBounded(t *testing.T) {
 }
 
 func testRunsModel() runsModel {
-	m := newRunsModel()
+	m := newRunsModel("")
 	m.setSize(120, 30)
 	m.runs = []runstore.Meta{{
 		ID:        "wf_test",

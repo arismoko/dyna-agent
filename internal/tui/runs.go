@@ -18,6 +18,7 @@ import (
 
 type runsModel struct {
 	width, height int
+	session       string
 	runs          []runstore.Meta
 	sel           int
 	result        string
@@ -83,12 +84,13 @@ type runsModel struct {
 	steerAgentID int
 }
 
-func newRunsModel() runsModel {
+func newRunsModel(session string) runsModel {
 	steerInput := textinput.New()
 	steerInput.Prompt = "› "
 	steerInput.Placeholder = "Short instruction for this worker"
 	steerInput.CharLimit = runstore.MaxSteeringMessageBytes
 	return runsModel{
+		session:        session,
 		vp:             viewport.New(0, 0),
 		ivp:            viewport.New(0, 0),
 		follow:         true,
@@ -149,6 +151,7 @@ const runListPolls = 4 // selected data: 400ms; full run catalog: about 2s
 
 type runsRefreshRequest struct {
 	generation         uint64
+	session            string
 	runID              string
 	eventOffset        int64
 	journalOffset      int64
@@ -165,6 +168,7 @@ type runsRefreshRequest struct {
 type runsRefreshMsg struct {
 	generation          uint64
 	runID               string
+	runDenied           bool
 	runs                []runstore.Meta
 	listLoaded          bool
 	paused              map[string]bool
@@ -194,9 +198,47 @@ type steerResultMsg struct {
 	err     error
 }
 
-func submitSteeringCmd(runID string, agentID int, message string) tea.Cmd {
+func submitSteeringCmd(session, runID string, agentID int, message string) tea.Cmd {
 	return func() tea.Msg {
+		if err := authorizeRunSession(runID, session); err != nil {
+			return steerResultMsg{runID: runID, agentID: agentID, err: err}
+		}
 		return steerResultMsg{runID: runID, agentID: agentID, err: runstore.SubmitAgentSteering(runID, agentID, message)}
+	}
+}
+
+func authorizeRunSession(runID, session string) error {
+	if session == "" {
+		return nil
+	}
+	_, err := runstore.RequireSession(runID, session)
+	return err
+}
+
+type runAction int
+
+const (
+	runActionDelete runAction = iota
+	runActionCancel
+	runActionPause
+	runActionUnpause
+)
+
+func applyRunAction(session, runID string, action runAction) error {
+	if err := authorizeRunSession(runID, session); err != nil {
+		return err
+	}
+	switch action {
+	case runActionDelete:
+		return runstore.Remove(runID)
+	case runActionCancel:
+		return runstore.Cancel(runID)
+	case runActionPause:
+		return runstore.SetPaused(runID, true)
+	case runActionUnpause:
+		return runstore.SetPaused(runID, false)
+	default:
+		return fmt.Errorf("unsupported run action")
 	}
 }
 
@@ -211,6 +253,7 @@ func (m *runsModel) applySteerResult(msg steerResultMsg) {
 func (m runsModel) initialRefresh() tea.Cmd {
 	req := runsRefreshRequest{
 		generation:      m.generation,
+		session:         m.session,
 		includeList:     true,
 		pauseGeneration: m.pauseGeneration,
 	}
@@ -232,6 +275,7 @@ func (m *runsModel) requestRefresh(forceList bool) tea.Cmd {
 	}
 	req := runsRefreshRequest{
 		generation:         m.generation,
+		session:            m.session,
 		runID:              m.selectedID(),
 		eventOffset:        m.eventOffset,
 		journalOffset:      m.journalOffset,
@@ -258,13 +302,24 @@ func (m *runsModel) requestRefresh(forceList bool) tea.Cmd {
 func readRunsRefresh(req runsRefreshRequest) runsRefreshMsg {
 	msg := runsRefreshMsg{generation: req.generation, runID: req.runID, pauseGeneration: req.pauseGeneration}
 	if req.includeList {
-		if runs, err := runstore.List(); err == nil {
+		var runs []runstore.Meta
+		var err error
+		if req.session == "" {
+			runs, err = runstore.List()
+		} else {
+			runs, err = runstore.ListSession(req.session)
+		}
+		if err == nil {
 			msg.runs = runs
 			msg.listLoaded = true
 			msg.paused = pausedRuns(runs)
 		}
 	}
 	if req.runID == "" {
+		return msg
+	}
+	if err := authorizeRunSession(req.runID, req.session); err != nil {
+		msg.runDenied = true
 		return msg
 	}
 	if req.readEvents {
@@ -371,6 +426,22 @@ func (m *runsModel) applyRefresh(msg runsRefreshMsg, active bool) tea.Cmd {
 	}
 
 	current := msg.generation == m.generation && msg.runID != "" && msg.runID == m.selectedID()
+	if current && msg.runDenied {
+		deniedIndex := indexRun(m.runs, msg.runID)
+		if deniedIndex >= 0 {
+			m.runs = append(m.runs[:deniedIndex], m.runs[deniedIndex+1:]...)
+			m.sel = clamp(deniedIndex, 0, max(0, len(m.runs)-1))
+		}
+		m.resetLoaded(m.selectedID())
+		m.confirm = ""
+		m.confirmID = ""
+		m.statusMsg = "run is outside this dashboard session"
+		if active {
+			m.refreshQueued = true
+			m.forceList = true
+		}
+		current = false
+	}
 	selectedAgentID := m.selectedAgentID()
 	rosterDirty := false
 	inspectDirty := false
@@ -721,7 +792,7 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 			m.steering = false
 			m.steerInput.Blur()
 			m.statusMsg = "sending steering…"
-			return m, submitSteeringCmd(runID, agentID, message)
+			return m, submitSteeringCmd(m.session, runID, agentID, message)
 		default:
 			var cmd tea.Cmd
 			m.steerInput, cmd = m.steerInput.Update(msg)
@@ -823,11 +894,11 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 			var err error
 			switch m.confirm {
 			case "delete":
-				err = runstore.Remove(id)
+				err = applyRunAction(m.session, id, runActionDelete)
 			case "cancel":
-				err = runstore.Cancel(id)
+				err = applyRunAction(m.session, id, runActionCancel)
 			case "pause":
-				err = runstore.SetPaused(id, true)
+				err = applyRunAction(m.session, id, runActionPause)
 			}
 			if err != nil {
 				m.statusMsg = "✗ " + err.Error()
@@ -884,7 +955,7 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 		if m.sel < len(m.runs) && m.runs[m.sel].Status == "running" {
 			id := m.runs[m.sel].ID
 			if m.paused[id] {
-				if err := runstore.SetPaused(id, false); err != nil {
+				if err := applyRunAction(m.session, id, runActionUnpause); err != nil {
 					m.statusMsg = "✗ " + err.Error()
 				} else {
 					delete(m.paused, id)

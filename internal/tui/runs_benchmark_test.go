@@ -9,7 +9,7 @@ import (
 )
 
 func benchmarkRunsModel(agentCount int) runsModel {
-	m := newRunsModel()
+	m := newRunsModel("")
 	m.setSize(140, 48)
 	m.runs = []runstore.Meta{{
 		ID:        "wf_benchmark",

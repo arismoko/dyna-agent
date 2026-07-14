@@ -70,6 +70,7 @@ const (
 	agentJournalMaxRecordBytes  = 64 * 1024 * 1024
 	agentJournalMaxMessageBytes = 4096
 	agentJournalMaxKindBytes    = 32
+	maxSessionIDBytes           = 128
 	// MaxSteeringMessageBytes keeps interactive steering deliberately short and
 	// bounds the prompt injected into an already-running worker session.
 	MaxSteeringMessageBytes = 2000
@@ -837,6 +838,60 @@ func List() ([]Meta, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
 	return out, nil
+}
+
+// ValidateSessionID applies the persisted-session contract used by scoped
+// clients before a session value reaches a run catalog or action boundary.
+func ValidateSessionID(session string) error {
+	if session == "" {
+		return fmt.Errorf("session id must not be empty")
+	}
+	if !utf8.ValidString(session) {
+		return fmt.Errorf("session id must be valid UTF-8")
+	}
+	if strings.ContainsRune(session, '\x00') {
+		return fmt.Errorf("session id must not contain NUL")
+	}
+	if len(session) > maxSessionIDBytes {
+		return fmt.Errorf("session id is too long (maximum %d bytes)", maxSessionIDBytes)
+	}
+	return nil
+}
+
+// ListSession returns only runs owned by session, newest first.
+func ListSession(session string) ([]Meta, error) {
+	if err := ValidateSessionID(session); err != nil {
+		return nil, err
+	}
+	runs, err := List()
+	if err != nil {
+		return nil, err
+	}
+	owned := runs[:0]
+	for _, run := range runs {
+		if run.Session == session {
+			owned = append(owned, run)
+		}
+	}
+	return owned, nil
+}
+
+// RequireSession authorizes one run for a session-scoped read or action.
+func RequireSession(id, session string) (Meta, error) {
+	if err := validateRunID(id); err != nil {
+		return Meta{}, err
+	}
+	if err := ValidateSessionID(session); err != nil {
+		return Meta{}, err
+	}
+	meta, err := ReadMeta(id)
+	if err != nil {
+		return Meta{}, err
+	}
+	if meta.Session != session {
+		return Meta{}, fmt.Errorf("run %s does not belong to this session", id)
+	}
+	return meta, nil
 }
 
 // ReadEvents parses events.jsonl for a run.

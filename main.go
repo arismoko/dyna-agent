@@ -850,14 +850,22 @@ func guideCmd() *cobra.Command {
 }
 
 func tuiCmd() *cobra.Command {
-	return &cobra.Command{
+	var session string
+	cmd := &cobra.Command{
 		Use:   "tui",
 		Short: "Open the dashboard: configure profiles, watch workflows live",
 		RunE: func(c *cobra.Command, _ []string) error {
+			if c.Flags().Changed("session") {
+				if err := runstore.ValidateSessionID(session); err != nil {
+					return fmt.Errorf("invalid session filter: %w", err)
+				}
+			}
 			maybeAutoUpdateForTUI(c)
-			return tui.Run(guideMD)
+			return tui.Run(guideMD, session)
 		},
 	}
+	cmd.Flags().StringVar(&session, "session", "", "only view and manage runs owned by this session")
+	return cmd
 }
 
 func maybeAutoUpdateForTUI(c *cobra.Command) {
