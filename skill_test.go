@@ -76,6 +76,7 @@ func TestSkillFrontmatterDrivesExplicitDiscovery(t *testing.T) {
 			"user explicitly requests Dyna",
 			"agent fan-out",
 			"parallel review, audits, judge panels, adversarial verification, or isolated migrations",
+			"when an invoked skill or instruction requires it",
 			"do not infer that scale merely because it could help",
 			"ordinary subagents for small context-local delegation",
 			"describe the proposed fleet and ask",

@@ -57,7 +57,7 @@ journal entry.
 
 const skillBody = agentFacingGuidance
 
-const skillDescription = "Load Dyna orchestration when the user explicitly requests Dyna, a workflow, agent fan-out, or multi-model orchestration such as parallel review, audits, judge panels, adversarial verification, or isolated migrations; do not infer that scale merely because it could help, and use ordinary subagents for small context-local delegation or describe the proposed fleet and ask."
+const skillDescription = "Load Dyna orchestration when the user explicitly requests Dyna, a workflow, agent fan-out, or multi-model orchestration such as parallel review, audits, judge panels, adversarial verification, or isolated migrations, or when an invoked skill or instruction requires it; do not infer that scale merely because it could help, and use ordinary subagents for small context-local delegation or describe the proposed fleet and ask."
 
 const skillFrontmatter = "---\nname: load-dyna-orchestrator\ndescription: " + skillDescription + "\n---\n\n"
 
