@@ -20,6 +20,7 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 		"dyna guide",
 		"export const meta",
 		"agent(prompt, opts)",
+		"workflow(nameOrRef, args)",
 		"profile`, `label`, `phase`, `schema`, `cwd`, `timeout`",
 		"isolation: 'worktree'",
 		"at most\n   three attempts",
@@ -62,8 +63,8 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 
 func TestAgentFacingDocsExcludeUnsupportedWorkflowConcepts(t *testing.T) {
 	forbidden := []string{
-		"ultracode", "<task-notification>", "/workflows", "StructuredOutput",
-		"workflow(name", "budget.remaining", "Date.now", "Math.random",
+		"ultracode", "<task-notification>", "StructuredOutput",
+		"budget.remaining", "Date.now", "Math.random",
 		"agentType", "opts.effort", "saved workflow", "nested workflow",
 		"4096 items",
 	}

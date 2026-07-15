@@ -61,14 +61,19 @@ review, adversarial verification, judge panels, and isolated migrations.
    override profile timeouts, and all explicit/profile values have a
    30-minute minimum. Worktree isolation starts from repository ` + "`HEAD`" + `,
    removes a clean tree, and keeps/logs a changed tree; Dyna does not merge it.
-4. ` + "`parallel(thunks)`" + ` is an all-results barrier. Rejected thunks are logged
+4. ` + "`workflow(nameOrRef, args)`" + ` composes one child workflow by existing path or
+   by name from ` + "`--workflows-dir`" + `, then ` + "`examples/`" + `. Child agents share the
+   parent run's concurrency semaphore, lifetime agent counter, and profile
+   limits. Nesting stops after one child level. Nested scripts always execute
+   during resume, while their matching agent calls use the parent cache.
+5. ` + "`parallel(thunks)`" + ` is an all-results barrier. Rejected thunks are logged
    and become ` + "`null`" + `. ` + "`pipeline(items, ...stages)`" + ` streams each item through
    its stages independently; a throwing stage makes that item ` + "`null`" + ` and skips
    its remaining stages. Prefer pipeline unless a later step truly needs all
    earlier results together. Use explicit ` + "`phase`" + ` options inside concurrent
    callbacks. ` + "`phase(title)`" + ` groups progress, ` + "`log(message)`" + ` reports it, and
    ` + "`sleep(ms)`" + ` paces polling.
-5. Run ` + "`dyna run workflow.js --args '{...}'`" + `. Progress goes to stderr and
+6. Run ` + "`dyna run workflow.js --args '{...}'`" + `. Progress goes to stderr and
    the returned JSON goes to stdout. ` + "`--detach`" + ` prints a run id immediately;
    collect it with ` + "`dyna runs wait <id>`" + `. ` + "`--resume <id>`" + ` reuses successful
    calls matching profile, prompt, and schema; failures and kept changed

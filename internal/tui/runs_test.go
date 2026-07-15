@@ -47,6 +47,33 @@ func TestApplyEventsIncrementallyMatchesOneShot(t *testing.T) {
 	}
 }
 
+func TestNestedWorkflowRendersAsChildGroup(t *testing.T) {
+	m := testRunsModel()
+	m.applyEvents([]runstore.Event{
+		{T: "phase", Title: "Parent"},
+		{T: "workflow_start", Workflow: "nested-1", Title: "child", Phase: "Parent", Ref: "/tmp/child.js"},
+		{T: "phase", Workflow: "nested-1", Title: "Inspect"},
+		{T: "agent_start", Workflow: "nested-1", ID: 1, Label: "nested-agent", Profile: "smart", Phase: "Inspect"},
+		{T: "agent_run", Workflow: "nested-1", ID: 1},
+		{T: "agent_end", Workflow: "nested-1", ID: 1, Status: "ok"},
+		{T: "workflow_end", Workflow: "nested-1", Title: "child", Phase: "Parent", Status: "ok"},
+	})
+
+	body := m.renderDetailBody()
+	for _, want := range []string{"Parent", "workflow child", "├ Inspect", "nested-agent"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("nested workflow body does not contain %q:\n%s", want, body)
+		}
+	}
+	if m.phaseByName["Inspect"] != nil {
+		t.Fatalf("child phase leaked into the top-level phase tree: %#v", m.phases)
+	}
+	workflow := m.workflows["nested-1"]
+	if workflow == nil || workflow.status != "ok" || len(workflow.phases) != 1 || workflow.phases[0].done != 1 {
+		t.Fatalf("nested workflow state = %#v", workflow)
+	}
+}
+
 func TestInspectorSteeringInputQueuesSelectedRunningAgent(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("DYNA_RUN_ID", "wf_tui-steering")

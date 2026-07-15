@@ -23,35 +23,54 @@ import (
 
 // Event is one line in events.jsonl.
 type Event struct {
-	T       string `json:"t"`  // run_start|phase|agent_start|agent_run|agent_journal|agent_nudge|agent_steer|agent_end|log|run_end
-	TS      int64  `json:"ts"` // unix millis
-	Title   string `json:"title,omitempty"`
-	ID      int    `json:"id,omitempty"`
-	Label   string `json:"label,omitempty"`
-	Profile string `json:"profile,omitempty"`
-	Phase   string `json:"phase,omitempty"`
-	Msg     string `json:"msg,omitempty"`
-	Kind    string `json:"kind,omitempty"`
-	Status  string `json:"status,omitempty"` // agent_end/run_end status, or sent|unavailable|ignored for agent_nudge
-	DurMs   int64  `json:"durMs,omitempty"`
-	Preview string `json:"preview,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Cached  bool   `json:"cached,omitempty"` // satisfied from a resumed run's journal
-	Dir     string `json:"dir,omitempty"`    // kept worktree path, when isolated
+	T        string `json:"t"`  // run_start|workflow_start|phase|agent_start|agent_run|agent_journal|agent_nudge|agent_steer|agent_end|log|workflow_end|run_end
+	TS       int64  `json:"ts"` // unix millis
+	Title    string `json:"title,omitempty"`
+	ID       int    `json:"id,omitempty"`
+	Label    string `json:"label,omitempty"`
+	Profile  string `json:"profile,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+	Msg      string `json:"msg,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Status   string `json:"status,omitempty"` // agent_end/run_end status, or sent|unavailable|ignored for agent_nudge
+	DurMs    int64  `json:"durMs,omitempty"`
+	Preview  string `json:"preview,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Cached   bool   `json:"cached,omitempty"`   // satisfied from a resumed run's journal
+	Dir      string `json:"dir,omitempty"`      // kept worktree path, when isolated
+	Workflow string `json:"workflow,omitempty"` // nested workflow id
+	Parent   string `json:"parent,omitempty"`   // parent run id for workflow_start
+	Ref      string `json:"ref,omitempty"`      // resolved nested workflow script path
 }
 
 // JournalEntry is one line in journal.jsonl: the full record of one agent
 // call, also used as the cache source for --resume.
 type JournalEntry struct {
-	ID      int    `json:"id"`
-	Label   string `json:"label"`
-	Profile string `json:"profile"`
-	Key     string `json:"key"` // hash of (profile, prompt, schema) for resume matching
-	Prompt  string `json:"prompt"`
-	Result  any    `json:"result"`
-	Error   string `json:"error,omitempty"`
-	Cached  bool   `json:"cached,omitempty"`
-	Dir     string `json:"dir,omitempty"`
+	ID       int    `json:"id"`
+	Label    string `json:"label"`
+	Profile  string `json:"profile"`
+	Key      string `json:"key"` // hash of (profile, prompt, schema) for resume matching
+	Prompt   string `json:"prompt"`
+	Result   any    `json:"result"`
+	Error    string `json:"error,omitempty"`
+	Cached   bool   `json:"cached,omitempty"`
+	Dir      string `json:"dir,omitempty"`
+	Workflow string `json:"workflow,omitempty"`
+}
+
+// WorkflowMeta describes one nested workflow persisted below its parent run.
+// Nested workflows are sub-runs rather than entries in the top-level catalog.
+type WorkflowMeta struct {
+	ID        string    `json:"id"`
+	Parent    string    `json:"parent"`
+	Name      string    `json:"name"`
+	Ref       string    `json:"ref"`
+	Phase     string    `json:"phase,omitempty"`
+	Status    string    `json:"status"`
+	Args      any       `json:"args,omitempty"`
+	StartedAt time.Time `json:"startedAt"`
+	EndedAt   time.Time `json:"endedAt,omitempty"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // AgentJournalEnv is injected into a worker process with the absolute path of
@@ -203,6 +222,9 @@ func (r *Run) Append(e Event) {
 		r.events.Write(append(b, '\n'))
 		r.events.Sync()
 	}
+	if e.Workflow != "" {
+		_ = appendJSONLine(filepath.Join(r.workflowDir(e.Workflow), "events.jsonl"), b)
+	}
 }
 
 // Journal records the full prompt/result of one agent call.
@@ -214,6 +236,104 @@ func (r *Run) Journal(e JournalEntry) {
 		r.journ.Write(append(b, '\n'))
 		r.journ.Sync()
 	}
+	if e.Workflow != "" {
+		_ = appendJSONLine(filepath.Join(r.workflowDir(e.Workflow), "journal.jsonl"), b)
+	}
+}
+
+func (r *Run) workflowDir(id string) string {
+	return filepath.Join(r.Dir, "workflows", id)
+}
+
+func validateWorkflowID(id string) error {
+	if !strings.HasPrefix(id, "nested-") || len(id) == len("nested-") {
+		return fmt.Errorf("invalid nested workflow id %q", id)
+	}
+	for _, c := range id[len("nested-"):] {
+		if c < '0' || c > '9' {
+			return fmt.Errorf("invalid nested workflow id %q", id)
+		}
+	}
+	return nil
+}
+
+// StartWorkflow creates the child artifact directory. Its event and completion
+// ledgers are mirrors of the annotated records in the parent run.
+func (r *Run) StartWorkflow(id, name, ref, script string, args any, phase string) error {
+	if r == nil || r.Dir == "" {
+		return fmt.Errorf("run has no directory")
+	}
+	if err := validateWorkflowID(id); err != nil {
+		return err
+	}
+	dir := r.workflowDir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create nested workflow directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "script.js"), []byte(script), 0o644); err != nil {
+		return err
+	}
+	for _, file := range []string{"events.jsonl", "journal.jsonl"} {
+		f, err := os.OpenFile(filepath.Join(dir, file), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+	}
+	meta := WorkflowMeta{
+		ID: id, Parent: r.Meta.ID, Name: name, Ref: ref, Phase: phase,
+		Status: "running", Args: args, StartedAt: time.Now(),
+	}
+	return writeWorkflowMeta(dir, meta)
+}
+
+// FinishWorkflow writes the nested result and terminal metadata.
+func (r *Run) FinishWorkflow(id, status, resultJSON string, runErr error) error {
+	if err := validateWorkflowID(id); err != nil {
+		return err
+	}
+	dir := r.workflowDir(id)
+	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		return err
+	}
+	var meta WorkflowMeta
+	if err := json.Unmarshal(b, &meta); err != nil {
+		return err
+	}
+	meta.Status = status
+	meta.EndedAt = time.Now()
+	if runErr != nil {
+		meta.Error = runErr.Error()
+	}
+	if resultJSON != "" {
+		if err := os.WriteFile(filepath.Join(dir, "result.json"), []byte(resultJSON+"\n"), 0o644); err != nil {
+			return err
+		}
+	}
+	return writeWorkflowMeta(dir, meta)
+}
+
+func writeWorkflowMeta(dir string, meta WorkflowMeta) error {
+	b, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "meta.json"), append(b, '\n'), 0o644)
+}
+
+func appendJSONLine(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 // AgentJournalPath returns the canonical absolute journal path for an agent in
