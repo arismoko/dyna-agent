@@ -40,8 +40,14 @@ review, adversarial verification, judge panels, and isolated migrations.
 ## Compact contract
 
 1. Run ` + "`dyna profiles list --json`" + ` and route by the 1-10 stats: high
-   ` + "`cost`" + ` means cheap enough for breadth, ` + "`intelligence`" + ` fits hard implementation,
-   and ` + "`taste`" + ` fits review, judging, and synthesis. Disabled profiles are
+   ` + "`cost`" + ` means cheap enough for breadth — a high cost stat is not a
+   capability warning, so breadth stages (finders, sweeps, triage) default to
+   the cheapest capable profile. ` + "`intelligence`" + ` fits hard implementation,
+   and ` + "`taste`" + ` — judgment, design sensibility, quality over quantity — fits
+   review, judging, synthesis, and frontend/design work. Never route bulk
+   implementation to a taste-max profile; it writes code only for
+   quality-critical surfaces or targeted remediation of confirmed findings.
+   Disabled profiles are
    absent. Respect ` + "`maxConcurrent`" + ` and ` + "`maxCallsPerRun`" + `; exceeding a call
    cap aborts the run.
 2. Read ` + "`dyna guide`" + `, then write a plain ` + "`.js`" + ` file. Scripts allow top-level
@@ -67,6 +73,25 @@ review, adversarial verification, judge panels, and isolated migrations.
    collect it with ` + "`dyna runs wait <id>`" + `. ` + "`--resume <id>`" + ` reuses successful
    calls matching profile, prompt, and schema; failures and kept changed
    worktrees rerun. Inspect with ` + "`dyna runs show <id> --json`" + ` or ` + "`dyna tui`" + `.
+
+## Workflow shape
+
+Shape follows dependencies, not caution: an authorized run's cost is its
+number of ` + "`agent()`" + ` calls, not their arrangement, so serializing independent
+calls saves nothing and only wastes wall-clock. Scout until the concrete work
+items exist, then make the script's top level ` + "`pipeline(workList, ...stages)`" + `.
+Two consecutive ` + "`await agent()`" + ` calls are justified only when the second
+prompt interpolates the first result; reserve ` + "`parallel()`" + ` barriers for
+stages that need all prior results together (dedup, cross-candidate judging,
+zero-count early exit). For implementation, partitioning is the orchestrator's
+job: split the change into disjoint scopes so no two writers touch the same
+files, then fan out one implementer per partition with worktree isolation and
+stream each partition into its own review/verify stage. Parallel
+implementation over a clean partition is the expected shape, not an elevated
+risk. A full remediation run chains the routes end to end: cheap finders
+sweep in parallel, taste verifiers confirm each finding, intelligence
+implementers fix confirmed findings in disjoint worktrees, taste reviewers
+judge each diff, and implementers apply the touch-ups.
 
 Uncaught ` + "`agent()`" + ` errors fail the workflow; only ` + "`parallel`" + `/` + "`pipeline`" + ` convert
 their contained failures to ` + "`null`" + `. Filter and account for those values rather

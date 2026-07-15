@@ -358,7 +358,7 @@ func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 func TestPiDynaObserverStaticContract(t *testing.T) {
 	source := string(piExtensionTS)
 	for _, required := range []string{
-		`type ObserverFocus = "runs" | "agents" | "journal"`,
+		`type ObserverFocus = "runs" | "detail" | "agents" | "journal"`,
 		`private selectedRunID = ""`,
 		`private selectedAgentID: number | undefined`,
 		`private journalFollow = true`,
@@ -366,10 +366,16 @@ func TestPiDynaObserverStaticContract(t *testing.T) {
 		`private refreshQueued = false`,
 		`private selectionGeneration = 0`,
 		`private abortController: AbortController | undefined`,
+		`private journalAnchorEntry: AgentJournalEntry | undefined`,
 		`function safeText(value: unknown, fallback = "")`,
-		`async function readAgentJournal(id: string, agentID: number, offset: number)`,
-		`const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1)`,
-		`if (lastNewline < 0) return { entries: [], next: offset, reset, missing: false }`,
+		`async function readAgentJournal(id: string, agentID: number, offset: number, discardOffset?: number, signal?: AbortSignal)`,
+		`signal?.throwIfAborted()`,
+		`const MAX_JOURNAL_RECORD = 64 * 1024 * 1024`,
+		`if (recordBytes >= MAX_JOURNAL_RECORD) discarding = true`,
+		`if (recordBytes > MAX_JOURNAL_RECORD) discarding = true`,
+		`discard: !foundNewline && discarding ? scanOffset : undefined`,
+		`maximum ${MAX_JOURNAL_RECORD} bytes including newline`,
+		`const buffer = Buffer.allocUnsafe(length)`,
 		`const reset = offset < 0 || offset > stat.size`,
 		`eventGeneration !== this.selectionGeneration`,
 		`journalGeneration !== this.selectionGeneration`,
@@ -377,15 +383,43 @@ func TestPiDynaObserverStaticContract(t *testing.T) {
 		`this.keys.matches(data, "tui.select.up")`,
 		`this.keys.matches(data, "tui.select.pageDown")`,
 		`this.keys.matches(data, "tui.select.cancel")`,
-		`this.tui.terminal.rows * 0.9`,
-		`safeWidth >= 72`,
+		`this.keys.matches(data, "tui.input.tab")`,
+		`class DynaRunsView implements Component`,
+		`const PI_SPACER_ROWS = 1`,
+		`const PI_STOCK_FOOTER_ROWS = 3`,
+		`terminalRows - PI_SPACER_ROWS - PI_STOCK_FOOTER_ROWS`,
+		`safeWidth >= 88`,
+		`private framePane(`,
+		`"Agent journals"`,
+		`"Run detail"`,
+		`"Agent detail"`,
+		`private runDetailScroll = 0`,
+		`private scrollRunDetail(delta: number)`,
+		`private renderRunDetailBody(width: number)`,
+		`this.runDetailScroll = Math.max(0, Math.min(maxScroll, this.runDetailScroll))`,
+		`this.detail.events.filter((event) => event.t === "log" && event.msg)`,
+		`wrapped.push(...wrapTextWithAnsi(line, Math.max(1, width)))`,
+		`line.text === this.journalAnchorText`,
+		`this.journalScroll = anchored >= 0 ? anchored : 0`,
+		`private allocatedEditorRows(width: number, terminalRows: number)`,
+		`componentContains(child as Component, this)`,
+		`component.render(width).length`,
+		`this.theme.bg("selectedBg"`,
+		`this.cancelPendingRunID = run.id`,
+		`await requireSessionRun(id, this.session, controller.signal)`,
+		`runDyna(["runs", "cancel", id]`,
 		`wrapTextWithAnsi(entry.message`,
 		`visibleWidth(clipped)`,
 		`map((line) => truncateToWidth(line, safeWidth, ""))`,
 		`this.abortController?.abort()`,
+		`this.actionAbortController?.abort()`,
+		`function closeActiveView(): void`,
+		`pi.on("session_shutdown", () => {`,
+		`closeActiveView();`,
+		`if (this.disposed) return []`,
 		`const session = sessionID(ctx);`,
-		`new DynaRunsOverlay(tui, theme, keys, session`,
-		`width: "92%", maxHeight: "90%"`,
+		`new DynaRunsView(tui, theme, keys, session`,
+		`{ overlay: false }`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("Pi Dyna observer contract is missing %q", required)
@@ -399,10 +433,23 @@ func TestPiDynaObserverStaticContract(t *testing.T) {
 		`tui.stop();`,
 		`spawn(DYNA, ["tui"`,
 		`dashboardActive`,
+		`class DynaRunsOverlay`,
+		`overlayOptions:`,
+		`overlay: true`,
+		`(this.tui.terminal.rows || 24) - 2`,
+		`.filter((event) => event.t === "log" && event.msg).slice(-3)`,
+		`matchesKey(data, "tab")`,
+		`Buffer.concat(chunks`,
+		`return lines.map((line) => truncateToWidth(line, width, "…"))`,
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("Pi Dyna observer retains obsolete behavior %q", forbidden)
 		}
+	}
+	confirmation := strings.Index(source, `if (this.cancelPendingRunID) {`)
+	globalClose := strings.Index(source, `if (matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {`)
+	if confirmation < 0 || globalClose < 0 || confirmation > globalClose {
+		t.Errorf("cancellation confirmation must consume confirmation or decline before global close keys")
 	}
 }
 
@@ -443,6 +490,8 @@ func TestInstalledPiDeliversDetachedTerminalUpdates(t *testing.T) {
 	runCount := filepath.Join(fixtureDir, "run-count")
 	statusFile := filepath.Join(fixtureDir, "status")
 	launchSession := filepath.Join(fixtureDir, "launch-session")
+	listCount := filepath.Join(fixtureDir, "list-count")
+	cancelStarted := filepath.Join(fixtureDir, "cancel-started")
 	writeExecutable(t, fakeDyna, `#!/bin/sh
 case "$1:$2" in
 	run:*)
@@ -454,9 +503,16 @@ case "$1:$2" in
 		printf 'wf_fixture_%s\n' "$count"
 		;;
 	runs:list)
+		list_count=0
+		if [ -f "$PI_LIST_COUNT" ]; then list_count=$(cat "$PI_LIST_COUNT"); fi
+		printf '%s\n' $((list_count + 1)) > "$PI_LIST_COUNT"
 		count=$(cat "$PI_RUN_COUNT")
 		status=$(cat "$PI_STATUS_FILE")
 		printf '[{"id":"wf_fixture_%s","name":"fixture","status":"%s","session":"fixture-session","startedAt":"2026-07-14T00:00:00Z"}]\n' "$count" "$status"
+		;;
+	runs:cancel)
+		printf 'started\n' > "$PI_CANCEL_STARTED"
+		exec sleep 30
 		;;
 	*)
 		printf 'unexpected fixture invocation: %s\n' "$*" >&2
@@ -464,6 +520,27 @@ case "$1:$2" in
 		;;
 esac
 `)
+	dataHome := filepath.Join(fixtureDir, "data")
+	runDir := filepath.Join(dataHome, "dyna", "runs", "wf_fixture_1")
+	if err := os.MkdirAll(filepath.Join(runDir, "agents", "1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "events.jsonl"), []byte("{\"t\":\"agent_start\",\"id\":1,\"label\":\"worker\",\"profile\":\"fixture\",\"phase\":\"test\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(runDir, "agents", "1", "journal.jsonl")
+	journalFile, err := os.OpenFile(journalPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const journalRecordLimit = 64 * 1024 * 1024
+	writeSizedJournalRecord(t, journalFile, journalRecordLimit,
+		`{"ts":1,"kind":"update","message":"exact-limit","padding":"`, `","source":"agent"}`+"\n")
+	writeSizedJournalRecord(t, journalFile, journalRecordLimit+1,
+		`{"ts":2,"kind":"update","message":"must-skip","padding":"`, "")
+	if err := journalFile.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	marker := filepath.Join(fixtureDir, "updates.json")
 	extensionJSON, err := json.Marshal(extensionPath)
@@ -471,7 +548,7 @@ esac
 		t.Fatal(err)
 	}
 	probePath := filepath.Join(fixtureDir, "probe.ts")
-	probeSource := `import { writeFile } from "node:fs/promises";
+	probeSource := `import { access, appendFile, stat, writeFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import dynaExtension from ` + string(extensionJSON) + `;
 
@@ -502,6 +579,20 @@ export default function (pi: any) {
 		let overlay: any;
 		let rendererStops = 0;
 		let dashboardRendered = false;
+		let layoutSafe = false;
+		let extensionLayoutSafe = false;
+		let tinyHeaderVisible = false;
+		let remappedTab = false;
+		let largeJournalRead = false;
+		let oversizedCursorAdvanced = false;
+		let detailWrapped = false;
+		let journalAnchored = false;
+		let evictedAnchorReset = false;
+		let reflowedAnchorReset = false;
+		let replacementClosed = false;
+		let confirmationDeclined = false;
+		let cancelWorkStarted = false;
+		let shutdownDisposed = false;
 		let whileStreaming: { messages: number; notifications: number } | undefined;
 		let afterSettledWhileStreaming: { messages: number; notifications: number } | undefined;
 		let whileDashboard: { messages: number; notifications: number } | undefined;
@@ -513,22 +604,32 @@ export default function (pi: any) {
 			};
 			const theme = {
 				fg: (_color: string, text: string) => text,
+				bg: (_color: string, text: string) => text,
 				bold: (text: string) => text,
 			};
-			const keys = { matches: () => false };
+			const keys = { matches: (data: string, action: string) => data === "remapped-tab" && action === "tui.input.tab" };
 			const context = {
 				mode: "tui",
 				isIdle: () => idle,
 				sessionManager: { getSessionId: () => "fixture-session" },
 				ui: {
 					notify: (message: string, type: string) => notifications.push({ message, type }),
+					setStatus: () => {},
 					custom: async (factory: any, options: any) => await new Promise((resolve) => {
 						overlay = factory(tui, theme, keys, (result: unknown) => {
 							dashboardOpen = false;
 							resolve(result);
 						});
 						dashboardOpen = true;
-						dashboardRendered = options?.overlay === true && Array.isArray(overlay.render(100));
+						(tui as any).children = [
+							{ render: () => ["above-widget-1", "above-widget-2"] },
+							{ children: [overlay], render: (width: number) => overlay.render(width) },
+							{ render: () => ["below-widget"] },
+							{ render: () => ["custom-footer-1", "custom-footer-2", "custom-footer-3", "custom-footer-4", "custom-footer-5"] },
+						];
+						const rendered = overlay.render(100);
+						const screen = Array.isArray(rendered) ? rendered.join("\n") : "";
+						dashboardRendered = options?.overlay === false && screen.includes("⬡ dyna") && screen.includes("╭") && screen.includes("Run detail");
 					}),
 				},
 			};
@@ -554,20 +655,115 @@ export default function (pi: any) {
 					await settled({}, context);
 					await waitForUpdates(expectedUpdates);
 					whileDashboard = { messages: messages.length, notifications: notifications.length };
-					overlay.handleInput("q");
+					for (let attempt = 0; attempt < 300 && !(overlay.journal.length === 1 && overlay.journalDiscardOffset !== undefined); attempt++) await sleep(20);
+					const partialStat = await stat(process.env.PI_JOURNAL_PATH!);
+					oversizedCursorAdvanced = overlay.journal.length === 1 &&
+						overlay.journal[0]?.message === "exact-limit" &&
+						overlay.journalDiscardOffset === partialStat.size &&
+							overlay.journalOffset === 64 * 1024 * 1024 &&
+						overlay.journalError.includes("discarding oversized journal record");
+					await appendFile(process.env.PI_JOURNAL_PATH!, '","source":"agent"}\n{"ts":3,"kind":"verification","message":"after-oversized","source":"agent"}\n');
+					for (let attempt = 0; attempt < 300 && overlay.journal.length !== 2; attempt++) await sleep(20);
+					const journalStat = await stat(process.env.PI_JOURNAL_PATH!);
+					largeJournalRead = overlay.journal.length === 2 &&
+						overlay.journal[0]?.message === "exact-limit" &&
+						overlay.journal[1]?.message === "after-oversized" &&
+						!overlay.journal.some((entry: any) => entry.message === "must-skip") &&
+						overlay.journalOffset === journalStat.size &&
+						overlay.journalError.includes("skipped 1 oversized journal record") &&
+						overlay.journalDiscardOffset === undefined;
+					const normal = overlay.render(100);
+					layoutSafe = normal.length === 32 && normal[0]?.includes("⬡ dyna");
+					extensionLayoutSafe = normal.length === 40 - 2 - 1 - 5;
+					tui.terminal.rows = 3;
+					const tiny = overlay.render(100);
+					tinyHeaderVisible = tiny.length === 1 && tiny[0]?.includes("⬡ dyna");
+					tui.terminal.rows = 40;
+					overlay.handleInput("remapped-tab");
+					remappedTab = overlay.focus === "detail";
+					const worker = overlay.detail.agents[0];
+					worker.status = "error";
+					worker.error = "error-" + "e".repeat(80) + "-error-tail";
+					overlay.detail.events.push({ t: "log", msg: "log-" + "l".repeat(80) + "-log-tail" });
+					const detailLines = overlay.renderRunDetailBody(24);
+					const detailText = detailLines.join("");
+					detailWrapped = detailLines.length > 10 && detailText.includes("-error-tail") && detailText.includes("-log-tail") && !detailText.includes("…");
+					overlay.journal = Array.from({ length: 2000 }, (_, index) => ({
+						ts: index + 1, kind: "update", message: "entry-" + index, next: "", source: "agent", phase: "", malformed: false,
+					}));
+					overlay.journalLoaded = true;
+					overlay.journalFollow = false;
+					overlay.journalScroll = 500;
+					overlay.renderJournalDetailContent(60, 18);
+					const anchor = overlay.journalAnchorEntry;
+					overlay.applyJournalRead({ entries: Array.from({ length: 10 }, (_, index) => ({
+						ts: 3000 + index, kind: "update", message: "new-" + index, next: "", source: "agent", phase: "", malformed: false,
+					})), next: overlay.journalOffset + 10, reset: false, missing: false });
+					overlay.renderJournalDetailContent(60, 18);
+					journalAnchored = anchor !== undefined && overlay.journalAnchorEntry === anchor;
+					overlay.journal = Array.from({ length: 2000 }, (_, index) => ({
+						ts: index + 1, kind: "update", message: "evict-" + index, next: "", source: "agent", phase: "", malformed: false,
+					}));
+					overlay.journalFollow = false;
+					overlay.journalScroll = 0;
+					overlay.journalAnchorEntry = undefined;
+					overlay.renderJournalDetailContent(60, 18);
+					const evicted = overlay.journalAnchorEntry;
+					overlay.applyJournalRead({ entries: [{
+						ts: 4000, kind: "update", message: "replacement", next: "", source: "agent", phase: "", malformed: false,
+					}], next: overlay.journalOffset + 1, reset: false, missing: false });
+					overlay.renderJournalDetailContent(60, 18);
+					evictedAnchorReset = evicted !== undefined && !overlay.journal.includes(evicted) &&
+						overlay.journalScroll === 0 && overlay.journalAnchorEntry === overlay.journal[0];
+					overlay.journal = [{
+						ts: 5000, kind: "update", message: Array.from({ length: 300 }, () => "wrapped").join(" "),
+						next: "", source: "agent", phase: "", malformed: false,
+					}];
+					overlay.journalScroll = 5;
+					overlay.journalAnchorEntry = undefined;
+					overlay.renderJournalDetailContent(60, 18);
+					const wideAnchorText = overlay.journalAnchorText;
+					overlay.renderJournalDetailContent(20, 18);
+					reflowedAnchorReset = wideAnchorText !== overlay.journalAnchorText &&
+						overlay.journalScroll === 0 && overlay.journalAnchorEntry === overlay.journal[0];
+					await handlers.get("session_start")({ reason: "switch" }, context);
 					await dashboard;
+					replacementClosed = !dashboardOpen && overlay.disposed && overlay.timer === undefined && overlay.render(100).length === 0;
 				} else {
 					await waitForUpdates(expectedUpdates);
 				}
 			}
+			await writeFile(process.env.PI_STATUS_FILE!, "running");
+			const shutdownDashboard = command.handler("", context);
+			for (let attempt = 0; attempt < 100 && !dashboardOpen; attempt++) await sleep(10);
+			if (!dashboardOpen) throw new Error("shutdown dashboard did not open");
+			for (let attempt = 0; attempt < 100 && overlay.runs.length === 0; attempt++) await sleep(10);
+			overlay.handleInput("x");
+			const pendingFooter = overlay.renderFooter(120);
+			overlay.handleInput("q");
+			confirmationDeclined = dashboardOpen && overlay.cancelPendingRunID === "" && pendingFooter.includes("any other key keep running");
+			overlay.handleInput("x");
+			overlay.handleInput("y");
+			for (let attempt = 0; attempt < 100; attempt++) {
+				try { await access(process.env.PI_CANCEL_STARTED!); cancelWorkStarted = true; break; } catch { await sleep(10); }
+			}
+			await handlers.get("session_shutdown")({}, context);
+			await shutdownDashboard;
+			await sleep(50);
+			shutdownDisposed = !dashboardOpen && overlay.disposed && overlay.timer === undefined && overlay.abortController === undefined && overlay.actionAbortController === undefined && overlay.render(100).length === 0;
 			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({
 				ok: true, messages, notifications, whileStreaming, afterSettledWhileStreaming,
-				whileDashboard, dashboardOpen, dashboardRendered, rendererStops,
+					whileDashboard, dashboardOpen, dashboardRendered, rendererStops, layoutSafe, extensionLayoutSafe, tinyHeaderVisible,
+					remappedTab, largeJournalRead, oversizedCursorAdvanced, detailWrapped, journalAnchored, evictedAnchorReset, reflowedAnchorReset, replacementClosed,
+				confirmationDeclined, cancelWorkStarted, shutdownDisposed,
 			}));
 		} catch (error) {
 			await writeFile(process.env.PI_UPDATE_PROBE_MARKER!, JSON.stringify({
 				ok: false, error: error instanceof Error ? error.message : String(error), messages, notifications,
 				whileStreaming, afterSettledWhileStreaming, whileDashboard, dashboardOpen, dashboardRendered, rendererStops,
+				layoutSafe, extensionLayoutSafe, tinyHeaderVisible, remappedTab, largeJournalRead, oversizedCursorAdvanced, detailWrapped, journalAnchored,
+				evictedAnchorReset, reflowedAnchorReset,
+				replacementClosed, confirmationDeclined, cancelWorkStarted, shutdownDisposed,
 			}));
 		}
 		return { action: "handled" };
@@ -578,7 +774,7 @@ export default function (pi: any) {
 		t.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, piPath,
 		"--offline", "--no-extensions",
@@ -590,16 +786,21 @@ export default function (pi: any) {
 	)
 	cmd.Env = os.Environ()
 	for key, value := range map[string]string{
-		"PI_OFFLINE":             "1",
-		"DYNA_SESSION":           "fixture-session",
-		"DYNA_BIN":               fakeDyna,
-		"DYNA_PI_CODEX_AUTH":     "0",
-		"PI_RUN_COUNT":           runCount,
-		"PI_STATUS_FILE":         statusFile,
-		"PI_LAUNCH_SESSION":      launchSession,
-		"PI_UPDATE_PROBE_MARKER": marker,
-		"DYNA_NO_AUTO_UPDATE":    "1",
-		"OPENAI_API_KEY":         "",
+		"PI_OFFLINE":                 "1",
+		"DYNA_SESSION":               "fixture-session",
+		"DYNA_BIN":                   fakeDyna,
+		"DYNA_PI_CODEX_AUTH":         "0",
+		"DYNA_PI_ACTIVATE_ALL_TOOLS": "0",
+		"PI_RUN_COUNT":               runCount,
+		"PI_STATUS_FILE":             statusFile,
+		"PI_LAUNCH_SESSION":          launchSession,
+		"PI_LIST_COUNT":              listCount,
+		"PI_CANCEL_STARTED":          cancelStarted,
+		"PI_UPDATE_PROBE_MARKER":     marker,
+		"PI_JOURNAL_PATH":            journalPath,
+		"XDG_DATA_HOME":              dataHome,
+		"DYNA_NO_AUTO_UPDATE":        "1",
+		"OPENAI_API_KEY":             "",
 	} {
 		cmd.Env = setEnv(cmd.Env, key, value)
 	}
@@ -612,7 +813,8 @@ export default function (pi: any) {
 	}
 
 	var probe struct {
-		OK       bool `json:"ok"`
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
 		Messages []struct {
 			Message struct {
 				Details struct {
@@ -640,9 +842,23 @@ export default function (pi: any) {
 			Messages      int `json:"messages"`
 			Notifications int `json:"notifications"`
 		} `json:"whileDashboard"`
-		DashboardOpen     bool `json:"dashboardOpen"`
-		DashboardRendered bool `json:"dashboardRendered"`
-		RendererStops     int  `json:"rendererStops"`
+		DashboardOpen           bool `json:"dashboardOpen"`
+		DashboardRendered       bool `json:"dashboardRendered"`
+		RendererStops           int  `json:"rendererStops"`
+		LayoutSafe              bool `json:"layoutSafe"`
+		ExtensionLayoutSafe     bool `json:"extensionLayoutSafe"`
+		TinyHeaderVisible       bool `json:"tinyHeaderVisible"`
+		RemappedTab             bool `json:"remappedTab"`
+		LargeJournalRead        bool `json:"largeJournalRead"`
+		OversizedCursorAdvanced bool `json:"oversizedCursorAdvanced"`
+		DetailWrapped           bool `json:"detailWrapped"`
+		JournalAnchored         bool `json:"journalAnchored"`
+		EvictedAnchorReset      bool `json:"evictedAnchorReset"`
+		ReflowedAnchorReset     bool `json:"reflowedAnchorReset"`
+		ReplacementClosed       bool `json:"replacementClosed"`
+		ConfirmationDeclined    bool `json:"confirmationDeclined"`
+		CancelWorkStarted       bool `json:"cancelWorkStarted"`
+		ShutdownDisposed        bool `json:"shutdownDisposed"`
 	}
 	if err := json.Unmarshal([]byte(readFile(t, marker)), &probe); err != nil {
 		t.Fatal(err)
@@ -662,6 +878,12 @@ export default function (pi: any) {
 	}
 	if probe.DashboardOpen || !probe.DashboardRendered || probe.RendererStops != 0 {
 		t.Fatalf("Pi-native dashboard lifecycle = open:%v rendered:%v renderer-stops:%d", probe.DashboardOpen, probe.DashboardRendered, probe.RendererStops)
+	}
+	if !probe.LayoutSafe || !probe.ExtensionLayoutSafe || !probe.TinyHeaderVisible || !probe.RemappedTab || !probe.LargeJournalRead || !probe.OversizedCursorAdvanced || !probe.DetailWrapped || !probe.JournalAnchored || !probe.EvictedAnchorReset || !probe.ReflowedAnchorReset {
+		t.Fatalf("Pi-native dashboard correctness probe = %#v", probe)
+	}
+	if !probe.ReplacementClosed || !probe.ConfirmationDeclined || !probe.CancelWorkStarted || !probe.ShutdownDisposed {
+		t.Fatalf("Pi-native dashboard teardown/cancel probe = %#v", probe)
 	}
 	for i, want := range []struct {
 		status, notification string
@@ -1524,6 +1746,28 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func writeSizedJournalRecord(t *testing.T, file *os.File, totalBytes int, prefix, suffix string) {
+	t.Helper()
+	padding := totalBytes - len(prefix) - len(suffix)
+	if padding < 0 {
+		t.Fatalf("journal fixture record size %d is smaller than framing %d", totalBytes, len(prefix)+len(suffix))
+	}
+	if _, err := file.WriteString(prefix); err != nil {
+		t.Fatal(err)
+	}
+	block := strings.Repeat("x", 64*1024)
+	for padding > 0 {
+		chunk := min(padding, len(block))
+		if _, err := file.WriteString(block[:chunk]); err != nil {
+			t.Fatal(err)
+		}
+		padding -= chunk
+	}
+	if _, err := file.WriteString(suffix); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readLines(t *testing.T, path string) []string {

@@ -365,10 +365,11 @@ as or replaces that result.
   workflow to a unique `/tmp/dyna-workflow-*.js` file and passes that path to
   `dyna_run`, which always starts it detached and promptly returns its run ID.
   The tools manage only runs owned by the persisted Pi session and steer active
-  workers without shell command assembly. Type `/dyna` to suspend Pi and open
-  the built-in `dyna tui` dashboard filtered to that persisted Pi session, so
-  runs from other sessions cannot be viewed or acted upon there; exiting the
-  dashboard restores and redraws Pi. A direct `dyna tui` remains global.
+  workers without shell command assembly. Type `/dyna` to open the Pi-native
+  Dyna dashboard scoped to that persisted Pi session, so runs from other
+  sessions cannot be viewed or acted upon there. Pi keeps running underneath
+  and still reacts when a workflow completes; closing the dashboard restores
+  and redraws the conversation. A direct `dyna tui` remains global.
 
   Pi 0.80.7 already reports `openai-codex/gpt-5.6-terra` with its correct 372K
   context window, so Dyna leaves that model metadata untouched. Pi's public

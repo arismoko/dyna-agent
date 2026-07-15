@@ -19,9 +19,12 @@ const WORKFLOW_FILE_PREFIX = "dyna-workflow-";
 const RUN_COMPLETION_POLL_MS = 1000;
 const MAX_EVENT_READ = 4 * 1024 * 1024;
 const MAX_JOURNAL_READ = 4 * 1024 * 1024;
+const MAX_JOURNAL_RECORD = 64 * 1024 * 1024;
 const MAX_OBSERVER_EVENTS = 2000;
 const MAX_OBSERVER_JOURNAL_ENTRIES = 2000;
 const LIST_POLL_TICKS = 5;
+const PI_SPACER_ROWS = 1;
+const PI_STOCK_FOOTER_ROWS = 3;
 const ROOT_AGENT = "dyna-orchestrator";
 const ACTIVATE_ALL_TOOLS = process.env.DYNA_PI_ACTIVATE_ALL_TOOLS === "1";
 const CODEX_AUTH_ENABLED = process.env.DYNA_PI_CODEX_AUTH === "1";
@@ -328,9 +331,17 @@ type AgentJournalRead = {
 	next: number;
 	reset: boolean;
 	missing: boolean;
+	discard?: number;
+	error?: string;
 };
 
-type ObserverFocus = "runs" | "agents" | "journal";
+type JournalRenderLine = {
+	text: string;
+	entry?: AgentJournalEntry;
+	lineKey: string;
+};
+
+type ObserverFocus = "runs" | "detail" | "agents" | "journal";
 
 type CLIResult = {
 	ok: boolean;
@@ -617,10 +628,12 @@ function runsDir(): string {
 	return xdg ? join(xdg, "dyna", "runs") : join(homedir(), ".local", "share", "dyna", "runs");
 }
 
-async function readEvents(id: string, offset: number): Promise<EventRead> {
+async function readEvents(id: string, offset: number, signal?: AbortSignal): Promise<EventRead> {
 	checkRunID(id);
+	signal?.throwIfAborted();
 	const handle = await open(join(runsDir(), id, "events.jsonl"), "r");
 	try {
+		signal?.throwIfAborted();
 		const stat = await handle.stat();
 		if (!stat.isFile()) throw new Error("dyna events path is not a regular file");
 		const reset = offset < 0 || offset > stat.size;
@@ -630,6 +643,7 @@ async function readEvents(id: string, offset: number): Promise<EventRead> {
 
 		const buffer = Buffer.alloc(length);
 		const { bytesRead } = await handle.read(buffer, 0, length, offset);
+		signal?.throwIfAborted();
 		const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1);
 		if (lastNewline < 0) return { events: [], next: offset, reset, complete: false };
 
@@ -689,12 +703,33 @@ function parseAgentJournalLine(line: string): AgentJournalEntry {
 	}
 }
 
-async function readAgentJournal(id: string, agentID: number, offset: number): Promise<AgentJournalRead> {
+async function readAgentJournalRecord(
+	handle: Awaited<ReturnType<typeof open>>,
+	start: number,
+	length: number,
+	signal?: AbortSignal,
+): Promise<string> {
+	const buffer = Buffer.allocUnsafe(length);
+	let bytesRead = 0;
+	while (bytesRead < buffer.length) {
+		signal?.throwIfAborted();
+		const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, start + bytesRead);
+		if (read.bytesRead <= 0) throw new Error("dyna agent journal changed while it was being read");
+		bytesRead += read.bytesRead;
+	}
+	// The byte buffer leaves scope before JSON parsing starts, so a near-limit
+	// record does not remain referenced alongside its decoded representation.
+	return buffer.toString("utf8");
+}
+
+async function readAgentJournal(id: string, agentID: number, offset: number, discardOffset?: number, signal?: AbortSignal): Promise<AgentJournalRead> {
 	checkRunID(id);
 	if (!Number.isInteger(agentID) || agentID <= 0) throw new Error("invalid Dyna agent ID");
+	signal?.throwIfAborted();
 	const path = join(runsDir(), id, "agents", String(agentID), "journal.jsonl");
 	let handle: Awaited<ReturnType<typeof open>>;
 	try {
+		signal?.throwIfAborted();
 		handle = await open(path, "r");
 	} catch (error) {
 		if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
@@ -707,18 +742,76 @@ async function readAgentJournal(id: string, agentID: number, offset: number): Pr
 		if (!stat.isFile()) throw new Error("dyna agent journal path is not a regular file");
 		const reset = offset < 0 || offset > stat.size;
 		if (reset) offset = 0;
-		const length = Math.min(MAX_JOURNAL_READ, stat.size - offset);
-		if (length <= 0) return { entries: [], next: offset, reset, missing: false };
+		if (stat.size <= offset) return { entries: [], next: offset, reset, missing: false };
 
-		const buffer = Buffer.alloc(length);
-		const { bytesRead } = await handle.read(buffer, 0, length, offset);
-		const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1);
-		if (lastNewline < 0) return { entries: [], next: offset, reset, missing: false };
-		const entries = buffer.subarray(0, lastNewline).toString("utf8")
-			.split("\n")
-			.filter((line) => line.length > 0)
-			.map(parseAgentJournalLine);
-		return { entries, next: offset + lastNewline + 1, reset, missing: false };
+		// Scan with one reusable chunk. Complete valid records are then read one at
+		// a time into an exactly-sized buffer, avoiding chunks + Buffer.concat + a
+		// second giant decoded copy. Once a partial record is known to be too large,
+		// discardOffset remembers how far it was scanned without committing the
+		// public record offset before its newline arrives.
+		let scanOffset = offset;
+		let discarding = false;
+		if (!reset && discardOffset !== undefined && discardOffset >= offset && discardOffset <= stat.size) {
+			scanOffset = discardOffset;
+			discarding = discardOffset > offset;
+		}
+		let recordStart = offset;
+		let recordBytes = 0;
+		let next = offset;
+		let oversized = 0;
+		let foundNewline = false;
+		const complete: Array<{ start: number; length: number }> = [];
+		const scanBuffer = Buffer.allocUnsafe(Math.min(MAX_JOURNAL_READ, Math.max(1, stat.size - scanOffset)));
+		while (scanOffset < stat.size && !foundNewline) {
+			signal?.throwIfAborted();
+			const length = Math.min(scanBuffer.length, stat.size - scanOffset);
+			const { bytesRead } = await handle.read(scanBuffer, 0, length, scanOffset);
+			signal?.throwIfAborted();
+			if (bytesRead <= 0) break;
+			let cursor = 0;
+			while (cursor < bytesRead) {
+				const newline = scanBuffer.indexOf(0x0a, cursor);
+				if (newline < 0 || newline >= bytesRead) {
+					if (!discarding) {
+						recordBytes += bytesRead - cursor;
+						// With no newline yet, MAX_JOURNAL_RECORD bytes can no
+						// longer become a valid record because the newline counts.
+						if (recordBytes >= MAX_JOURNAL_RECORD) discarding = true;
+					}
+					cursor = bytesRead;
+					continue;
+				}
+				const recordEnd = scanOffset + newline + 1;
+				if (!discarding) {
+					recordBytes += newline - cursor + 1;
+					if (recordBytes > MAX_JOURNAL_RECORD) discarding = true;
+				}
+				if (discarding) oversized++;
+				else if (recordBytes > 1) complete.push({ start: recordStart, length: recordBytes - 1 });
+				next = recordEnd;
+				recordStart = recordEnd;
+				recordBytes = 0;
+				discarding = false;
+				foundNewline = true;
+				cursor = newline + 1;
+			}
+			scanOffset += bytesRead;
+		}
+
+		const entries: AgentJournalEntry[] = [];
+		for (const record of complete) {
+			entries.push(parseAgentJournalLine(await readAgentJournalRecord(handle, record.start, record.length, signal)));
+		}
+		const error = oversized > 0
+			? `skipped ${oversized} oversized journal ${oversized === 1 ? "record" : "records"} (maximum ${MAX_JOURNAL_RECORD} bytes including newline)`
+			: undefined;
+		return {
+			entries, next, reset, missing: false,
+			discard: !foundNewline && discarding ? scanOffset : undefined,
+			error: error || (!foundNewline && discarding
+				? `discarding oversized journal record (maximum ${MAX_JOURNAL_RECORD} bytes including newline)`
+				: undefined),
+		};
 	} finally {
 		await handle.close();
 	}
@@ -737,6 +830,14 @@ function elapsed(run: Run): string {
 	const end = run.endedAt ? new Date(run.endedAt).getTime() : Date.now();
 	if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
 	const seconds = Math.max(0, Math.floor((end - start) / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m${seconds % 60}s`;
+	return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
+}
+
+function formatDuration(milliseconds: number): string {
+	const seconds = Math.max(0, Math.round(milliseconds / 1000));
 	if (seconds < 60) return `${seconds}s`;
 	const minutes = Math.floor(seconds / 60);
 	if (minutes < 60) return `${minutes}m${seconds % 60}s`;
@@ -793,7 +894,16 @@ function selectionWindow(selected: number, total: number, height: number): numbe
 	return Math.max(0, Math.min(selected - Math.floor(height / 2), total - height));
 }
 
-class DynaRunsOverlay implements Component {
+function componentContains(root: Component, target: Component, seen = new Set<Component>()): boolean {
+	if (root === target) return true;
+	if (seen.has(root)) return false;
+	seen.add(root);
+	const children = (root as Component & { children?: unknown }).children;
+	return Array.isArray(children) && children.some((child) =>
+		typeof child === "object" && child !== null && componentContains(child as Component, target, seen));
+}
+
+class DynaRunsView implements Component {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private runs: Run[] = [];
 	private selectedRunID = "";
@@ -815,6 +925,7 @@ class DynaRunsOverlay implements Component {
 	private eventOffset = 0;
 	private eventsComplete = false;
 	private journalOffset = 0;
+	private journalDiscardOffset: number | undefined;
 	private journalLoaded = false;
 	private journalMissing = false;
 	private journalFollow = true;
@@ -822,19 +933,70 @@ class DynaRunsOverlay implements Component {
 	private journalUnseen = 0;
 	private selectionGeneration = 0;
 	private lastRunsPage = 5;
+	private runDetailScroll = 0;
+	private lastRunDetailViewport = 5;
+	private lastRunDetailLineCount = 0;
 	private lastAgentsPage = 5;
 	private lastJournalViewport = 5;
 	private lastJournalLineCount = 0;
+	private journalAnchorEntry: AgentJournalEntry | undefined;
+	private journalAnchorLine = "";
+	private journalAnchorText = "";
+	private journalScrollDelta = 0;
+	private cancelPendingRunID = "";
+	private canceling = false;
+	private actionError = "";
+	private actionAbortController: AbortController | undefined;
+	private detachedScrollback: Component[] | undefined;
+	private detachAttempts = 0;
 
 	constructor(
 		private tui: TUI,
 		private theme: Theme,
 		private keys: KeybindingsManager,
 		private session: string,
-		private closeOverlay: () => void,
+		private closeView: () => void,
 	) {
 		this.requestRefresh(true);
 		this.timer = setInterval(() => this.requestRefresh(), 1000);
+		setTimeout(() => this.detachScrollback(), 0);
+	}
+
+	// Pi stays live while /dyna is open, so the chat scrollback above the
+	// dashboard keeps changing: streamed responses, queued-message rows, and
+	// the 80ms "Working..." spinner. pi-tui renders every root child into one
+	// shared line buffer and any change ABOVE the visible viewport forces a full
+	// clear+redraw (\x1b[2J), which flashes violently at animation rate. While
+	// the dashboard owns the screen, detach the root children that precede the
+	// above-editor widget container so the buffer never exceeds one screen; the
+	// widget container itself stays mounted because allocatedEditorRows measures
+	// it and Pi shows transient prompts there. The detached containers are live
+	// objects that Pi keeps updating off-screen; restoring them on close
+	// repaints the chat with everything that happened meanwhile.
+	private detachScrollback(): void {
+		if (this.disposed || this.detachedScrollback) return;
+		const rootChildren = (this.tui as TUI & { children?: unknown }).children;
+		if (Array.isArray(rootChildren)) {
+			const editorIndex = rootChildren.findIndex((child) =>
+				typeof child === "object" && child !== null && componentContains(child as Component, this));
+			if (editorIndex > 1) {
+				this.detachedScrollback = rootChildren.splice(0, editorIndex - 1) as Component[];
+				this.tui.requestRender();
+				return;
+			}
+			if (editorIndex >= 0) return;
+		}
+		// The view is constructed before Pi mounts it into the editor container;
+		// retry briefly until it appears in the component tree.
+		if (++this.detachAttempts < 10) setTimeout(() => this.detachScrollback(), 10);
+	}
+
+	private restoreScrollback(): void {
+		if (!this.detachedScrollback) return;
+		const rootChildren = (this.tui as TUI & { children?: unknown }).children;
+		if (Array.isArray(rootChildren)) rootChildren.unshift(...this.detachedScrollback);
+		this.detachedScrollback = undefined;
+		this.tui.requestRender();
 	}
 
 	private requestRefresh(forceList = false): void {
@@ -874,7 +1036,7 @@ class DynaRunsOverlay implements Component {
 			const eventGeneration = this.selectionGeneration;
 			if (!this.eventsComplete) {
 				try {
-					const batch = await readEvents(run.id, this.eventOffset);
+					const batch = await readEvents(run.id, this.eventOffset, controller.signal);
 					if (this.disposed || eventGeneration !== this.selectionGeneration || run.id !== this.selectedRunID) return;
 					if (batch.reset) {
 						this.detail = blankDetail();
@@ -895,10 +1057,9 @@ class DynaRunsOverlay implements Component {
 			const journalGeneration = this.selectionGeneration;
 			if (agentID !== undefined) {
 				try {
-					const batch = await readAgentJournal(run.id, agentID, this.journalOffset);
+					const batch = await readAgentJournal(run.id, agentID, this.journalOffset, this.journalDiscardOffset, controller.signal);
 					if (this.disposed || journalGeneration !== this.selectionGeneration || run.id !== this.selectedRunID || agentID !== this.selectedAgentID) return;
 					this.applyJournalRead(batch);
-					this.journalError = "";
 				} catch (error) {
 					if (this.disposed) return;
 					this.journalError = errorText(error);
@@ -946,6 +1107,9 @@ class DynaRunsOverlay implements Component {
 		this.eventsComplete = false;
 		this.selectedAgentID = undefined;
 		this.eventError = "";
+		this.actionError = "";
+		this.cancelPendingRunID = "";
+		this.runDetailScroll = 0;
 		this.resetJournal();
 		this.selectionGeneration++;
 	}
@@ -964,11 +1128,16 @@ class DynaRunsOverlay implements Component {
 	private resetJournal(): void {
 		this.journal = [];
 		this.journalOffset = 0;
+		this.journalDiscardOffset = undefined;
 		this.journalLoaded = false;
 		this.journalMissing = false;
 		this.journalFollow = true;
 		this.journalScroll = 0;
 		this.journalUnseen = 0;
+		this.journalAnchorEntry = undefined;
+		this.journalAnchorLine = "";
+		this.journalAnchorText = "";
+		this.journalScrollDelta = 0;
 		this.journalError = "";
 	}
 
@@ -977,6 +1146,9 @@ class DynaRunsOverlay implements Component {
 		this.journalLoaded = true;
 		this.journalMissing = batch.missing;
 		this.journalOffset = batch.next;
+		this.journalDiscardOffset = batch.discard;
+		if (batch.error) this.journalError = batch.error;
+		else if (batch.entries.length > 0 || batch.reset) this.journalError = "";
 		if (batch.entries.length === 0) return;
 		this.journal = [...this.journal, ...batch.entries].slice(-MAX_OBSERVER_JOURNAL_ENTRIES);
 		this.journalMissing = false;
@@ -1007,19 +1179,62 @@ class DynaRunsOverlay implements Component {
 		this.requestRefresh();
 	}
 
-	private close(): void {
+	close(): void {
+		if (this.disposed) return;
 		this.dispose();
-		this.closeOverlay();
+		this.closeView();
+	}
+
+	private requestCancel(): void {
+		const run = this.selectedRun();
+		if (!run || run.status !== "running" || this.canceling) return;
+		this.cancelPendingRunID = run.id;
+		this.actionError = "";
+	}
+
+	private confirmCancel(): void {
+		const id = this.cancelPendingRunID;
+		this.cancelPendingRunID = "";
+		if (!id || this.canceling || this.selectedRunID !== id) return;
+		this.canceling = true;
+		this.actionError = "";
+		const controller = new AbortController();
+		this.actionAbortController = controller;
+		void (async () => {
+			try {
+				const run = await requireSessionRun(id, this.session, controller.signal);
+				if (run.status !== "running") throw new Error(`run ${id} is no longer running`);
+				const result = await runDyna(["runs", "cancel", id], undefined, controller.signal);
+				if (!result.ok) throw failedCLI("dyna runs cancel", result);
+			} catch (error) {
+				if (!this.disposed && !controller.signal.aborted) this.actionError = errorText(error);
+			} finally {
+				if (this.actionAbortController === controller) this.actionAbortController = undefined;
+				this.canceling = false;
+				if (!this.disposed) {
+					this.requestRefresh(true);
+					this.tui.requestRender();
+				}
+			}
+		})();
 	}
 
 	handleInput(data: string): void {
+		if (this.disposed) return;
+		if (this.cancelPendingRunID) {
+			if (data === "y" || data === "Y") this.confirmCancel();
+			else this.cancelPendingRunID = "";
+			this.tui.requestRender();
+			return;
+		}
 		if (matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
 			this.close();
 			return;
 		}
 		if (this.keys.matches(data, "tui.select.cancel")) {
 			if (this.focus === "journal") this.focus = "agents";
-			else if (this.focus === "agents") this.focus = "runs";
+			else if (this.focus === "agents") this.focus = "detail";
+			else if (this.focus === "detail") this.focus = "runs";
 			else {
 				this.close();
 				return;
@@ -1032,19 +1247,26 @@ class DynaRunsOverlay implements Component {
 			this.tui.requestRender();
 			return;
 		}
-		if (matchesKey(data, "tab")) {
-			this.focus = this.focus === "runs" ? "agents" : this.focus === "agents" ? "journal" : "runs";
+		if ((data === "x" || data === "X") && this.focus === "runs") {
+			this.requestCancel();
+			this.tui.requestRender();
+			return;
+		}
+		if (this.keys.matches(data, "tui.input.tab")) {
+			this.focus = this.focus === "runs" ? "detail" : this.focus === "detail" ? "agents" : this.focus === "agents" ? "journal" : "runs";
 			this.tui.requestRender();
 			return;
 		}
 		if (data === "h" || data === "H" || matchesKey(data, "left") || matchesKey(data, "backspace")) {
 			if (this.focus === "journal") this.focus = "agents";
-			else if (this.focus === "agents") this.focus = "runs";
+			else if (this.focus === "agents") this.focus = "detail";
+			else if (this.focus === "detail") this.focus = "runs";
 			this.tui.requestRender();
 			return;
 		}
 		if (this.keys.matches(data, "tui.select.confirm") || data === "l" || data === "L" || matchesKey(data, "right")) {
-			if (this.focus === "runs") this.focus = "agents";
+			if (this.focus === "runs") this.focus = "detail";
+			else if (this.focus === "detail") this.focus = "agents";
 			else if (this.focus === "agents" && this.selectedAgentID !== undefined) this.focus = "journal";
 			this.tui.requestRender();
 			return;
@@ -1061,6 +1283,13 @@ class DynaRunsOverlay implements Component {
 			else if (pageDown) this.moveRun(this.lastRunsPage);
 			else if (matchesKey(data, "home")) this.moveRun(-this.runs.length);
 			else if (matchesKey(data, "end")) this.moveRun(this.runs.length);
+		} else if (this.focus === "detail") {
+			if (data === "g" || matchesKey(data, "home")) this.runDetailScroll = 0;
+			else if (data === "G" || matchesKey(data, "end")) this.runDetailScroll = Math.max(0, this.lastRunDetailLineCount - this.lastRunDetailViewport);
+			else if (up) this.scrollRunDetail(-1);
+			else if (down) this.scrollRunDetail(1);
+			else if (pageUp) this.scrollRunDetail(-this.lastRunDetailViewport);
+			else if (pageDown) this.scrollRunDetail(this.lastRunDetailViewport);
 		} else if (this.focus === "agents") {
 			if (up) this.moveAgent(-1);
 			else if (down) this.moveAgent(1);
@@ -1074,14 +1303,20 @@ class DynaRunsOverlay implements Component {
 				if (this.journalFollow) {
 					this.journalScroll = Math.max(0, this.lastJournalLineCount - this.lastJournalViewport);
 					this.journalUnseen = 0;
+					this.journalScrollDelta = 0;
 				}
 			} else if (data === "g" || matchesKey(data, "home")) {
 				this.journalFollow = false;
 				this.journalScroll = 0;
+				this.journalAnchorEntry = undefined;
+				this.journalAnchorLine = "";
+				this.journalAnchorText = "";
+				this.journalScrollDelta = 0;
 			} else if (data === "G" || matchesKey(data, "end")) {
 				this.journalFollow = true;
 				this.journalScroll = Math.max(0, this.lastJournalLineCount - this.lastJournalViewport);
 				this.journalUnseen = 0;
+				this.journalScrollDelta = 0;
 			} else if (up) this.scrollJournal(-1);
 			else if (down) this.scrollJournal(1);
 			else if (pageUp) this.scrollJournal(-this.lastJournalViewport);
@@ -1092,40 +1327,52 @@ class DynaRunsOverlay implements Component {
 
 	private scrollJournal(delta: number): void {
 		this.journalFollow = false;
-		const max = Math.max(0, this.lastJournalLineCount - this.lastJournalViewport);
-		this.journalScroll = Math.max(0, Math.min(max, this.journalScroll + delta));
+		this.journalScrollDelta += delta;
+	}
+
+	private scrollRunDetail(delta: number): void {
+		const max = Math.max(0, this.lastRunDetailLineCount - this.lastRunDetailViewport);
+		this.runDetailScroll = Math.max(0, Math.min(max, this.runDetailScroll + delta));
+	}
+
+	private allocatedEditorRows(width: number, terminalRows: number): number {
+		const fallback = Math.max(1, terminalRows - PI_SPACER_ROWS - PI_STOCK_FOOTER_ROWS);
+		// Container.children and Component.render are public Pi TUI contracts. In
+		// the installed non-overlay layout, the editor container is immediately
+		// preceded by the above-editor widget container; below-editor widgets and
+		// the active stock/custom footer follow it. Measure those public siblings
+		// so optional extension UI is allocated real rows without reaching into
+		// InteractiveMode's private editor/footer fields.
+		const rootChildren = (this.tui as TUI & { children?: unknown }).children;
+		if (!Array.isArray(rootChildren)) return fallback;
+		const editorIndex = rootChildren.findIndex((child) =>
+			typeof child === "object" && child !== null && componentContains(child as Component, this));
+		if (editorIndex < 0) return fallback;
+		const surrounding = [rootChildren[editorIndex - 1], ...rootChildren.slice(editorIndex + 1)]
+			.filter((child): child is Component => typeof child === "object" && child !== null && "render" in child);
+		try {
+			const reserved = surrounding.reduce((rows, component) => rows + component.render(width).length, 0);
+			return Math.max(1, terminalRows - reserved);
+		} catch {
+			// A third-party component that cannot be measured out of band should not
+			// prevent /dyna from opening; retain Pi's known stock reservation.
+			return fallback;
+		}
 	}
 
 	render(width: number): string[] {
+		if (this.disposed) return [];
 		const safeWidth = Math.max(1, width);
-		const rowBudget = Math.max(1, Math.floor(this.tui.terminal.rows * 0.9));
+		const terminalRows = Number.isFinite(this.tui.terminal.rows) ? Math.floor(this.tui.terminal.rows) : 0;
+		const rowBudget = this.allocatedEditorRows(safeWidth, terminalRows);
 		const header = this.renderHeader(safeWidth);
-		const footer = this.theme.fg("dim", this.focus === "journal"
-			? "j/k scroll · PgUp/PgDn page · g/G ends · f follow · h back · r refresh · q close"
-			: "j/k move · PgUp/PgDn page · Enter/l open · h back · Tab pane · r refresh · q close");
 		const warning = this.renderWarning(safeWidth);
+		const footer = this.renderFooter(safeWidth);
 		const fixed = header.length + warning.length + 1;
 		const available = Math.max(1, rowBudget - fixed);
-		let body: string[];
-		if (safeWidth >= 72 && available >= 8) {
-			const topHeight = Math.max(3, Math.min(7, Math.floor(available * 0.42)));
-			const journalHeight = Math.max(1, available - topHeight);
-			const leftWidth = Math.max(24, Math.floor((safeWidth - 2) * 0.46));
-			const rightWidth = Math.max(1, safeWidth - 2 - leftWidth);
-			const runs = this.renderRunsPane(leftWidth, topHeight);
-			const agents = this.renderAgentsPane(rightWidth, topHeight);
-			const top: string[] = [];
-			for (let i = 0; i < topHeight; i++) {
-				top.push(`${padLine(runs[i] || "", leftWidth)}  ${padLine(agents[i] || "", rightWidth)}`);
-			}
-			body = [...top, ...this.renderJournalPane(safeWidth, journalHeight)];
-		} else if (this.focus === "runs") {
-			body = this.renderRunsPane(safeWidth, available);
-		} else if (this.focus === "agents") {
-			body = this.renderAgentsPane(safeWidth, available);
-		} else {
-			body = this.renderJournalPane(safeWidth, available);
-		}
+		const body = safeWidth >= 88 && available >= 8
+			? this.renderWideBody(safeWidth, available)
+			: this.renderCompactBody(safeWidth, available);
 		return [...header, ...warning, ...body, footer]
 			.slice(0, rowBudget)
 			.map((line) => truncateToWidth(line, safeWidth, ""));
@@ -1133,30 +1380,26 @@ class DynaRunsOverlay implements Component {
 
 	private renderHeader(width: number): string[] {
 		const th = this.theme;
-		const title = `${th.fg("accent", th.bold("dyna observer"))}${th.fg("dim", ` · session ${safeText(this.session, "unknown")}`)}`;
+		const logo = th.bg("selectedBg", th.fg("accent", th.bold(" ⬡ dyna ")));
+		const running = this.runs.filter((candidate) => candidate.status === "running").length;
+		const right = running > 0 ? th.fg("warning", `● ${running} running`) : th.fg("dim", `${this.runs.length} session runs`);
+		const title = this.joinSides(`${logo} ${th.bold("Workflows")}`, right, width);
 		const run = this.selectedRun();
 		if (!run) {
-			return [title, th.fg("dim", this.loading ? "Loading session runs…" : "No workflow run selected"), ""];
+			return [title, th.fg("dim", `${this.loading ? "Loading session runs…" : "No workflows in this Pi session yet."}  ·  session ${safeText(this.session, "unknown")}`)];
 		}
 		const status = `${th.fg(statusColor(run.status), statusGlyph(run.status))} ${safeText(run.status, "unknown")}`;
 		const phase = safeText(this.detail.phase, "waiting for phase");
-		const summary = `${status}  ${th.bold(safeText(run.name, run.id))}  ${th.fg("dim", `${safeText(run.id)} · ${elapsed(run)} · ${phase}`)}`;
-		const counts = { queued: 0, running: 0, completed: 0, error: 0 };
-		for (const agent of this.detail.agents) {
-			if (agent.status === "queued") counts.queued++;
-			else if (agent.status === "running") counts.running++;
-			else if (agent.status === "error") counts.error++;
-			else counts.completed++;
-		}
-		const fresh = freshness(this.detail.latestTS);
-		const facts = [
-			th.fg("warning", `● ${counts.running} running`),
-			th.fg("dim", `◌ ${counts.queued} queued`),
-			th.fg("success", `✓ ${counts.completed} done`),
-			th.fg("error", `✗ ${counts.error} error`),
-			fresh ? th.fg("dim", `updated ${fresh}`) : "",
-		].filter(Boolean).join("  ");
-		return [truncateToWidth(title, width, ""), truncateToWidth(summary, width, "…"), truncateToWidth(facts, width, "…")];
+		const summary = `${status}  ${th.bold(safeText(run.name, run.id))}  ${th.fg("dim", `${safeText(run.id)} · ${elapsed(run)} · ${phase} · session ${safeText(this.session, "unknown")}`)}`;
+		return [truncateToWidth(title, width, ""), truncateToWidth(summary, width, "…")];
+	}
+
+	private joinSides(left: string, right: string, width: number): string {
+		const rightWidth = visibleWidth(right);
+		const leftBudget = Math.max(0, width - rightWidth - 1);
+		const clippedLeft = truncateToWidth(left, leftBudget, "…");
+		const gap = Math.max(1, width - visibleWidth(clippedLeft) - rightWidth);
+		return truncateToWidth(`${clippedLeft}${" ".repeat(gap)}${right}`, width, "");
 	}
 
 	private renderWarning(width: number): string[] {
@@ -1164,118 +1407,271 @@ class DynaRunsOverlay implements Component {
 			this.listError ? `runs: ${this.listError}` : "",
 			this.eventError ? `events: ${this.eventError}` : "",
 			this.journalError ? `journal: ${this.journalError}` : "",
+			this.actionError ? `cancel: ${this.actionError}` : "",
 		].filter(Boolean);
 		return warnings.length > 0 ? [this.theme.fg("error", truncateToWidth(`retrying · ${warnings.join(" · ")}`, width, "…"))] : [];
 	}
 
-	private paneTitle(label: string, active: boolean, suffix = ""): string {
-		const title = `${label}${suffix ? `  ${suffix}` : ""}`;
-		return active ? this.theme.fg("accent", this.theme.bold(title)) : this.theme.fg("dim", this.theme.bold(title));
+	private renderFooter(width: number): string {
+		let help: string;
+		if (this.cancelPendingRunID) {
+			const run = this.selectedRun();
+			help = this.theme.fg("warning", `Cancel ${safeText(run?.name, this.cancelPendingRunID)}? y confirm · any other key keep running`);
+		} else if (this.canceling) {
+			help = this.theme.fg("warning", "Requesting cancellation…");
+		} else if (this.focus === "runs") {
+			help = this.theme.fg("dim", "j/k/↑/↓ select  •  enter/→ detail  •  x cancel running  •  r refresh  •  q close");
+		} else if (this.focus === "detail") {
+			help = this.theme.fg("dim", "j/k/↑/↓ scroll  •  pgup/pgdn page  •  g/G ends  •  enter/→ agents  •  esc/← runs  •  q close");
+		} else if (this.focus === "agents") {
+			help = this.theme.fg("dim", "j/k/↑/↓ agent  •  enter/→ journal  •  esc/← detail  •  r refresh  •  q close");
+		} else {
+			help = this.theme.fg("dim", "j/k/↑/↓ scroll  •  pgup/pgdn page  •  g/G ends  •  f follow  •  esc/← agents  •  q close");
+		}
+		return truncateToWidth(help, width, "…");
 	}
 
-	private renderRunsPane(width: number, height: number): string[] {
+	private framePane(title: string, suffix: string, width: number, height: number, active: boolean, content: string[]): string[] {
+		if (width < 2 || height < 2) return content.slice(0, height).map((line) => truncateToWidth(line, width, ""));
+		const innerWidth = width - 2;
+		const borderColor = active ? "borderAccent" : "border";
+		const rawLabel = truncateToWidth(`${title}${suffix ? ` · ${suffix}` : ""}`, Math.max(0, innerWidth - 2), "…");
+		const label = ` ${rawLabel} `;
+		const topFill = "─".repeat(Math.max(0, innerWidth - visibleWidth(label)));
+		const top = this.theme.fg(borderColor, "╭") +
+			(active ? this.theme.fg("accent", this.theme.bold(label)) : this.theme.fg("muted", this.theme.bold(label))) +
+			this.theme.fg(borderColor, topFill + "╮");
+		const side = this.theme.fg(borderColor, "│");
+		const lines = [top];
+		for (let i = 0; i < height - 2; i++) lines.push(`${side}${padLine(content[i] || "", innerWidth)}${side}`);
+		lines.push(this.theme.fg(borderColor, `╰${"─".repeat(innerWidth)}╯`));
+		return lines;
+	}
+
+	private renderWideBody(width: number, height: number): string[] {
+		const leftWidth = Math.max(29, Math.min(42, Math.floor((width - 1) * 0.36)));
+		const rightWidth = width - leftWidth - 1;
+		const inspecting = this.focus === "agents" || this.focus === "journal";
+		const leftTitle = inspecting ? "Agent journals" : "Runs";
+		const leftSuffix = inspecting
+			? `${this.detail.agents.length} agents`
+			: `${this.runs.length} session`;
+		const rightTitle = inspecting ? "Agent detail" : "Run detail";
+		const rightSuffix = inspecting ? (this.journalFollow ? "● FOLLOW" : "FOLLOW OFF") : safeText(this.detail.phase, "waiting");
+		const leftContent = inspecting
+			? this.renderAgentListContent(leftWidth - 2, height - 2)
+			: this.renderRunsContent(leftWidth - 2, height - 2);
+		const rightContent = inspecting
+			? this.renderJournalDetailContent(rightWidth - 2, height - 2)
+			: this.renderRunDetailContent(rightWidth - 2, height - 2);
+		const left = this.framePane(leftTitle, leftSuffix, leftWidth, height, this.focus === (inspecting ? "agents" : "runs"), leftContent);
+		const right = this.framePane(rightTitle, rightSuffix, rightWidth, height, this.focus === (inspecting ? "journal" : "detail"), rightContent);
+		return left.map((line, index) => `${padLine(line, leftWidth)} ${padLine(right[index] || "", rightWidth)}`);
+	}
+
+	private renderCompactBody(width: number, height: number): string[] {
+		const contentWidth = Math.max(1, width - 2);
+		const contentHeight = Math.max(0, height - 2);
+		if (this.focus === "runs") {
+			return this.framePane("Runs", `${this.runs.length} session`, width, height, true, this.renderRunsContent(contentWidth, contentHeight));
+		}
+		if (this.focus === "detail") {
+			return this.framePane("Run detail", safeText(this.detail.phase, "waiting"), width, height, true, this.renderRunDetailContent(contentWidth, contentHeight));
+		}
+		if (this.focus === "agents") {
+			return this.framePane("Agent journals", `${this.detail.agents.length} agents`, width, height, true, this.renderAgentListContent(contentWidth, contentHeight));
+		}
+		return this.framePane("Agent detail", this.journalFollow ? "● FOLLOW" : "FOLLOW OFF", width, height, true, this.renderJournalDetailContent(contentWidth, contentHeight));
+	}
+
+	private renderRunsContent(width: number, height: number): string[] {
 		if (height <= 0) return [];
 		const selected = Math.max(0, this.runs.findIndex((run) => run.id === this.selectedRunID));
-		const bodyHeight = Math.max(0, height - 1);
-		this.lastRunsPage = Math.max(1, bodyHeight);
-		const lines = [this.paneTitle("RUNS", this.focus === "runs", this.runs.length ? `${selected + 1}/${this.runs.length}` : "")];
-		if (bodyHeight === 0) return lines;
+		this.lastRunsPage = Math.max(1, height);
+		const lines: string[] = [];
 		if (this.loading && this.runs.length === 0) lines.push(this.theme.fg("dim", "Loading…"));
 		else if (this.runs.length === 0) lines.push(this.theme.fg("dim", "No runs in this Pi session yet."));
 		else {
-			const startIndex = selectionWindow(selected, this.runs.length, bodyHeight);
-			for (let i = startIndex; i < Math.min(this.runs.length, startIndex + bodyHeight); i++) {
+			const startIndex = selectionWindow(selected, this.runs.length, height);
+			for (let i = startIndex; i < Math.min(this.runs.length, startIndex + height); i++) {
 				const run = this.runs[i]!;
 				const marker = run.id === this.selectedRunID ? this.theme.fg("accent", "›") : " ";
 				const state = this.theme.fg(statusColor(run.status), statusGlyph(run.status));
-				const meta = this.theme.fg("dim", ` · ${elapsed(run)} · ${started(run)}`);
-				lines.push(`${marker} ${state} ${safeText(run.name, run.id)}${meta}`);
+				const name = safeText(run.name, run.id);
+				const label = run.id === this.selectedRunID
+					? this.theme.bg("selectedBg", this.theme.fg("accent", this.theme.bold(name)))
+					: name;
+				const meta = this.theme.fg("dim", `  ${elapsed(run)} · ${started(run)}`);
+				lines.push(`${marker} ${state} ${label}${meta}`);
 			}
 		}
 		return lines.slice(0, height).map((line) => truncateToWidth(line, width, "…"));
 	}
 
-	private renderAgentsPane(width: number, height: number): string[] {
+	private renderRunDetailContent(width: number, height: number): string[] {
 		if (height <= 0) return [];
+		const lines = this.renderRunDetailBody(width);
+		this.lastRunDetailViewport = Math.max(1, height);
+		this.lastRunDetailLineCount = lines.length;
+		const maxScroll = Math.max(0, lines.length - height);
+		this.runDetailScroll = Math.max(0, Math.min(maxScroll, this.runDetailScroll));
+		return lines.slice(this.runDetailScroll, this.runDetailScroll + height);
+	}
+
+	private renderRunDetailBody(width: number): string[] {
+		const run = this.selectedRun();
+		if (!run) return [this.theme.fg("dim", this.loading ? "Loading run detail…" : "Select a run")];
+		const lines: string[] = [];
+		lines.push(`${this.theme.bold(safeText(run.name, run.id))}  ${this.theme.fg("dim", safeText(run.id))}`);
+		lines.push(`${this.theme.fg(statusColor(run.status), `${statusGlyph(run.status)} ${run.status}`)}  ${this.theme.fg("dim", `${elapsed(run)} · started ${started(run)}`)}`);
+		const counts = { queued: 0, running: 0, done: 0, error: 0 };
+		for (const agent of this.detail.agents) {
+			if (agent.status === "queued") counts.queued++;
+			else if (agent.status === "running") counts.running++;
+			else if (agent.status === "error") counts.error++;
+			else counts.done++;
+		}
+		lines.push(this.theme.fg("dim", `${counts.running} running · ${counts.queued} queued · ${counts.done} done · ${counts.error} error${freshness(this.detail.latestTS) ? ` · updated ${freshness(this.detail.latestTS)}` : ""}`));
+		lines.push("");
+		if (this.detail.agents.length === 0) {
+			lines.push(this.theme.fg("dim", this.eventError ? "Agent roster unavailable." : "Waiting for agents to start…"));
+		} else {
+			const phases = new Map<string, Agent[]>();
+			for (const agent of this.detail.agents) {
+				const phase = safeText(agent.phase, "(no phase)");
+				const group = phases.get(phase) || [];
+				group.push(agent);
+				phases.set(phase, group);
+			}
+			for (const [phase, agents] of phases) {
+				const done = agents.filter((agent) => agent.status === "ok").length;
+				lines.push(`${this.theme.fg("accent", this.theme.bold(`▮ ${phase}`))}${this.theme.fg("dim", `  ${done}/${agents.length}`)}`);
+				for (const agent of agents) {
+					const profile = agent.profile ? this.theme.fg("muted", ` [${safeText(agent.profile)}]`) : "";
+					const duration = agent.durMs > 0 ? ` · ${formatDuration(agent.durMs)}` : "";
+					lines.push(`  ${this.theme.fg(statusColor(agent.status), statusGlyph(agent.status))} ${safeText(agent.label, `agent ${agent.id}`)}${profile}${this.theme.fg("dim", ` · ${agent.status}${duration}`)}`);
+					if (agent.error) lines.push(this.theme.fg("error", `      ${safeText(agent.error)}`));
+					else if (agent.journalPreview) lines.push(this.theme.fg("dim", `      ${safeText(agent.journalKind, "NOTE").toUpperCase()}  ${safeText(agent.journalPreview)}`));
+				}
+				lines.push("");
+			}
+		}
+		const logs = this.detail.events.filter((event) => event.t === "log" && event.msg);
+		if (logs.length > 0) {
+			lines.push(this.theme.bold("Log"));
+			for (const event of logs) lines.push(this.theme.fg("dim", `› ${safeText(event.msg)}`));
+		}
+		if (lines.at(-1) === "") lines.pop();
+		const wrapped: string[] = [];
+		for (const line of lines) {
+			if (line === "") wrapped.push("");
+			else wrapped.push(...wrapTextWithAnsi(line, Math.max(1, width)));
+		}
+		return wrapped;
+	}
+
+	private renderAgentListContent(width: number, height: number): string[] {
+		if (height <= 0) return [];
+		if (!this.selectedRun()) return [this.theme.fg("dim", "Select a run first.")];
+		if (this.detail.agents.length === 0) return [this.theme.fg("dim", "Waiting for agents to start…")];
 		const selected = Math.max(0, this.detail.agents.findIndex((agent) => agent.id === this.selectedAgentID));
-		const bodyHeight = Math.max(0, height - 1);
-		this.lastAgentsPage = Math.max(1, bodyHeight);
-		const lines = [this.paneTitle("AGENTS", this.focus === "agents", this.detail.agents.length ? `${selected + 1}/${this.detail.agents.length}` : "")];
-		if (bodyHeight === 0) return lines;
-		if (!this.selectedRun()) lines.push(this.theme.fg("dim", "Select a run first."));
-		else if (this.detail.agents.length === 0) lines.push(this.theme.fg("dim", this.eventError ? "Agent roster unavailable." : "No agents have started yet."));
-		else {
-			const startIndex = selectionWindow(selected, this.detail.agents.length, bodyHeight);
-			for (let i = startIndex; i < Math.min(this.detail.agents.length, startIndex + bodyHeight); i++) {
-				const agent = this.detail.agents[i]!;
-				const marker = agent.id === this.selectedAgentID ? this.theme.fg("accent", "›") : " ";
-				const state = this.theme.fg(statusColor(agent.status), statusGlyph(agent.status));
-				const profile = agent.profile ? ` [${safeText(agent.profile)}]` : "";
-				const fresh = freshness(agent.journalTS);
-				const meta = fresh ? this.theme.fg("dim", ` · ${fresh}`) : "";
-				lines.push(`${marker} ${state} ${safeText(agent.label, `agent ${agent.id}`)}${this.theme.fg("dim", profile)}${meta}`);
+		const rowsPerAgent = height >= 4 ? 2 : 1;
+		const visibleAgents = Math.max(1, Math.floor(height / rowsPerAgent));
+		this.lastAgentsPage = visibleAgents;
+		const startIndex = selectionWindow(selected, this.detail.agents.length, visibleAgents);
+		const lines: string[] = [];
+		for (let i = startIndex; i < Math.min(this.detail.agents.length, startIndex + visibleAgents); i++) {
+			const agent = this.detail.agents[i]!;
+			const selectedAgent = agent.id === this.selectedAgentID;
+			const marker = selectedAgent ? this.theme.fg("accent", "›") : " ";
+			const state = this.theme.fg(statusColor(agent.status), statusGlyph(agent.status));
+			const name = safeText(agent.label, `agent ${agent.id}`);
+			const label = selectedAgent ? this.theme.bg("selectedBg", this.theme.fg("accent", this.theme.bold(name))) : name;
+			const profile = agent.profile ? this.theme.fg("muted", ` [${safeText(agent.profile)}]`) : "";
+			lines.push(`${marker} ${state} ${label}${profile}`);
+			if (rowsPerAgent === 2) {
+				const progress = agent.journalPreview ? `${safeText(agent.journalKind, "note").toUpperCase()} · ${safeText(agent.journalPreview)}` : agent.status;
+				lines.push(this.theme.fg("dim", `    ${safeText(agent.phase, "no phase")} · ${progress}`));
 			}
 		}
 		return lines.slice(0, height).map((line) => truncateToWidth(line, width, "…"));
 	}
 
-	private renderJournalPane(width: number, height: number): string[] {
+	private renderJournalDetailContent(width: number, height: number): string[] {
 		if (height <= 0) return [];
 		const agent = this.selectedAgent();
-		const identity = agent ? safeText(agent.label, `agent ${agent.id}`) : "no agent selected";
-		const follow = this.journalFollow ? this.theme.fg("success", "● FOLLOW") : this.theme.fg("dim", "FOLLOW OFF");
-		const unseen = this.journalUnseen > 0 ? this.theme.fg("warning", `${this.journalUnseen} unseen`) : "";
-		const suffix = [identity, follow, unseen].filter(Boolean).join(" · ");
-		const lines = [this.paneTitle("JOURNAL", this.focus === "journal", suffix)];
-		const viewport = Math.max(0, height - 1);
+		if (!agent) return [this.theme.fg("dim", this.detail.agents.length ? "Select an agent to inspect its journal." : "Waiting for an agent to start…")];
+		const lines = [
+			`${this.theme.fg(statusColor(agent.status), statusGlyph(agent.status))} ${this.theme.bold(safeText(agent.label, `agent ${agent.id}`))}${agent.profile ? this.theme.fg("muted", ` [${safeText(agent.profile)}]`) : ""}`,
+			`${this.theme.fg("accent", this.theme.bold(" JOURNAL "))} ${this.theme.fg("dim", `${safeText(agent.phase, "no phase")} · ${agent.status}`)}${this.journalUnseen > 0 ? this.theme.fg("warning", ` · ${this.journalUnseen} unseen`) : ""}`,
+		];
+		const viewport = Math.max(0, height - lines.length - 1);
 		this.lastJournalViewport = Math.max(1, viewport);
-		if (viewport === 0) return lines;
+		if (viewport === 0) return lines.slice(0, height);
+		lines.push("");
 		const body = this.renderJournalBody(width);
 		this.lastJournalLineCount = body.length;
 		const maxScroll = Math.max(0, body.length - viewport);
 		if (this.journalFollow) {
 			this.journalScroll = maxScroll;
 			this.journalUnseen = 0;
+			this.journalScrollDelta = 0;
 		} else {
-			this.journalScroll = Math.max(0, Math.min(maxScroll, this.journalScroll));
+			if (this.journalAnchorEntry) {
+				const anchored = body.findIndex((line) =>
+					line.entry === this.journalAnchorEntry &&
+					line.lineKey === this.journalAnchorLine &&
+					line.text === this.journalAnchorText);
+				// Entry eviction and reflow both invalidate a manual anchor. The
+				// oldest retained rendered row is the only stable fallback; retaining
+				// the previous numeric offset would jump forward in unrelated content.
+				this.journalScroll = anchored >= 0 ? anchored : 0;
+			}
+			this.journalScroll = Math.max(0, Math.min(maxScroll, this.journalScroll + this.journalScrollDelta));
+			this.journalScrollDelta = 0;
 		}
-		return [...lines, ...body.slice(this.journalScroll, this.journalScroll + viewport)]
+		const anchor = body[this.journalScroll];
+		this.journalAnchorEntry = anchor?.entry;
+		this.journalAnchorLine = anchor?.lineKey || "";
+		this.journalAnchorText = anchor?.text || "";
+		return [...lines, ...body.slice(this.journalScroll, this.journalScroll + viewport).map((line) => line.text)]
 			.slice(0, height)
 			.map((line) => truncateToWidth(line, width, ""));
 	}
 
-	private renderJournalBody(width: number): string[] {
+	private renderJournalBody(width: number): JournalRenderLine[] {
 		const agent = this.selectedAgent();
-		if (!agent) return [this.theme.fg("dim", this.detail.agents.length ? "Select an agent to read its journal." : "Waiting for an agent to start…")];
+		if (!agent) return [{ text: this.theme.fg("dim", this.detail.agents.length ? "Select an agent to read its journal." : "Waiting for an agent to start…"), lineKey: "empty" }];
 		if (this.journal.length === 0) {
-			if (!this.journalLoaded) return [this.theme.fg("dim", "Loading agent journal…")];
-			if (agent.cached) return [this.theme.fg("warning", "Cached completion · no live journal was produced.")];
+			if (!this.journalLoaded) return [{ text: this.theme.fg("dim", "Loading agent journal…"), lineKey: "empty" }];
+			if (agent.cached) return [{ text: this.theme.fg("warning", "Cached completion · no live journal was produced."), lineKey: "empty" }];
 			if (agent.status === "ok" || agent.status === "error" || agent.status === "canceled") {
-				return [this.theme.fg("dim", "This agent completed without a recorded work journal.")];
+				return [{ text: this.theme.fg("dim", "This agent completed without a recorded work journal."), lineKey: "empty" }];
 			}
-			return [this.theme.fg("dim", this.journalMissing ? "Waiting for the journal file…" : "Waiting for the first journal entry…")];
+			return [{ text: this.theme.fg("dim", this.journalMissing ? "Waiting for the journal file…" : "Waiting for the first journal entry…"), lineKey: "empty" }];
 		}
 
-		const lines: string[] = [];
+		const lines: JournalRenderLine[] = [];
 		let lastPhase = "";
 		for (const entry of this.journal) {
+			const push = (text: string, lineKey: string) => lines.push({ text, entry, lineKey });
 			if (entry.phase && entry.phase !== lastPhase) {
-				if (lines.length > 0) lines.push("");
-				lines.push(this.theme.fg("accent", `▮ ${entry.phase}`));
+				if (lines.length > 0) push("", "phase-gap");
+				push(this.theme.fg("accent", `▮ ${entry.phase}`), "phase");
 				lastPhase = entry.phase;
 			}
 			const kind = entry.malformed ? "RAW" : entry.kind.toUpperCase();
 			const meta = [journalTime(entry.ts), entry.source].filter(Boolean).join(" · ");
-			lines.push(`${this.theme.fg(entry.malformed ? "warning" : "accent", this.theme.bold(kind))}${this.theme.fg("dim", `  ${meta}`)}`);
-			for (const line of wrapTextWithAnsi(entry.message, Math.max(1, width - 2))) lines.push(`  ${line}`);
+			push(`${this.theme.fg(entry.malformed ? "warning" : "accent", this.theme.bold(kind))}${this.theme.fg("dim", `  ${meta}`)}`, "meta");
+			for (const [index, line] of wrapTextWithAnsi(entry.message, Math.max(1, width - 2)).entries()) push(`  ${line}`, `message-${index}`);
 			if (entry.next) {
 				const prefix = this.theme.fg("dim", "next → ");
 				const wrapped = wrapTextWithAnsi(entry.next, Math.max(1, width - 7));
-				for (let i = 0; i < wrapped.length; i++) lines.push(`${i === 0 ? prefix : "       "}${wrapped[i]}`);
+				for (let i = 0; i < wrapped.length; i++) push(`${i === 0 ? prefix : "       "}${wrapped[i]}`, `next-${i}`);
 			}
-			lines.push("");
+			push("", "end");
 		}
-		if (lines.at(-1) === "") lines.pop();
+		if (lines.at(-1)?.text === "") lines.pop();
 		return lines;
 	}
 
@@ -1284,10 +1680,13 @@ class DynaRunsOverlay implements Component {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.restoreScrollback();
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
 		this.abortController?.abort();
 		this.abortController = undefined;
+		this.actionAbortController?.abort();
+		this.actionAbortController = undefined;
 	}
 }
 
@@ -1297,6 +1696,13 @@ export default function (pi: ExtensionAPI) {
 	const launchedRunIDs = new Set<string>();
 	const pendingRunUpdates = new Map<string, TerminalRunUpdate>();
 	const runCompletionAbort = new AbortController();
+	let activeView: DynaRunsView | undefined;
+
+	function closeActiveView(): void {
+		const view = activeView;
+		activeView = undefined;
+		view?.close();
+	}
 
 	function isTerminalRun(run: Run): boolean {
 		return run.status === "ok" || run.status === "error" || run.status === "canceled";
@@ -1399,6 +1805,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
+		closeActiveView();
 		runCompletionAbort.abort();
 		if (codexRefreshTimer) clearTimeout(codexRefreshTimer);
 		codexRefreshTimer = undefined;
@@ -1541,15 +1948,29 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("/dyna requires the interactive TUI", "error");
 				return;
 			}
+			closeActiveView();
 			const session = sessionID(ctx);
-			await ctx.ui.custom(
-				(tui, theme, keys, done) => new DynaRunsOverlay(tui, theme, keys, session, () => done(undefined)),
-				{ overlay: true, overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%", margin: 1 } },
-			);
+			let openedView: DynaRunsView | undefined;
+			try {
+				await ctx.ui.custom(
+					(tui, theme, keys, done) => {
+						openedView = new DynaRunsView(tui, theme, keys, session, () => done(undefined));
+						activeView = openedView;
+						return openedView;
+					},
+					{ overlay: false },
+				);
+			} finally {
+				if (activeView === openedView) activeView = undefined;
+				openedView?.dispose();
+			}
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		// Pi uses session_start for in-process replacements as well as startup.
+		// A custom() promise otherwise remains focused on the previous session.
+		closeActiveView();
 		if (ACTIVATE_ALL_TOOLS) {
 			pi.setActiveTools(pi.getAllTools().map((tool) => tool.name));
 		}

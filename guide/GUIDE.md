@@ -44,15 +44,22 @@ Profiles bind a harness and model to a human description and three standardized
 stats. All stats are 1–10 and higher is better:
 
 - `cost` is cost efficiency, so 10 means very cheap. Use high-cost-stat workers
-  for wide sweeps, first-pass triage, and mechanical breadth.
+  for wide sweeps, first-pass triage, and mechanical breadth. A high cost stat
+  is not a capability warning: breadth stages — finders, sweeps, discovery,
+  first drafts — default to the cheapest capable profile, and premium profiles
+  enter only where their stat is uniquely needed.
 - `intelligence` is capability on hard, long, or complex work. Use it for root
   cause analysis and implementation.
-- `taste` is judgment and polish. Use it for code review, verification, judge
-  panels, synthesis, and frontend/design work.
+- `taste` is judgment, design sensibility, and polish — quality over quantity.
+  Use it for code review, verification, judge panels, synthesis, and
+  frontend/design work.
 
 Pick by the stage's dominant stat, then use the description to confirm or veto
 the choice. A common route is cheap to gather, intelligent to implement, and
-tasteful to decide.
+tasteful to decide. A high-taste profile is not an implementation workhorse:
+broad implementation routes by `intelligence`, and taste-heavy workers write
+code only for quality-critical surfaces (frontend/design work) or targeted
+remediation of findings a review already confirmed.
 
 The script's `profiles` global is an array snapshot of enabled profiles:
 
@@ -185,6 +192,66 @@ justify the added barrier.
 - `sleep(ms)` returns a promise for pacing a bounded polling loop.
 - `args` is the parsed `--args` JSON value or `undefined`.
 - `profiles` is the enabled profile snapshot described above.
+
+## Workflow shape: parallel by default
+
+Shape follows dependencies, not caution. Once a run is authorized, its cost is
+set by how many `agent()` calls it makes, not by their arrangement; serializing
+independent calls spends the same tokens and only adds wall-clock. Express cost
+caution as fewer calls or cheaper profiles, never as sequencing.
+
+Name the work list before writing the script. Scout inline until the concrete
+items exist—files, modules, findings, tasks—then make the script's top level
+`pipeline(workList, ...stages)` over that list. If you cannot enumerate the
+items, you are not ready to orchestrate.
+
+Default to `pipeline()`. Two consecutive `await agent()` calls are justified
+only when the second prompt interpolates the first result. "The steps are
+conceptually separate" and "it feels safer" are not dependencies:
+
+```js
+// Smell: independent calls in sequence — nothing here uses `engine`.
+const engine = await agent('Audit internal/engine for races.')
+const store = await agent('Audit internal/store for races.')
+
+// Same cost, a fraction of the wall-clock:
+const [engineReport, storeReport] = await parallel([
+  () => agent('Audit internal/engine for races.'),
+  () => agent('Audit internal/store for races.'),
+])
+```
+
+A `parallel()` barrier between stages is justified only when the next stage
+needs cross-item context from all earlier results: deduplication across the
+full set, comparison among candidates, or an early exit when the total count
+is zero. It is not justified by ordinary map/filter transforms, conceptual
+phase boundaries, or tidier code. If you wrote
+
+```js
+const found = await parallel(finders)                        // barrier
+const flat = found.filter(Boolean).flatMap(r => r.findings)  // plain transform
+const checked = await parallel(flat.map(f => () => agent(verifyPrompt(f))))
+```
+
+and the middle transform has no cross-item dependency, rewrite it as one
+`pipeline()` with the transform inside a stage, so a fast finder's findings
+enter verification while slow finders are still running.
+
+For implementation work, partitioning is the orchestrator's job. Split the
+change into disjoint scopes—per package, module, or file set—so no two writers
+ever touch the same files, then fan out one implementer per partition with
+`isolation: 'worktree'` (or disjoint `cwd` scopes) and stream each partition
+into its own review and verification stages, as in Example 3 below. Parallel
+implementation over a clean partition is the expected shape for large changes,
+not an elevated risk; the risk lives in a bad partition, so spend the scouting
+effort there.
+
+A full remediation run chains the routes end to end: cheap finders sweep the
+target in parallel, taste verifiers adversarially confirm each finding as it
+arrives, intelligence implementers fix confirmed findings in disjoint
+worktrees, taste reviewers judge each diff, and implementers apply the
+touch-ups the reviews demand — all streaming through `pipeline()` stages, so
+nothing waits for a phase barrier.
 
 ## Example 1: parallel structured review
 
@@ -464,8 +531,10 @@ session with the message; unsupported sessions reject instead of launching a
 replacement.
 
 `dyna pi` launches the built-in root agent preset `dyna-orchestrator` with the
-bundled extension and a compact, self-contained Dyna prompt while preserving
-every other Pi skill. Its sessions default to the `dyna-orchestrator` display
+bundled extension and a full, self-contained tool-native Dyna prompt appended
+directly to the root system prompt — the same routing, workflow-shape,
+example, and quality-pattern guidance as this guide, phrased for the
+extension's native tools — while preserving every other Pi skill. Its sessions default to the `dyna-orchestrator` display
 name and show `agent:dyna-orchestrator` in the footer. At session start the
 preset activates every registered Pi tool, including all built-ins, the four
 native Dyna tools, and tools from other extensions; explicit `--tools`/`-t`,
@@ -481,11 +550,14 @@ path to `dyna_run`. Every `dyna_run` invocation is detached and promptly returns
 its run ID, so `dyna_runs` and `dyna_steer` remain available while it runs. The
 extension invokes the exact Dyna binary without a shell, privately consumes
 bounded workflow input, and rejects show/wait/cancel/resume/steer requests for
-runs outside the persisted Pi session. Type `/dyna` to suspend Pi and open the
-built-in `dyna tui` dashboard filtered to that persisted Pi session, including
-every refresh and dashboard action; exiting the dashboard restores and redraws
-Pi. A direct `dyna tui` remains a global cross-session dashboard unless
-`--session <id>` is supplied explicitly.
+runs outside the persisted Pi session. Type `/dyna` to open the Pi-native Dyna
+dashboard scoped to that persisted Pi session. It replaces the editor while
+open and detaches the chat scrollback from the renderer so off-screen updates
+cannot force full-screen repaints; Pi keeps running underneath and still
+reacts when a workflow completes, and closing the dashboard restores and
+redraws the conversation with everything that happened meanwhile. A direct
+`dyna tui` remains a global cross-session dashboard unless `--session <id>` is
+supplied explicitly.
 
 Pi's bundled `openai-codex/gpt-5.6-terra` metadata already reports the correct
 372K context window. Pi 0.80.7 exposes context usage and manual compaction to
@@ -586,6 +658,17 @@ against a worker that can invoke arbitrary CLIs through a shell.
   not permission to start ten paid sessions; get explicit opt-in.
 - **Recursing from a Dyna worker.** Worker prompts already contain the boundary;
   only the root orchestrator may launch Dyna workflows.
+- **Routing bulk implementation to a taste-max profile.** Taste is quality over
+  quantity — review, judging, synthesis, design polish, and targeted
+  remediation. Broad implementation routes by `intelligence`.
+- **Neglecting cheap profiles.** A high cost stat is not a capability warning;
+  breadth stages default to the cheapest capable profile, not to whichever
+  profile is most impressive.
+- **Serializing independent work.** Back-to-back `await agent()` calls are
+  justified only when the later prompt uses the earlier result; independent
+  calls belong in `parallel()` or `pipeline()`.
+- **Expressing cost caution as sequencing.** Cost is the number of calls, not
+  their arrangement; shrink the fleet, do not serialize it.
 - **Using a barrier for aesthetics.** If verification needs only its own prior
   item, use `pipeline()` and let it stream.
 - **Relying on global phase state in concurrent callbacks.** Pass `phase` in
@@ -605,4 +688,6 @@ against a worker that can invoke arbitrary CLIs through a shell.
 Scale the workflow to the user's words. A quick bug hunt needs a few finders
 and one verification pass; a thorough audit can justify broader lenses,
 multiple adversarial votes, explicit coverage accounting, and a final
-completeness critic.
+completeness critic. Breadth is the cost dial; concurrency is not — a large
+implementation fans out over a disjoint partition instead of running one
+worker at a time.
