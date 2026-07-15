@@ -72,16 +72,21 @@ const judge = best('taste').name
 
 Each entry exposes `name`, `description`, `harness`, `model`, `taste`,
 `intelligence`, `cost`, `default`, `disableSubagents`, `maxConcurrent`, and
-`maxCallsPerRun`. Disabled profiles do not appear, and naming one explicitly
-rejects the call. Omitting `profile` uses the enabled default profile, or the
-first enabled profile when no default is marked.
+`maxCallsPerRun`. It also exposes a live, read-only `remaining` value: capped
+profiles report how many more live calls the run may issue, while unlimited
+profiles report `null`. The value decreases when a call is accepted and does
+not replenish when that call completes because `maxCallsPerRun` is a lifetime
+run budget. Disabled profiles do not appear, and naming one explicitly rejects
+the call. Omitting `profile` uses the enabled default profile, or the first
+enabled profile when no default is marked.
 
 Profile limits matter before fan-out:
 
 - `maxConcurrent` queues excess live calls to that profile.
 - `maxCallsPerRun` counts logical `agent()` calls. The first live call beyond
-  the limit aborts the entire workflow because silently dropping paid work
-  would produce a misleading partial result.
+  the limit rejects immediately and guarantees that the workflow ultimately
+  fails. Calls already accepted continue to completion and are journaled
+  normally, so successful results remain reusable with `--resume`.
 - The run also has a global concurrency limit and lifetime agent-call cap. The
   defaults are `max(2, min(16, CPU cores - 2))` live workers and 1000 calls;
   override them with `--max-concurrent` and `--max-agents`.
@@ -491,7 +496,7 @@ counts. Silent truncation looks like comprehensive success.
 | Invalid schema output | Dyna asks again twice, then rejects after the third invalid result. |
 | Non-cancellation harness/API failure | Dyna may make one bounded continuation in the exact same resumable session; it never substitutes a fresh worker as recovery. |
 | Agent timeout | The call rejects as canceled/timed out; timeout recovery does not extend the deadline. |
-| Profile `maxCallsPerRun` exceeded | The whole run aborts, even inside `parallel()` or `pipeline()`. |
+| Profile `maxCallsPerRun` exceeded | The excess call rejects and the run fails even inside `parallel()` or `pipeline()`, but accepted calls drain and journal normally before failure is surfaced. |
 | Global `--max-agents` exceeded | That `agent()` call rejects; containment follows the direct/parallel/pipeline rules above. |
 | Worktree setup failure | The call rejects; no worker starts. |
 

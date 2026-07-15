@@ -148,8 +148,7 @@ func Execute(ctx context.Context, o Options) (string, error) {
 		eng.stopWorkers()
 		return res.resultJSON, res.err
 	case <-ctx.Done():
-		// abort() settles before canceling, so preserve its concrete diagnostic
-		// instead of racing it into a generic context cancellation.
+		// Prefer a terminal workflow result if it raced with cancellation.
 		select {
 		case res := <-eng.done:
 			eng.stopWorkers()
@@ -175,6 +174,7 @@ type engine struct {
 	agentSeq   int
 	profSems   map[string]chan struct{} // per-profile concurrency limiters
 	profCalls  map[string]int           // per-profile call counts this run
+	capErr     error                    // first profile call-cap failure
 	workerMu   sync.Mutex
 	workers    sync.WaitGroup
 	stopping   bool
@@ -185,11 +185,25 @@ func (e *engine) settle(o outcome) {
 	e.settleOnce.Do(func() { e.done <- o })
 }
 
-// abort fails the whole run and cancels every in-flight worker. Used when
-// continuing would only produce a degraded result (e.g. a profile cap hit).
-func (e *engine) abort(err error) {
-	e.settle(outcome{err: err})
-	e.cancel()
+// finish delivers the script outcome unless a profile call cap was exceeded.
+// A cap failure is surfaced only after every accepted worker has written its
+// terminal events and journal entry; those workers must remain resume-eligible.
+func (e *engine) finish(o outcome) {
+	e.mu.Lock()
+	capErr := e.capErr
+	e.mu.Unlock()
+	if capErr == nil {
+		e.settle(o)
+		return
+	}
+
+	e.workerMu.Lock()
+	e.stopping = true
+	e.workerMu.Unlock()
+	go func() {
+		e.workers.Wait()
+		e.settle(outcome{err: capErr})
+	}()
 }
 
 func (e *engine) beginWorker() bool {
@@ -237,12 +251,25 @@ func (e *engine) bind(vm *goja.Runtime) error {
 		e.emit(runstore.Event{T: "log", Msg: truncate(msg, 4000)})
 	})
 	vm.Set("__finish", func(resultJSON string) {
-		e.settle(outcome{resultJSON: resultJSON})
+		e.finish(outcome{resultJSON: resultJSON})
 	})
 	vm.Set("__fail", func(msg string) {
-		e.settle(outcome{err: fmt.Errorf("workflow failed: %s", msg)})
+		e.finish(outcome{err: fmt.Errorf("workflow failed: %s", msg)})
 	})
 	vm.Set("__spawn", e.spawn)
+	vm.Set("__profileRemaining", func(name string) any {
+		p, ok := e.opts.Store.Get(name)
+		if !ok || p.MaxCallsPerRun <= 0 {
+			return nil
+		}
+		e.mu.Lock()
+		remaining := p.MaxCallsPerRun - e.profCalls[name]
+		e.mu.Unlock()
+		if remaining < 0 {
+			remaining = 0
+		}
+		return remaining
+	})
 
 	argsV := goja.Undefined()
 	if e.opts.Args != nil {
@@ -252,20 +279,27 @@ func (e *engine) bind(vm *goja.Runtime) error {
 
 	// Expose the registry (read-only copy) so scripts can pick workers by
 	// stats: profiles.find(p => p.taste >= 4) etc.
-	profs := make([]map[string]any, 0, len(e.opts.Store.Profiles))
+	profs := make([]any, 0, len(e.opts.Store.Profiles))
 	for _, p := range e.opts.Store.Profiles {
 		if p.Disabled {
 			continue
 		}
-		profs = append(profs, map[string]any{
+		fields := map[string]any{
 			"name": p.Name, "description": p.Description, "harness": p.Harness,
 			"model": p.Model, "taste": p.Taste, "intelligence": p.Intelligence,
 			"cost": p.Cost, "default": p.Default,
 			"disableSubagents": p.DisableSubagents,
 			"maxConcurrent":    p.MaxConcurrent, "maxCallsPerRun": p.MaxCallsPerRun,
-		})
+		}
+		obj := vm.NewObject()
+		for name, value := range fields {
+			if err := obj.Set(name, value); err != nil {
+				return fmt.Errorf("bind profile %q field %q: %w", p.Name, name, err)
+			}
+		}
+		profs = append(profs, obj)
 	}
-	vm.Set("profiles", vm.ToValue(profs))
+	vm.Set("profiles", vm.NewArray(profs...))
 
 	_, err := vm.RunScript("prelude.js", prelude)
 	return err
@@ -384,19 +418,28 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 
 	// Per-profile limits: users cap how hard a profile may be leaned on
 	// (e.g. don't let a workflow spin up 50 concurrent expensive workers).
-	// Exceeding a call cap aborts the WHOLE run: a workflow that silently
-	// drops calls would produce a degraded result while still spending money.
+	// Exceeding a call cap still fails the whole run, but accepted workers drain
+	// naturally so their successful journal entries can be reused on resume.
 	if prof.MaxCallsPerRun > 0 {
 		e.mu.Lock()
-		e.profCalls[prof.Name]++
 		n := e.profCalls[prof.Name]
-		e.mu.Unlock()
-		if n > prof.MaxCallsPerRun {
+		if n < prof.MaxCallsPerRun {
+			e.profCalls[prof.Name] = n + 1
+		}
+		overLimit := n >= prof.MaxCallsPerRun
+		var capErr error
+		if overLimit {
 			err := fmt.Errorf("profile %q call limit exceeded (%d per run)", prof.Name, prof.MaxCallsPerRun)
-			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: err.Error()})
-			e.emit(runstore.Event{T: "log", Msg: "aborting run: " + err.Error()})
-			reject(err)
-			e.abort(fmt.Errorf("workflow aborted: %v; size the fan-out within the profile's maxCallsPerRun (see `dyna profiles list --json`) or route bulk work to an unlimited profile", err))
+			if e.capErr == nil {
+				e.capErr = fmt.Errorf("workflow failed: %v; size the fan-out within the profile's maxCallsPerRun (see `dyna profiles list --json`) or route bulk work to an unlimited profile", err)
+			}
+			capErr = err
+		}
+		e.mu.Unlock()
+		if overLimit {
+			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: capErr.Error()})
+			e.emit(runstore.Event{T: "log", Msg: "profile call limit exceeded; draining accepted calls before failing run: " + capErr.Error()})
+			reject(capErr)
 			return vm.ToValue(promise)
 		}
 	}
