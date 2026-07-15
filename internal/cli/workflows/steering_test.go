@@ -1,4 +1,4 @@
-package main
+package workflows
 
 import (
 	"bytes"
@@ -24,7 +24,7 @@ func TestRunsSteerCommandQueuesValidatedMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := runsCmd()
+	cmd := NewRunsCommand()
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetArgs([]string{"steer", run.Meta.ID, "3", "inspect", "the parser first"})
@@ -39,7 +39,7 @@ func TestRunsSteerCommandQueuesValidatedMessage(t *testing.T) {
 		t.Fatalf("messages = %#v, %v", messages, err)
 	}
 
-	bad := runsCmd()
+	bad := NewRunsCommand()
 	bad.SetArgs([]string{"steer", run.Meta.ID, "not-a-number", "message"})
 	if err := bad.Execute(); err == nil || !strings.Contains(err.Error(), "positive integer") {
 		t.Fatalf("invalid agent id error = %v", err)

@@ -1,4 +1,4 @@
-package main
+package profiles
 
 import (
 	"encoding/json"
@@ -131,7 +131,7 @@ func TestProfilesInitRegistersManagedBundle(t *testing.T) {
 
 func runProfilesCommand(t *testing.T, args ...string) {
 	t.Helper()
-	cmd := profilesCmd()
+	cmd := NewCommand()
 	cmd.SetArgs(args)
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true

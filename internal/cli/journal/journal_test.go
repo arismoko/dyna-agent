@@ -1,4 +1,4 @@
-package main
+package journal
 
 import (
 	"bytes"
@@ -10,7 +10,7 @@ import (
 
 func TestJournalCmdOutsideWorker(t *testing.T) {
 	t.Setenv(runstore.AgentJournalEnv, "")
-	cmd := journalCmd()
+	cmd := NewCommand()
 	cmd.SilenceErrors = true
 	cmd.SilenceUsage = true
 	cmd.SetArgs([]string{"Made progress"})
@@ -34,7 +34,7 @@ func TestJournalCmdAppendsQuietlyWithDefaults(t *testing.T) {
 	}
 	t.Setenv(runstore.AgentJournalEnv, path)
 
-	cmd := journalCmd()
+	cmd := NewCommand()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
