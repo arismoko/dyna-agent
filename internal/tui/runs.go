@@ -1110,7 +1110,8 @@ func (m runsModel) viewList(frame int) string {
 	}
 	maxRows := max(1, m.height-3-footerLines) // pane interior minus title/footer
 	overflow := len(m.runs) > maxRows
-	if overflow {
+	showOverflow := overflow && maxRows > 1
+	if showOverflow {
 		maxRows = max(1, maxRows-1) // reserve the range indicator
 	}
 	start, end := visibleRange(len(m.runs), m.sel, maxRows)
@@ -1129,7 +1130,7 @@ func (m runsModel) viewList(frame int) string {
 		}
 		b.WriteString(row + "\n")
 	}
-	if overflow {
+	if showOverflow {
 		b.WriteString(sDim.Render(overflowLabel(start, end, len(m.runs))) + "\n")
 	}
 	if m.confirm != "" && m.sel < len(m.runs) {
@@ -1142,7 +1143,7 @@ func (m runsModel) viewList(frame int) string {
 	} else if m.statusMsg != "" {
 		b.WriteString("\n" + sDim.Render(m.statusMsg))
 	}
-	return sPaneL.Width(w).Height(max(0, m.height-2)).Render(b.String())
+	return sPaneL.Width(w).Height(max(0, m.height-2)).Render(strings.TrimSuffix(b.String(), "\n"))
 }
 
 func statusIcon(status string, frame int) string {
