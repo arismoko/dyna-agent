@@ -65,44 +65,42 @@ place atomically. Already-running workflows keep their current executable
 inode and are never restarted or killed; the new version is used by future
 invocations. A successful update also refreshes the embedded dyna skill in
 detected agent harnesses. On an interactive terminal, the update then offers
-to replace colliding bundled profiles, keep them managed by future releases,
-and install root-agent guidance. That consent is durable across releases:
-later updates refresh only profiles that remain marked managed and refresh
-previously accepted guidance without asking the three questions again or
+to replace colliding bundled profiles and keep them managed by future
+releases. That consent is durable across releases: later updates refresh only
+profiles that remain marked managed without asking the two questions again or
 replaying the one-time replacement choice. Non-interactive and worker-facing
 paths never prompt.
 
 ## Teaching your agents about dyna
 
-`dyna skill install` writes an agent skill (a SKILL.md with name/description
-frontmatter) into every detected harness, so agents know dyna exists and to
-read `dyna guide`:
+`dyna skill install` writes the `load-dyna-orchestrator` agent skill (a
+SKILL.md with discovery-focused name/description frontmatter) into every
+detected harness. Its short description tells an agent when explicit Dyna
+fan-out is appropriate; the full body and `dyna guide` load only after the
+skill is selected:
 
-- **claude-code**: `~/.claude/skills/dyna/SKILL.md`
-- **codex**: `~/.codex/skills/dyna/SKILL.md`
-- **opencode**: `~/.config/opencode/skills/dyna/SKILL.md`
-- **pi**: `~/.pi/agent/skills/dyna/SKILL.md`
+- **claude-code**: `~/.claude/skills/load-dyna-orchestrator/SKILL.md`
+- **codex**: `~/.codex/skills/load-dyna-orchestrator/SKILL.md`
+- **opencode**: `~/.config/opencode/skills/load-dyna-orchestrator/SKILL.md`
+- **pi**: `~/.pi/agent/skills/load-dyna-orchestrator/SKILL.md`
 
 The Pi skill uses Pi's supported `disable-model-invocation: true` frontmatter,
-so it stays available to a person as `/skill:dyna` in plain Pi without appearing
-in model discovery. `dyna pi` supplies its own self-contained prompt and tools.
+so it stays available to a person as `/skill:load-dyna-orchestrator` in plain
+Pi without appearing in model discovery. `dyna pi` supplies its own
+self-contained prompt and tools.
 
 `dyna skill install <harness>` forces one, `--all` forces all,
 `dyna skill uninstall` removes cleanly, and `dyna skill show` prints the
 content. Older versions wrote managed AGENTS.md blocks; install and uninstall
-migrate those away automatically.
+migrate those away automatically. They also remove the old `skills/dyna`
+directory left by releases before the skill rename.
 
-`dyna skill guidance install` optionally adds a short, separately managed
-root-agent block to each detected non-Pi harness's shared `CLAUDE.md` or
-`AGENTS.md`.
-It explains when multi-model fan-out is worth its cost and when native
-subagents are the better fit. The command is idempotent, accepts the same
-harness names and `--all` flag as skill installation. Pi guidance is
-explicit-only via `dyna skill guidance install pi`; automatic setup removes
-older managed Pi blocks from both `~/.pi/agent/AGENTS.md` and the legacy
-`~/.pi/AGENTS.md` while preserving user content. The
-`dyna skill guidance uninstall` removes only its marker block. Uninstalling
-the dyna skill also removes this guidance.
+Dyna no longer writes guidance into shared `CLAUDE.md` or `AGENTS.md` files.
+`dyna skill guidance uninstall [harness...]` remains as a cleanup escape hatch
+that removes only Dyna's retired marker block while preserving surrounding
+user content. Skill install, update refresh, and uninstall perform the same
+cleanup automatically, including Pi's current `~/.pi/agent/AGENTS.md` and
+legacy `~/.pi/AGENTS.md` locations.
 
 ## Worker profiles
 

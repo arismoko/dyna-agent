@@ -3,7 +3,22 @@ package pi
 import (
 	"strings"
 	"testing"
+
+	"dyna-agent/internal/cli/guidance"
 )
+
+func TestPiOrchestrationPromptSharesGuidanceContent(t *testing.T) {
+	for name, shared := range map[string]string{
+		"profile routing":  guidance.ProfileRouting,
+		"script contract":  guidance.ScriptContract,
+		"workflow shape":   guidance.WorkflowShape,
+		"quality patterns": guidance.QualityPatterns,
+	} {
+		if !strings.Contains(piOrchestrationPrompt, shared) {
+			t.Errorf("%s is not present in the Pi orchestration prompt", name)
+		}
+	}
+}
 
 func TestPiOrchestrationPromptIsFullAndSelfContained(t *testing.T) {
 	for _, required := range []string{
@@ -14,11 +29,11 @@ func TestPiOrchestrationPromptIsFullAndSelfContained(t *testing.T) {
 		"Work directly only when",
 		"Call dyna_profiles first",
 		"quality over quantity",
-		"never as bulk implementation workhorses",
+		"as bulk implementation workhorses",
 		"cheapest capable profile",
-		"/tmp/dyna-workflow-*.js path and call",
+		"/tmp/dyna-workflow-*.js path, then call",
 		"dyna_run with workflow_path",
-		"validation attempts, then the call rejects",
+		"validation\nattempts, then the call rejects",
 		"committed HEAD",
 		"profiles.find(p => p.default) ?? profiles[0]",
 		"profile: profile.name",
@@ -27,7 +42,7 @@ func TestPiOrchestrationPromptIsFullAndSelfContained(t *testing.T) {
 		"isolation: 'worktree'",
 		"Shape follows dependencies, not caution",
 		"pipeline(workList, ...stages)",
-		"one\nimplementer per partition with worktree isolation",
+		"one implementer per partition with\nworktree isolation",
 		"implement-partitioned",
 		"byStat('intelligence')",
 		"cwd: impl.worktree",

@@ -8,24 +8,22 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"dyna-agent/internal/cli/guidance"
 )
 
-// Keep one compact portable policy/API source for installed skills and managed
-// root guidance. The detailed reference and runnable examples live in
-// guide/GUIDE.md (`dyna guide`). Pi has a separate tool-native prompt in pi.go.
-const agentFacingGuidance = `# Multi-model workflows with dyna
+// The detailed reference and runnable examples live in guide/GUIDE.md
+// (`dyna guide`). Shared orchestration mechanics live in guidance_shared.go;
+// Pi adds its tool-native invocation mechanics in pi.go.
+const agentFacingGuidance = `When this skill loads, open your response with: "Dyna orchestration engaged — ready to fan out the fleet."
+
+# Multi-model workflows with dyna
 
 Dyna runs plain JavaScript workflow files that orchestrate registered model
-workers. Use it for deterministic fan-out such as broad audits, parallel
-review, adversarial verification, judge panels, and isolated migrations.
+workers deterministically.
 
-## Use boundary
+## Before orchestrating
 
-- Run Dyna when the user explicitly asks for Dyna, a workflow, agent fan-out,
-  or multi-model orchestration, or when an invoked skill/instruction requires
-  it. A workflow can start many paid worker sessions, so do not infer that
-  scale merely because it could help; use ordinary harness subagents for
-  small context-local delegation, or describe the proposed fleet and ask.
 - Scout inline first: list files, inspect the diff, and discover the concrete
   work list. Then orchestrate over that list. Keep each run to one coherent
   phase when reading its result should influence the next phase. Scale to the
@@ -37,72 +35,17 @@ review, adversarial verification, judge panels, and isolated migrations.
   Native harness subagents remain governed by the selected
   profile; ` + "`disableSubagents`" + ` profiles require the worker to finish alone.
 
-## Compact contract
+## CLI invocation
 
-1. Run ` + "`dyna profiles list --json`" + ` and route by the 1-10 stats: high
-   ` + "`cost`" + ` means cheap enough for breadth — a high cost stat is not a
-   capability warning, so breadth stages (finders, sweeps, triage) default to
-   the cheapest capable profile. ` + "`intelligence`" + ` fits hard implementation,
-   and ` + "`taste`" + ` — judgment, design sensibility, quality over quantity — fits
-   review, judging, synthesis, and frontend/design work. Never route bulk
-   implementation to a taste-max profile; it writes code only for
-   quality-critical surfaces or targeted remediation of confirmed findings.
-   Disabled profiles are
-   absent. Respect ` + "`maxConcurrent`" + ` and ` + "`maxCallsPerRun`" + `; exceeding a call
-   cap aborts the run.
-2. Read ` + "`dyna guide`" + `, then write a plain ` + "`.js`" + ` file. Scripts allow top-level
-   ` + "`await`" + ` and return their final JSON value. The globals are ` + "`args`" + ` (parsed
-   ` + "`--args`" + ` JSON) and enabled ` + "`profiles`" + `. An optional ` + "`export const meta`" + `
-   documents the run; ` + "`meta.name`" + ` supplies its default display name.
-3. ` + "`agent(prompt, opts)`" + ` starts one independent worker. Supported options are
-   ` + "`profile`" + `, ` + "`label`" + `, ` + "`phase`" + `, ` + "`schema`" + `, ` + "`cwd`" + `, ` + "`timeout`" + ` (seconds),
-   and ` + "`isolation: 'worktree'`" + `. A schema returns validated JSON after at most
-   three attempts. Calls default to five hours; positive script timeouts
-   override profile timeouts, and all explicit/profile values have a
-   30-minute minimum. Worktree isolation starts from repository ` + "`HEAD`" + `,
-   removes a clean tree, and keeps/logs a changed tree; Dyna does not merge it.
-4. ` + "`workflow(nameOrRef, args)`" + ` composes one child workflow by existing path or
-   by name from ` + "`--workflows-dir`" + `, then ` + "`examples/`" + `. Child agents share the
-   parent run's concurrency semaphore, lifetime agent counter, and profile
-   limits. Nesting stops after one child level. Nested scripts always execute
-   during resume, while their matching agent calls use the parent cache.
-5. ` + "`parallel(thunks)`" + ` is an all-results barrier. Rejected thunks are logged
-   and become ` + "`null`" + `. ` + "`pipeline(items, ...stages)`" + ` streams each item through
-   its stages independently; a throwing stage makes that item ` + "`null`" + ` and skips
-   its remaining stages. Prefer pipeline unless a later step truly needs all
-   earlier results together. Use explicit ` + "`phase`" + ` options inside concurrent
-   callbacks. ` + "`phase(title)`" + ` groups progress, ` + "`log(message)`" + ` reports it, and
-   ` + "`sleep(ms)`" + ` paces polling.
-6. Run ` + "`dyna run workflow.js --args '{...}'`" + `. Progress goes to stderr and
-   the returned JSON goes to stdout. ` + "`--detach`" + ` prints a run id immediately;
-   collect it with ` + "`dyna runs wait <id>`" + `. ` + "`--resume <id>`" + ` reuses successful
-   calls matching profile, prompt, and schema; failures and kept changed
-   worktrees rerun. Inspect with ` + "`dyna runs show <id> --json`" + ` or ` + "`dyna tui`" + `.
+Run ` + "`dyna profiles list --json`" + ` to inspect the enabled fleet, read
+` + "`dyna guide`" + `, then write a plain ` + "`.js`" + ` workflow file. Run it with
+` + "`dyna run workflow.js --args '{...}'`" + `; progress goes to stderr and the
+returned JSON goes to stdout. ` + "`--detach`" + ` prints a run ID immediately, which
+` + "`dyna runs wait <id>`" + ` collects. ` + "`--resume <id>`" + ` reuses successful calls
+matching profile, prompt, and schema; failures and kept changed worktrees
+rerun. Inspect a run with ` + "`dyna runs show <id> --json`" + ` or ` + "`dyna tui`" + `.
 
-## Workflow shape
-
-Shape follows dependencies, not caution: an authorized run's cost is its
-number of ` + "`agent()`" + ` calls, not their arrangement, so serializing independent
-calls saves nothing and only wastes wall-clock. Scout until the concrete work
-items exist, then make the script's top level ` + "`pipeline(workList, ...stages)`" + `.
-Two consecutive ` + "`await agent()`" + ` calls are justified only when the second
-prompt interpolates the first result; reserve ` + "`parallel()`" + ` barriers for
-stages that need all prior results together (dedup, cross-candidate judging,
-zero-count early exit). For implementation, partitioning is the orchestrator's
-job: split the change into disjoint scopes so no two writers touch the same
-files, then fan out one implementer per partition with worktree isolation and
-stream each partition into its own review/verify stage. Parallel
-implementation over a clean partition is the expected shape, not an elevated
-risk. A full remediation run chains the routes end to end: cheap finders
-sweep in parallel, taste verifiers confirm each finding, intelligence
-implementers fix confirmed findings in disjoint worktrees, taste reviewers
-judge each diff, and implementers apply the touch-ups.
-
-Uncaught ` + "`agent()`" + ` errors fail the workflow; only ` + "`parallel`" + `/` + "`pipeline`" + ` convert
-their contained failures to ` + "`null`" + `. Filter and account for those values rather
-than silently claiming full coverage. Each worker sees only its prompt and working
-directory, so include all needed context. For parallel mutations, use worktree
-isolation or disjoint scopes.
+` + guidance.ProfileRouting + guidance.ScriptContract + guidance.WorkflowShape + guidance.QualityPatterns + `## Worker journals
 
 Dyna gives every worker a live ` + "`agents/<agent-id>/journal.jsonl`" + ` progress
 side channel and keeps the root ` + "`journal.jsonl`" + ` as the completed-call/resume
@@ -116,20 +59,11 @@ journal entry.
 
 const skillBody = agentFacingGuidance
 
-const skillFrontmatter = `---
-name: dyna
-description: Orchestrate registered model workers with the dyna CLI when the user explicitly requests Dyna, a workflow, fan-out, or multi-model orchestration such as parallel review, audits, judge panels, or adversarial verification.
----
+const skillDescription = "Load Dyna orchestration when the user explicitly requests Dyna, a workflow, agent fan-out, or multi-model orchestration such as parallel review, audits, judge panels, adversarial verification, or isolated migrations, or when an invoked skill or instruction requires it; do not infer that scale merely because it could help, and use ordinary subagents for small context-local delegation or describe the proposed fleet and ask."
 
-`
+const skillFrontmatter = "---\nname: load-dyna-orchestrator\ndescription: " + skillDescription + "\n---\n\n"
 
-const piSkillFrontmatter = `---
-name: dyna
-description: Orchestrate registered model workers with the dyna CLI when the user explicitly requests Dyna, a workflow, fan-out, or multi-model orchestration such as parallel review, audits, judge panels, or adversarial verification.
-disable-model-invocation: true
----
-
-`
+const piSkillFrontmatter = "---\nname: load-dyna-orchestrator\ndescription: " + skillDescription + "\ndisable-model-invocation: true\n---\n\n"
 
 const (
 	markBegin         = "<!-- dyna:skill:begin (managed by `dyna skill install`; do not edit inside) -->"
@@ -138,19 +72,20 @@ const (
 	guidanceMarkEnd   = "<!-- dyna:guidance:end -->"
 )
 
-const guidanceBody = agentFacingGuidance
-
 // Every supported harness loads Claude-style skills (a directory holding a
 // SKILL.md with name/description frontmatter), so installation is always a
-// standalone skill dir. legacyAgentsMD points at the AGENTS.md an older dyna
-// version wrote a managed block into; install/uninstall clean it up.
+// standalone skill dir. Legacy fields identify locations managed by older
+// versions; install and uninstall clean them up.
 type harnessTarget struct {
 	name string
 	// detect returns true if this harness appears to be installed.
 	detect func() bool
 	// path of the SKILL.md we manage.
 	path func() string
-	// shared root-agent instructions file where optional guidance is managed.
+	// legacySkillDir is the old skills/dyna directory retired when the skill
+	// was renamed. Empty = none.
+	legacySkillDir func() string
+	// shared root-agent instructions file where retired guidance is removed.
 	guidancePath func() string
 	// legacyAgentsMD is a shared instructions file older versions managed a
 	// marker block in; cleaned up on install/uninstall. Empty = none.
@@ -180,29 +115,35 @@ func hasCLI(bin string) bool { _, err := exec.LookPath(bin); return err == nil }
 func skillTargets() []harnessTarget {
 	return []harnessTarget{
 		{
-			name:         "claude-code",
-			detect:       func() bool { return hasCLI("claude") || dirExists(filepath.Join(home(), ".claude")) },
-			path:         func() string { return filepath.Join(home(), ".claude", "skills", "dyna", "SKILL.md") },
-			guidancePath: func() string { return filepath.Join(home(), ".claude", "CLAUDE.md") },
+			name:           "claude-code",
+			detect:         func() bool { return hasCLI("claude") || dirExists(filepath.Join(home(), ".claude")) },
+			path:           func() string { return filepath.Join(home(), ".claude", "skills", "load-dyna-orchestrator", "SKILL.md") },
+			legacySkillDir: func() string { return filepath.Join(home(), ".claude", "skills", "dyna") },
+			guidancePath:   func() string { return filepath.Join(home(), ".claude", "CLAUDE.md") },
 		},
 		{
 			name:           "codex",
 			detect:         func() bool { return hasCLI("codex") || dirExists(filepath.Join(home(), ".codex")) },
-			path:           func() string { return filepath.Join(home(), ".codex", "skills", "dyna", "SKILL.md") },
+			path:           func() string { return filepath.Join(home(), ".codex", "skills", "load-dyna-orchestrator", "SKILL.md") },
+			legacySkillDir: func() string { return filepath.Join(home(), ".codex", "skills", "dyna") },
 			guidancePath:   func() string { return filepath.Join(home(), ".codex", "AGENTS.md") },
 			legacyAgentsMD: func() string { return filepath.Join(home(), ".codex", "AGENTS.md") },
 		},
 		{
-			name:           "opencode",
-			detect:         func() bool { return hasCLI("opencode") || dirExists(filepath.Join(home(), ".config", "opencode")) },
-			path:           func() string { return filepath.Join(home(), ".config", "opencode", "skills", "dyna", "SKILL.md") },
+			name:   "opencode",
+			detect: func() bool { return hasCLI("opencode") || dirExists(filepath.Join(home(), ".config", "opencode")) },
+			path: func() string {
+				return filepath.Join(home(), ".config", "opencode", "skills", "load-dyna-orchestrator", "SKILL.md")
+			},
+			legacySkillDir: func() string { return filepath.Join(home(), ".config", "opencode", "skills", "dyna") },
 			guidancePath:   func() string { return filepath.Join(home(), ".config", "opencode", "AGENTS.md") },
 			legacyAgentsMD: func() string { return filepath.Join(home(), ".config", "opencode", "AGENTS.md") },
 		},
 		{
 			name:               "pi",
 			detect:             func() bool { return hasCLI("pi") || dirExists(filepath.Join(home(), ".pi")) },
-			path:               func() string { return filepath.Join(piAgentDir(), "skills", "dyna", "SKILL.md") },
+			path:               func() string { return filepath.Join(piAgentDir(), "skills", "load-dyna-orchestrator", "SKILL.md") },
+			legacySkillDir:     func() string { return filepath.Join(piAgentDir(), "skills", "dyna") },
 			guidancePath:       func() string { return filepath.Join(piAgentDir(), "AGENTS.md") },
 			legacyAgentsMD:     func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
 			legacyGuidancePath: func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
@@ -291,44 +232,8 @@ func NewSkillCommand() *cobra.Command {
 func guidanceCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "guidance",
-		Short: "Manage optional root-agent guidance in shared instruction files",
+		Short: "Remove retired root-agent guidance from shared instruction files",
 	}
-
-	var all bool
-	install := &cobra.Command{
-		Use:   "install [harness...]",
-		Short: "Install root-agent guidance (default: detected non-Pi harnesses; name pi explicitly)",
-		RunE: func(c *cobra.Command, argv []string) error {
-			pick := make(map[string]bool, len(argv))
-			for _, a := range argv {
-				pick[a] = true
-			}
-			installed := 0
-			for _, t := range skillTargets() {
-				if len(pick) > 0 && !pick[t.name] {
-					continue
-				}
-				if t.name == "pi" && !pick["pi"] {
-					fmt.Println("  - pi          explicit-only (install with `dyna skill guidance install pi` for plain Pi)")
-					continue
-				}
-				if len(pick) == 0 && !all && !t.detect() {
-					fmt.Printf("  - %-11s not detected, skipping (force with `dyna skill guidance install %s`)\n", t.name, t.name)
-					continue
-				}
-				if err := installGuidance(t); err != nil {
-					return fmt.Errorf("%s: %w", t.name, err)
-				}
-				fmt.Printf("  ✓ %-11s %s\n", t.name, t.guidancePath())
-				installed++
-			}
-			if installed == 0 {
-				fmt.Println("nothing installed")
-			}
-			return nil
-		},
-	}
-	install.Flags().BoolVar(&all, "all", false, "install into every supported harness even if not detected")
 
 	uninstall := &cobra.Command{
 		Use:   "uninstall [harness...]",
@@ -354,11 +259,18 @@ func guidanceCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(install, uninstall)
+	cmd.AddCommand(uninstall)
 	return cmd
 }
 
 func installSkill(t harnessTarget) error {
+	if _, err := uninstallGuidance(t); err != nil {
+		return err
+	}
+	removeLegacyBlock(t)
+	if _, err := removeLegacySkillDir(t); err != nil {
+		return err
+	}
 	p := t.path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
@@ -370,15 +282,16 @@ func installSkill(t harnessTarget) error {
 	if err := os.WriteFile(p, []byte(frontmatter+skillBody), 0o644); err != nil {
 		return err
 	}
-	removeLegacyBlock(t)
-	if _, err := removeLegacyGuidance(t); err != nil {
-		return err
-	}
 	return nil
 }
 
 func uninstallSkill(t harnessTarget) (bool, error) {
 	removed := removeLegacyBlock(t)
+	legacySkillRemoved, err := removeLegacySkillDir(t)
+	if err != nil {
+		return removed, err
+	}
+	removed = removed || legacySkillRemoved
 	guidanceRemoved, err := uninstallGuidance(t)
 	if err != nil {
 		return removed, err
@@ -396,16 +309,29 @@ func uninstallSkill(t harnessTarget) (bool, error) {
 	return true, nil
 }
 
-func installGuidance(t harnessTarget) error {
-	path := t.guidancePath()
-	if err := upsertManagedBlock(path, guidanceMarkBegin, guidanceMarkEnd, guidanceBody); err != nil {
-		return err
+func removeLegacySkillDir(t harnessTarget) (bool, error) {
+	if t.legacySkillDir == nil {
+		return false, nil
 	}
-	_, err := removeLegacyGuidance(t)
-	return err
+	dir := t.legacySkillDir()
+	if dir == "" || dir == filepath.Dir(t.path()) {
+		return false, nil
+	}
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func uninstallGuidance(t harnessTarget) (bool, error) {
+	if t.guidancePath == nil {
+		return removeLegacyGuidance(t)
+	}
 	path := t.guidancePath()
 	removed, err := removeManagedBlock(path, guidanceMarkBegin, guidanceMarkEnd)
 	if err != nil {
@@ -420,36 +346,14 @@ func uninstallGuidance(t harnessTarget) (bool, error) {
 }
 
 func removeLegacyGuidance(t harnessTarget) (bool, error) {
-	if t.legacyGuidancePath == nil || t.legacyGuidancePath() == t.guidancePath() {
+	if t.legacyGuidancePath == nil {
 		return false, nil
 	}
-	return removeManagedBlock(t.legacyGuidancePath(), guidanceMarkBegin, guidanceMarkEnd)
-}
-
-func upsertManagedBlock(path, begin, end, body string) error {
-	existing, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
+	legacyPath := t.legacyGuidancePath()
+	if legacyPath == "" || (t.guidancePath != nil && legacyPath == t.guidancePath()) {
+		return false, nil
 	}
-	block := begin + "\n" + strings.TrimSpace(body) + "\n" + end
-	content := string(existing)
-	if start := strings.Index(content, begin); start >= 0 {
-		finish := strings.Index(content[start+len(begin):], end)
-		if finish < 0 {
-			return fmt.Errorf("managed block in %s has a begin marker without an end marker", path)
-		}
-		finish += start + len(begin) + len(end)
-		content = content[:start] + block + content[finish:]
-	} else {
-		if content != "" && !strings.HasSuffix(content, "\n") {
-			content += "\n"
-		}
-		content += block + "\n"
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	return removeManagedBlock(legacyPath, guidanceMarkBegin, guidanceMarkEnd)
 }
 
 func removeManagedBlock(path, begin, end string) (bool, error) {

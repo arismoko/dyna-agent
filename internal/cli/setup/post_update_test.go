@@ -17,18 +17,21 @@ import (
 
 func TestPromptPostUpdateSetupAnswers(t *testing.T) {
 	var out bytes.Buffer
-	got, err := promptPostUpdateSetup(strings.NewReader("yes\nn\ny\n"), &out)
+	got, err := promptPostUpdateSetup(strings.NewReader("yes\nn\n"), &out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := postUpdateAnswers{Replace: true, Managed: false, Guidance: true}
+	want := postUpdateAnswers{Replace: true, Managed: false}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("answers = %#v, want %#v", got, want)
 	}
-	for _, question := range []string{"Replace your local profiles", "Keep them automatically updated", "Install a short guidance block"} {
+	for _, question := range []string{"Replace your local profiles", "Keep them automatically updated"} {
 		if !strings.Contains(out.String(), question) {
 			t.Fatalf("prompt output is missing %q: %s", question, out.String())
 		}
+	}
+	if strings.Contains(out.String(), "guidance") || strings.Contains(out.String(), "CLAUDE.md") || strings.Contains(out.String(), "AGENTS.md") {
+		t.Fatalf("prompt still offers shared guidance installation: %s", out.String())
 	}
 }
 
@@ -93,6 +96,13 @@ func TestPostUpdateStateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPostUpdateApplyCommandHasNoGuidanceFlag(t *testing.T) {
+	cmd := NewPostUpdateApplyCommand(func() string { return "v0.0.0" })
+	if flag := cmd.Flags().Lookup("guidance"); flag != nil {
+		t.Fatalf("retired guidance flag is still registered: %#v", flag)
+	}
+}
+
 func TestRecurringSetupRefreshesOnlyStillManagedProfiles(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
@@ -132,47 +142,6 @@ func TestRecurringSetupRefreshesOnlyStillManagedProfiles(t *testing.T) {
 	}
 }
 
-func TestAutomaticGuidanceSkipsPiAndMigratesBothPiPaths(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("PI_CODING_AGENT_DIR", "")
-	t.Setenv("PATH", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	for _, dir := range []string{filepath.Join(homeDir, ".claude"), filepath.Join(homeDir, ".codex"), filepath.Join(homeDir, ".pi")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	userContent := "# user content\n\nkeep me\n"
-	currentPi := filepath.Join(homeDir, ".pi", "agent", "AGENTS.md")
-	legacyPi := filepath.Join(homeDir, ".pi", "AGENTS.md")
-	for _, path := range []string{currentPi, legacyPi} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, []byte(userContent), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := upsertManagedBlock(path, guidanceMarkBegin, guidanceMarkEnd, "stale dyna guidance"); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if err := applyPostUpdateSetup(postUpdateAnswers{Guidance: true}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{currentPi, legacyPi} {
-		if got := readFile(t, path); got != userContent {
-			t.Fatalf("Pi migration changed user content at %s: %q", path, got)
-		}
-	}
-	for _, path := range []string{filepath.Join(homeDir, ".claude", "CLAUDE.md"), filepath.Join(homeDir, ".codex", "AGENTS.md")} {
-		if got := readFile(t, path); !strings.Contains(got, guidanceMarkBegin) {
-			t.Fatalf("automatic guidance missing from %s: %s", path, got)
-		}
-	}
-}
-
 func TestExplicitUpdateReusesLegacyConsentWithoutTerminalPrompt(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	legacy := []byte("{\n  \"version\": \"v1.0.0\",\n  \"answers\": {\"replace\": true, \"managed\": false, \"guidance\": true}\n}\n")
@@ -188,15 +157,18 @@ func TestExplicitUpdateReusesLegacyConsentWithoutTerminalPrompt(t *testing.T) {
 	t.Setenv("CAPTURE_ARGS", capture)
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
-	cmd.SetIn(strings.NewReader("n\nn\nn\n"))
+	cmd.SetIn(strings.NewReader("n\nn\n"))
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	OfferSetupAfterUpdate(cmd, executable, "v2.0.0")
 	got := readFile(t, capture)
-	for _, want := range []string{"--replace=true", "--managed=false", "--guidance=true", "--stamp-version=v2.0.0", "--recurring=true"} {
+	for _, want := range []string{"--replace=true", "--managed=false", "--stamp-version=v2.0.0", "--recurring=true"} {
 		if !strings.Contains(got, want+"\n") {
 			t.Fatalf("explicit update did not reuse consent %q:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "--guidance") {
+		t.Fatalf("explicit update forwarded retired guidance consent:\n%s", got)
 	}
 }
 
