@@ -15,6 +15,17 @@ import (
 	"dyna-agent/internal/profile"
 )
 
+func setTestEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			out = append(out, entry)
+		}
+	}
+	return append(out, prefix+value)
+}
+
 func TestDetachedRunSurvivesCallerScriptRemoval(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("detached process groups use Unix Setsid")
@@ -46,10 +57,10 @@ func TestDetachedRunSurvivesCallerScriptRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := os.Environ()
-	env = setEnv(env, "XDG_CONFIG_HOME", configDir)
-	env = setEnv(env, "XDG_DATA_HOME", dataDir)
-	env = setEnv(env, "DYNA_NO_AUTO_UPDATE", "1")
-	env = setEnv(env, "DYNA_SESSION", "detach-fixture")
+	env = setTestEnv(env, "XDG_CONFIG_HOME", configDir)
+	env = setTestEnv(env, "XDG_DATA_HOME", dataDir)
+	env = setTestEnv(env, "DYNA_NO_AUTO_UPDATE", "1")
+	env = setTestEnv(env, "DYNA_SESSION", "detach-fixture")
 
 	launchCtx, cancelLaunch := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancelLaunch()
