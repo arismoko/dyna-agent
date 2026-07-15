@@ -49,7 +49,13 @@ func TestPiOrchestrationPromptIsFullAndSelfContained(t *testing.T) {
 		"two consecutive finder rounds add nothing new",
 		"not part of that key",
 		"full remediation run chains the",
-		"Use dyna_runs to list, show, wait for, or cancel",
+		"do not block waiting for the workflow to finish",
+		"Report concisely what you launched",
+		"one automatic completion notification",
+		"process-local and does not survive\na Pi restart",
+		"use\nits wait action for that",
+		"recovering after a restart",
+		"give you another task while it continues\nin the background",
 		"dyna_steer",
 		"type /dyna",
 		"dashboard scoped to this persisted Pi",
@@ -60,7 +66,7 @@ func TestPiOrchestrationPromptIsFullAndSelfContained(t *testing.T) {
 			t.Errorf("Pi orchestration prompt is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"dyna guide", "profile: 'reviewer'", "dyna run workflow.js", "dyna profiles list --json", "Use Dyna only when the user explicitly requests", "inline JavaScript to dyna_run", "dyna_run with detach true"} {
+	for _, forbidden := range []string{"dyna guide", "profile: 'reviewer'", "dyna run workflow.js", "dyna profiles list --json", "Use Dyna only when the user explicitly requests", "inline JavaScript to dyna_run", "dyna_run with detach true", "Use dyna_runs to list, show, wait for, or cancel"} {
 		if strings.Contains(piOrchestrationPrompt, forbidden) {
 			t.Errorf("Pi orchestration prompt contains forbidden fallback %q", forbidden)
 		}

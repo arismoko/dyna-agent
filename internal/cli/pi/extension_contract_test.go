@@ -57,12 +57,17 @@ func TestPiExtensionRegistersNativeWorkflowTools(t *testing.T) {
 		`redactSecrets`,
 		`["runs", "list", "--json", "--session", session]`,
 		`checkedString(params.message, "message", 2000)`,
+		`After launch, do not wait or poll by default; briefly tell the user what you launched`,
+		`launch another workflow if another task is available`,
+		`Do not call dyna_runs routinely after dyna_run.`,
+		`use wait when asked to keep an eye on a run`,
+		`completion notifications are process-local and do not survive a Pi restart`,
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("Pi native workflow tool contract is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{`name: "dyna_guide"`, `exec(`, `shell: true`, `workflow: Type.String`, `detach: Type.Optional`, `if (!SESSION) return`, `await waitForSessionRunRegistration(runID, signal)`} {
+	for _, forbidden := range []string{`name: "dyna_guide"`, `exec(`, `shell: true`, `workflow: Type.String`, `detach: Type.Optional`, `if (!SESSION) return`, `await waitForSessionRunRegistration(runID, signal)`, `dyna_run always starts in the background; use its returned run ID with dyna_runs or dyna_steer`, `Use dyna_runs instead of shell commands for session-scoped list, show, wait, and cancel operations.`} {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("Pi native workflow tools contain forbidden implementation %q", forbidden)
 		}

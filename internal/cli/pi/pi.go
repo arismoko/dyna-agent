@@ -111,8 +111,20 @@ afterward is the orchestrator's job.
 
 ` + guidance.QualityPatterns + `## Runs, steering, and resume
 
-Use dyna_runs to list, show, wait for, or cancel runs belonging to this Pi
-session, and dyna_steer to redirect an active worker in its existing session.
+After dyna_run returns, do not block waiting for the workflow to finish or
+routinely poll it. Report concisely what you launched and continue the
+conversation naturally. If another task is available, launch another workflow
+for it. Pi sends one automatic completion notification when a run launched by
+this process finishes. That notification is process-local and does not survive
+a Pi restart.
+
+Use dyna_runs when the user explicitly asks you to keep an eye on progress; use
+its wait action for that. It is also for inspecting a run or its result,
+canceling it, troubleshooting it, or recovering after a restart. Use
+dyna_steer to redirect an active worker in its existing session. The user may
+ask you to steer a running workflow or give you another task while it continues
+in the background.
+
 resume reuses successful calls whose profile, exact prompt, and schema match;
 labels, phases, cwd, timeout, isolation, and args are not part of that key, so
 interpolate anything that must invalidate a call into its prompt. Failed calls

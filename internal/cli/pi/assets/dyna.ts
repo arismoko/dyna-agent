@@ -1833,7 +1833,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Run Dyna Workflow",
 		description: "Start a bounded JavaScript Dyna workflow from a temporary file. Every run is detached and promptly returns its run id; completion sends one Pi session update. The extension invokes the exact Dyna binary without a shell and consumes the source file after launch.",
 		promptSnippet: "Start a detached Dyna workflow from a temporary JavaScript file",
-		promptGuidelines: ["Before dyna_run, use write to create a unique /tmp/dyna-workflow-*.js file, then pass its workflow_path. dyna_run always starts in the background; use its returned run ID with dyna_runs or dyna_steer."],
+		promptGuidelines: ["Before dyna_run, use write to create a unique /tmp/dyna-workflow-*.js file, then pass its workflow_path. After launch, do not wait or poll by default; briefly tell the user what you launched, continue the conversation naturally, launch another workflow if another task is available, and rely on the automatic completion notification."],
 		parameters: Type.Object({
 			workflow_path: Type.String({ description: "Absolute /tmp/dyna-workflow-*.js file containing the complete workflow; dyna_run consumes it", minLength: 1, maxLength: 4096 }),
 			cwd: Type.Optional(Type.String({ description: "Working directory for workers", minLength: 1, maxLength: 4096 })),
@@ -1889,7 +1889,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Manage Dyna Runs",
 		description: "List, inspect, wait for, or cancel Dyna runs owned by this Pi session. Run-id operations reject runs from every other session.",
 		promptSnippet: "Manage Dyna runs from this Pi session",
-		promptGuidelines: ["Use dyna_runs instead of shell commands for session-scoped list, show, wait, and cancel operations."],
+		promptGuidelines: ["Do not call dyna_runs routinely after dyna_run. Use it instead of shell commands for user-requested progress monitoring (use wait when asked to keep an eye on a run), inspection, cancellation, troubleshooting, or recovery after a Pi restart; completion notifications are process-local and do not survive a Pi restart."],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("list"), Type.Literal("show"), Type.Literal("wait"), Type.Literal("cancel")], { description: "Run operation" }),
 			run_id: Type.Optional(Type.String({ description: "Required for show, wait, and cancel", pattern: "^wf_[A-Za-z0-9_-]+$", maxLength: 128 })),
