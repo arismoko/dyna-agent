@@ -43,6 +43,7 @@ type Options struct {
 	Store     *profile.Store
 	Run       *runstore.Run        // persistence sink
 	OnEvent   func(runstore.Event) // optional live sink (CLI progress)
+	OnWarning func(string)         // optional parse-time warning sink
 	WorkDir   string               // cwd for workers
 	MaxConc   int                  // 0 => min(16, cores-2)
 	MaxAgents int                  // lifetime agent() cap; 0 => 1000
@@ -60,14 +61,22 @@ type Options struct {
 // unchanged prefix instantly. Same key called N times → N queued results,
 // consumed in order.
 type Cache struct {
-	mu sync.Mutex
-	m  map[string][]any
+	mu         sync.Mutex
+	m          map[string][]any
+	priorCalls int
+	hits       int
+}
+
+// CacheStats summarizes replay use after a resumed run.
+type CacheStats struct {
+	Hits       int
+	PriorCalls int
 }
 
 // NewCache builds a resume cache from a previous run's journal (successful,
 // non-isolated calls only; failures and worktree runs re-execute).
 func NewCache(entries []runstore.JournalEntry) *Cache {
-	c := &Cache{m: map[string][]any{}}
+	c := &Cache{m: map[string][]any{}, priorCalls: len(entries)}
 	for _, e := range entries {
 		if e.Error == "" && e.Key != "" && e.Dir == "" {
 			c.m[e.Key] = append(c.m[e.Key], e.Result)
@@ -84,7 +93,16 @@ func (c *Cache) pop(key string) (any, bool) {
 		return nil, false
 	}
 	c.m[key] = q[1:]
+	c.hits++
 	return q[0], true
+}
+
+// Stats returns the number of cache hits in this run and the total number of
+// calls journaled by the prior run.
+func (c *Cache) Stats() CacheStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return CacheStats{Hits: c.hits, PriorCalls: c.priorCalls}
 }
 
 // callKey identifies an agent call for resume matching.
@@ -116,6 +134,9 @@ func Execute(ctx context.Context, o Options) (string, error) {
 		profSems: map[string]chan struct{}{}, profCalls: map[string]int{},
 	}
 
+	if warning := resumeNondeterminismWarning(o.ScriptSrc); warning != "" && o.OnWarning != nil {
+		o.OnWarning(warning)
+	}
 	wrapped, err := transform(o.ScriptSrc)
 	if err != nil {
 		return "", err
@@ -828,3 +849,25 @@ func transform(src string) (string, error) {
 }
 
 var metaRe = regexp.MustCompile(`(?m)^\s*export\s+const\s+meta\s*=`)
+
+var resumeNondeterminismPatterns = []struct {
+	name string
+	re   *regexp.Regexp
+}{
+	{name: "Date.now()", re: regexp.MustCompile(`(?:^|[^\p{L}\p{N}_$])Date\s*\.\s*now\s*\(`)},
+	{name: "new Date()", re: regexp.MustCompile(`(?:^|[^\p{L}\p{N}_$])new\s+Date\s*\(`)},
+	{name: "Math.random()", re: regexp.MustCompile(`(?:^|[^\p{L}\p{N}_$])Math\s*\.\s*random\s*\(`)},
+}
+
+func resumeNondeterminismWarning(src string) string {
+	var found []string
+	for _, pattern := range resumeNondeterminismPatterns {
+		if pattern.re.MatchString(src) {
+			found = append(found, pattern.name)
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("workflow uses resume-unstable JavaScript APIs (%s); --resume cache hits may not work as expected for agent() calls whose prompt or schema depends on those values; pass timestamps or random seeds through args instead", strings.Join(found, ", "))
+}
