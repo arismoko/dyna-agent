@@ -57,7 +57,7 @@ type Profile struct {
 	// across a workflow (0 = unlimited). Expensive models set this low.
 	MaxConcurrent int `json:"maxConcurrent,omitempty"`
 	// MaxCallsPerRun caps total agent() calls to this profile in one run
-	// (0 = unlimited). Exceeding it aborts the whole run.
+	// (0 = unlimited). Exceeding it fails the run after accepted calls drain.
 	MaxCallsPerRun int `json:"maxCallsPerRun,omitempty"`
 	// Disabled hides the profile from workflows (agent() calls to it fail,
 	// it leaves the scripts' profiles global) while keeping its stats and
