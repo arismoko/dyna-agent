@@ -20,9 +20,8 @@ import (
 )
 
 type postUpdateAnswers struct {
-	Replace  bool `json:"replace"`
-	Managed  bool `json:"managed"`
-	Guidance bool `json:"guidance"`
+	Replace bool `json:"replace"`
+	Managed bool `json:"managed"`
 }
 
 type postUpdateState struct {
@@ -86,7 +85,6 @@ func promptPostUpdateSetup(in io.Reader, out io.Writer) (postUpdateAnswers, erro
 	questions := []string{
 		"dyna now ships managed default profiles (kept up to date by dyna updates). Replace your local profiles that collide with the bundled ones now? [y/N] ",
 		"Keep them automatically updated from future dyna releases? WARNING: local customizations to these profiles could be overwritten. [y/N] ",
-		"Install a short guidance block into your agents' shared instruction files (CLAUDE.md/AGENTS.md) to help root agents use dyna wisely? [y/N] ",
 	}
 	answers := make([]bool, len(questions))
 	for i, question := range questions {
@@ -96,7 +94,7 @@ func promptPostUpdateSetup(in io.Reader, out io.Writer) (postUpdateAnswers, erro
 		}
 		answers[i] = answer
 	}
-	return postUpdateAnswers{Replace: answers[0], Managed: answers[1], Guidance: answers[2]}, nil
+	return postUpdateAnswers{Replace: answers[0], Managed: answers[1]}, nil
 }
 
 func askYesNo(reader *bufio.Reader, out io.Writer, question string) (bool, error) {
@@ -112,9 +110,6 @@ func askYesNo(reader *bufio.Reader, out io.Writer, question string) (bool, error
 }
 
 func applyPostUpdateSetup(answers postUpdateAnswers, out io.Writer) error {
-	if err := removeAutomaticPiGuidance(); err != nil {
-		return err
-	}
 	store, err := loadStore()
 	if err != nil {
 		return err
@@ -125,57 +120,13 @@ func applyPostUpdateSetup(answers postUpdateAnswers, out io.Writer) error {
 		}
 		fmt.Fprintf(out, "updated %d bundled profile collision(s)\n", collisions)
 	}
-	if answers.Guidance {
-		if err := installDetectedGuidance(out); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
 // applyRecurringPostUpdateSetup deliberately avoids ApplyBundledPreferences:
 // loading the store refreshes only profiles the user still marks managed.
-func applyRecurringPostUpdateSetup(answers postUpdateAnswers, out io.Writer) error {
-	if err := removeAutomaticPiGuidance(); err != nil {
-		return err
-	}
+func applyRecurringPostUpdateSetup(_ postUpdateAnswers, _ io.Writer) error {
 	if _, err := loadStore(); err != nil {
-		return err
-	}
-	if answers.Guidance {
-		return installDetectedGuidance(out)
-	}
-	return nil
-}
-
-func installDetectedGuidance(out io.Writer) error {
-	if err := removeAutomaticPiGuidance(); err != nil {
-		return err
-	}
-	for _, target := range skillTargets() {
-		if target.name == "pi" {
-			continue
-		}
-		if !target.detect() {
-			continue
-		}
-		if err := installGuidance(target); err != nil {
-			return fmt.Errorf("%s: %w", target.name, err)
-		}
-		fmt.Fprintf(out, "  ✓ %-11s %s\n", target.name, target.guidancePath())
-	}
-	return nil
-}
-
-// Pi receives this contract directly from `dyna pi`; automatic setup removes
-// old managed copies from both Pi paths. Explicit guidance installation for
-// plain Pi remains available through `dyna skill guidance install pi`.
-func removeAutomaticPiGuidance() error {
-	for _, target := range skillTargets() {
-		if target.name != "pi" {
-			continue
-		}
-		_, err := uninstallGuidance(target)
 		return err
 	}
 	return nil
@@ -231,7 +182,6 @@ func postUpdateApplyCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&answers.Replace, "replace", false, "replace colliding bundled profiles")
 	cmd.Flags().BoolVar(&answers.Managed, "managed", false, "keep colliding bundled profiles managed")
-	cmd.Flags().BoolVar(&answers.Guidance, "guidance", false, "install root-agent guidance")
 	cmd.Flags().BoolVar(&recurring, "recurring", false, "refresh only previously accepted managed setup")
 	cmd.Flags().StringVar(&stampVersion, "stamp-version", "", "version recorded as prompted")
 	return cmd
@@ -249,7 +199,7 @@ func offerSetupAfterUpdate(c *cobra.Command, executable, latest string) {
 		isTerminalFile(c.OutOrStdout()),
 		os.Getenv(runstore.AgentJournalEnv) != "",
 	) {
-		fmt.Fprintln(c.OutOrStdout(), "post-update setup is interactive; later you can run `dyna profiles init --force` and `dyna skill guidance install`")
+		fmt.Fprintln(c.OutOrStdout(), "post-update setup is interactive; later you can run `dyna profiles init --force`")
 		return
 	}
 	answers, err := promptPostUpdateSetup(c.InOrStdin(), c.OutOrStdout())
@@ -271,7 +221,6 @@ func applySetupWithExecutable(ctx context.Context, executable, latest string, an
 		"_post-update-apply",
 		"--replace=" + strconv.FormatBool(answers.Replace),
 		"--managed=" + strconv.FormatBool(answers.Managed),
-		"--guidance=" + strconv.FormatBool(answers.Guidance),
 		"--stamp-version=" + latest,
 	}
 	if recurring {

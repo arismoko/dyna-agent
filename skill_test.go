@@ -9,8 +9,7 @@ import (
 
 func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 	required := []string{
-		"user explicitly asks for Dyna",
-		"do not infer that\n  scale",
+		"Dyna orchestration engaged — ready to fan out the fleet.",
 		"Scout inline first",
 		"recursively orchestrate Dyna",
 		"use only `dyna journal`",
@@ -22,7 +21,7 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 		"agent(prompt, opts)",
 		"profile`, `label`, `phase`, `schema`, `cwd`, `timeout`",
 		"isolation: 'worktree'",
-		"at most\n   three attempts",
+		"attempts, then the call rejects",
 		"30-minute minimum",
 		"all-results barrier",
 		"streams each item through",
@@ -30,11 +29,13 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 		"Shape follows dependencies, not caution",
 		"pipeline(workList, ...stages)",
 		"one implementer per partition",
-		"expected shape, not an elevated",
-		"quality over quantity",
-		"taste-max profile",
+		"expected shape",
+		"taste-heavy profile",
 		"cheapest capable profile",
-		"full remediation run chains the",
+		"full remediation run chains the routes",
+		"adversarial verification",
+		"judge panel",
+		"two consecutive finder rounds",
 		"dyna runs wait <id>",
 		"--resume <id>",
 		"matching profile, prompt, and schema",
@@ -48,15 +49,44 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 		"never replaces\nthe worker's final response or schema output",
 		"never starts a replacement",
 	}
-	for name, body := range map[string]string{"skill": skillBody, "guidance": guidanceBody} {
-		for _, contract := range required {
-			if !strings.Contains(body, contract) {
-				t.Errorf("%s body is missing contract %q", name, contract)
+	for _, contract := range required {
+		if !strings.Contains(skillBody, contract) {
+			t.Errorf("skill body is missing contract %q", contract)
+		}
+	}
+	if skillBody != agentFacingGuidance {
+		t.Fatal("skill body must use the canonical agent-facing contract")
+	}
+	for name, shared := range map[string]string{
+		"profile routing":  sharedProfileRoutingGuidance,
+		"script contract":  sharedScriptContractGuidance,
+		"workflow shape":   sharedWorkflowShapeGuidance,
+		"quality patterns": sharedQualityPatternsGuidance,
+	} {
+		if !strings.Contains(agentFacingGuidance, shared) || !strings.Contains(piOrchestrationPrompt, shared) {
+			t.Errorf("%s is not shared by the skill and Pi prompt", name)
+		}
+	}
+}
+
+func TestSkillFrontmatterDrivesExplicitDiscovery(t *testing.T) {
+	for name, frontmatter := range map[string]string{"portable": skillFrontmatter, "pi": piSkillFrontmatter} {
+		for _, required := range []string{
+			"name: load-dyna-orchestrator",
+			"user explicitly requests Dyna",
+			"agent fan-out",
+			"parallel review, audits, judge panels, adversarial verification, or isolated migrations",
+			"do not infer that scale merely because it could help",
+			"ordinary subagents for small context-local delegation",
+			"describe the proposed fleet and ask",
+		} {
+			if !strings.Contains(frontmatter, required) {
+				t.Errorf("%s frontmatter is missing %q", name, required)
 			}
 		}
 	}
-	if skillBody != agentFacingGuidance || guidanceBody != agentFacingGuidance {
-		t.Fatal("skill and managed guidance must share the canonical agent-facing contract")
+	if !strings.Contains(piSkillFrontmatter, "disable-model-invocation: true") {
+		t.Fatal("Pi frontmatter no longer disables model invocation")
 	}
 }
 
@@ -68,8 +98,8 @@ func TestAgentFacingDocsExcludeUnsupportedWorkflowConcepts(t *testing.T) {
 		"4096 items",
 	}
 	for name, body := range map[string]string{
-		"guidance": agentFacingGuidance,
-		"guide":    guideMD,
+		"skill": agentFacingGuidance,
+		"guide": guideMD,
 	} {
 		for _, term := range forbidden {
 			if strings.Contains(body, term) {
@@ -127,11 +157,11 @@ func TestPiOrchestrationPromptIsFullAndSelfContained(t *testing.T) {
 		"Work directly only when",
 		"Call dyna_profiles first",
 		"quality over quantity",
-		"never as bulk implementation workhorses",
+		"bulk implementation workhorses",
 		"cheapest capable profile",
-		"/tmp/dyna-workflow-*.js path and call",
+		"/tmp/dyna-workflow-*.js path",
 		"dyna_run with workflow_path",
-		"validation attempts, then the call rejects",
+		"attempts, then the call rejects",
 		"committed HEAD",
 		"profiles.find(p => p.default) ?? profiles[0]",
 		"profile: profile.name",
@@ -140,7 +170,7 @@ func TestPiOrchestrationPromptIsFullAndSelfContained(t *testing.T) {
 		"isolation: 'worktree'",
 		"Shape follows dependencies, not caution",
 		"pipeline(workList, ...stages)",
-		"one\nimplementer per partition with worktree isolation",
+		"one implementer per partition with\nworktree isolation",
 		"implement-partitioned",
 		"byStat('intelligence')",
 		"cwd: impl.worktree",
@@ -170,7 +200,7 @@ func TestPiOrchestrationPromptIsFullAndSelfContained(t *testing.T) {
 
 func TestPiOnlyToolsDoNotLeakIntoPortableGuidance(t *testing.T) {
 	for _, tool := range []string{"dyna_profiles", "dyna_run", "dyna_runs", "dyna_steer"} {
-		if strings.Contains(agentFacingGuidance, tool) || strings.Contains(skillBody, tool) || strings.Contains(guidanceBody, tool) {
+		if strings.Contains(agentFacingGuidance, tool) || strings.Contains(skillBody, tool) {
 			t.Errorf("portable guidance contains Pi-only tool %q", tool)
 		}
 	}
@@ -195,37 +225,47 @@ func TestPiSkillIsManualOnlyForModelInvocation(t *testing.T) {
 	}
 }
 
-func TestGuidanceCommandRequiresExplicitPiTarget(t *testing.T) {
+func TestSkillTargetsUseRenamedDirectoriesAndTrackLegacyDirs(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+
+	wantBases := map[string]string{
+		"claude-code": filepath.Join(homeDir, ".claude", "skills"),
+		"codex":       filepath.Join(homeDir, ".codex", "skills"),
+		"opencode":    filepath.Join(homeDir, ".config", "opencode", "skills"),
+		"pi":          filepath.Join(homeDir, ".pi", "agent", "skills"),
+	}
+	for _, target := range skillTargets() {
+		base := wantBases[target.name]
+		if got, want := target.path(), filepath.Join(base, "load-dyna-orchestrator", "SKILL.md"); got != want {
+			t.Errorf("%s skill path = %q, want %q", target.name, got, want)
+		}
+		if got, want := target.legacySkillDir(), filepath.Join(base, "dyna"); got != want {
+			t.Errorf("%s legacy skill dir = %q, want %q", target.name, got, want)
+		}
+	}
+}
+
+func TestGuidanceCommandOnlyUninstallsRetiredBlocks(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("PATH", t.TempDir())
 	t.Setenv("PI_CODING_AGENT_DIR", "")
-	for _, dir := range []string{filepath.Join(homeDir, ".codex"), filepath.Join(homeDir, ".pi")} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	path := filepath.Join(homeDir, ".codex", "AGENTS.md")
+	userContent := "# User instructions\n\nKeep this.\n"
+	writeRetiredGuidance(t, path, userContent, "stale guidance")
 
 	cmd := guidanceCmd()
-	cmd.SetArgs([]string{"install"})
+	if commands := cmd.Commands(); len(commands) != 1 || commands[0].Name() != "uninstall" {
+		t.Fatalf("guidance subcommands = %v, want uninstall only", cmd.Commands())
+	}
+	cmd.SetArgs([]string{"uninstall", "codex"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(homeDir, ".codex", "AGENTS.md")); err != nil {
-		t.Fatalf("detected Codex guidance was not installed: %v", err)
-	}
-	piPath := filepath.Join(homeDir, ".pi", "agent", "AGENTS.md")
-	if _, err := os.Stat(piPath); !os.IsNotExist(err) {
-		t.Fatalf("no-argument guidance install wrote Pi guidance: %v", err)
-	}
-
-	explicit := guidanceCmd()
-	explicit.SetArgs([]string{"install", "pi"})
-	if err := explicit.Execute(); err != nil {
-		t.Fatal(err)
-	}
-	if got := readFile(t, piPath); !strings.Contains(got, guidanceMarkBegin) {
-		t.Fatalf("explicit Pi guidance was not installed:\n%s", got)
+	if got := readFile(t, path); got != userContent {
+		t.Fatalf("guidance cleanup changed user content: got %q, want %q", got, userContent)
 	}
 }
 
@@ -242,8 +282,11 @@ func TestPiTargetUsesPiAgentDirectory(t *testing.T) {
 		}
 	}
 	agentDir := filepath.Join(homeDir, ".pi", "agent")
-	if got, want := pi.path(), filepath.Join(agentDir, "skills", "dyna", "SKILL.md"); got != want {
+	if got, want := pi.path(), filepath.Join(agentDir, "skills", "load-dyna-orchestrator", "SKILL.md"); got != want {
 		t.Fatalf("pi skill path = %q, want %q", got, want)
+	}
+	if got, want := pi.legacySkillDir(), filepath.Join(agentDir, "skills", "dyna"); got != want {
+		t.Fatalf("pi legacy skill dir = %q, want %q", got, want)
 	}
 	if got, want := pi.guidancePath(), filepath.Join(agentDir, "AGENTS.md"); got != want {
 		t.Fatalf("pi guidance path = %q, want %q", got, want)
@@ -258,8 +301,11 @@ func TestPiTargetHonorsCustomAgentDirectory(t *testing.T) {
 		if target.name != "pi" {
 			continue
 		}
-		if got, want := target.path(), filepath.Join(agentDir, "skills", "dyna", "SKILL.md"); got != want {
+		if got, want := target.path(), filepath.Join(agentDir, "skills", "load-dyna-orchestrator", "SKILL.md"); got != want {
 			t.Fatalf("pi skill path = %q, want %q", got, want)
+		}
+		if got, want := target.legacySkillDir(), filepath.Join(agentDir, "skills", "dyna"); got != want {
+			t.Fatalf("pi legacy skill dir = %q, want %q", got, want)
 		}
 		if got, want := target.guidancePath(), filepath.Join(agentDir, "AGENTS.md"); got != want {
 			t.Fatalf("pi guidance path = %q, want %q", got, want)
@@ -286,90 +332,49 @@ func TestPiTargetExpandsTildeInCustomAgentDirectory(t *testing.T) {
 	t.Fatal("pi target not found")
 }
 
-func TestGuidanceInstallMigratesLegacyPath(t *testing.T) {
+func TestSkillInstallMigratesLegacySkillAndGuidance(t *testing.T) {
 	dir := t.TempDir()
-	current := filepath.Join(dir, "agent", "AGENTS.md")
-	legacy := filepath.Join(dir, "AGENTS.md")
+	currentGuidance := filepath.Join(dir, "agent", "AGENTS.md")
+	legacyGuidance := filepath.Join(dir, "AGENTS.md")
+	legacySkillDir := filepath.Join(dir, "agent", "skills", "dyna")
 	target := harnessTarget{
-		path:               func() string { return filepath.Join(dir, "agent", "skills", "dyna", "SKILL.md") },
-		guidancePath:       func() string { return current },
-		legacyGuidancePath: func() string { return legacy },
+		name:               "codex",
+		path:               func() string { return filepath.Join(dir, "agent", "skills", "load-dyna-orchestrator", "SKILL.md") },
+		legacySkillDir:     func() string { return legacySkillDir },
+		guidancePath:       func() string { return currentGuidance },
+		legacyGuidancePath: func() string { return legacyGuidance },
 	}
 	userContent := "# User guidance\n\nKeep this.\n"
-	if err := os.WriteFile(legacy, []byte(userContent), 0o644); err != nil {
+	if err := os.MkdirAll(legacySkillDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := upsertManagedBlock(legacy, guidanceMarkBegin, guidanceMarkEnd, guidanceBody); err != nil {
+	if err := os.WriteFile(filepath.Join(legacySkillDir, "SKILL.md"), []byte("old skill"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := installGuidance(target); err != nil {
-		t.Fatal(err)
-	}
-	if got := readFile(t, current); !strings.Contains(got, guidanceMarkBegin) {
-		t.Fatalf("current guidance was not installed:\n%s", got)
-	}
-	if got := readFile(t, legacy); got != userContent {
-		t.Fatalf("legacy user guidance changed: got %q, want %q", got, userContent)
-	}
-	if err := upsertManagedBlock(legacy, guidanceMarkBegin, guidanceMarkEnd, guidanceBody); err != nil {
-		t.Fatal(err)
-	}
+	writeRetiredGuidance(t, currentGuidance, userContent, "current guidance")
+	writeRetiredGuidance(t, legacyGuidance, userContent, "legacy guidance")
+
 	if err := installSkill(target); err != nil {
 		t.Fatal(err)
 	}
-	if got := readFile(t, legacy); got != userContent {
-		t.Fatalf("skill install did not migrate legacy guidance: got %q, want %q", got, userContent)
+	if _, err := os.Stat(legacySkillDir); !os.IsNotExist(err) {
+		t.Fatalf("legacy skill directory still exists: %v", err)
+	}
+	if got := readFile(t, target.path()); !strings.Contains(got, "name: load-dyna-orchestrator") {
+		t.Fatalf("new skill was not installed:\n%s", got)
+	}
+	for _, path := range []string{currentGuidance, legacyGuidance} {
+		if got := readFile(t, path); got != userContent {
+			t.Fatalf("skill install changed user guidance at %s: got %q, want %q", path, got, userContent)
+		}
 	}
 }
 
-func TestGuidanceInstallUninstallPreservesUserContent(t *testing.T) {
+func TestGuidanceUninstallPreservesUserContent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "AGENTS.md")
 	userContent := "# My instructions\n\nKeep this line.\n"
-	if err := os.WriteFile(path, []byte(userContent), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeRetiredGuidance(t, path, userContent, "stale managed content")
 	target := harnessTarget{guidancePath: func() string { return path }}
-
-	if err := installGuidance(target); err != nil {
-		t.Fatal(err)
-	}
-	first, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{userContent, guidanceMarkBegin, guidanceMarkEnd, "# Multi-model workflows with dyna", "use only `dyna journal`"} {
-		if !strings.Contains(string(first), required) {
-			t.Fatalf("installed guidance is missing %q:\n%s", required, first)
-		}
-	}
-
-	stale := string(first)
-	bodyStart := strings.Index(stale, guidanceMarkBegin) + len(guidanceMarkBegin)
-	bodyEnd := strings.Index(stale, guidanceMarkEnd)
-	stale = stale[:bodyStart] + "\nstale managed content\n" + stale[bodyEnd:]
-	if err := os.WriteFile(path, []byte(stale), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := installGuidance(target); err != nil {
-		t.Fatal(err)
-	}
-	second, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(second) != string(first) || strings.Count(string(second), guidanceMarkBegin) != 1 || strings.Contains(string(second), "stale managed content") {
-		t.Fatalf("guidance install did not replace its marker block in place:\n%s", second)
-	}
-	if err := installGuidance(target); err != nil {
-		t.Fatal(err)
-	}
-	third, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(third) != string(second) {
-		t.Fatalf("guidance install was not idempotent:\n%s", third)
-	}
 
 	removed, err := uninstallGuidance(target)
 	if err != nil {
@@ -390,9 +395,7 @@ func TestGuidanceInstallUninstallPreservesUserContent(t *testing.T) {
 func TestGuidanceUninstallRemovesEmptyFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "CLAUDE.md")
 	target := harnessTarget{guidancePath: func() string { return path }}
-	if err := installGuidance(target); err != nil {
-		t.Fatal(err)
-	}
+	writeRetiredGuidance(t, path, "", "retired guidance")
 	if _, err := uninstallGuidance(target); err != nil {
 		t.Fatal(err)
 	}
@@ -407,13 +410,20 @@ func TestGuidanceMalformedBlockPreservesUserContent(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	target := harnessTarget{guidancePath: func() string { return path }}
-
-	if err := installGuidance(target); err == nil {
-		t.Fatal("install accepted a managed begin marker without an end marker")
+	skillPath := filepath.Join(filepath.Dir(path), "skills", "load-dyna-orchestrator", "SKILL.md")
+	target := harnessTarget{
+		path:         func() string { return skillPath },
+		guidancePath: func() string { return path },
 	}
+
 	if removed, err := uninstallGuidance(target); err == nil || removed {
 		t.Fatalf("uninstall malformed block = (%v, %v), want (false, error)", removed, err)
+	}
+	if err := installSkill(target); err == nil {
+		t.Fatal("skill install accepted a malformed retired guidance block")
+	}
+	if _, err := os.Stat(skillPath); !os.IsNotExist(err) {
+		t.Fatalf("skill was written despite failed guidance cleanup: %v", err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
@@ -426,16 +436,23 @@ func TestGuidanceMalformedBlockPreservesUserContent(t *testing.T) {
 
 func TestSkillUninstallAlsoRemovesGuidance(t *testing.T) {
 	dir := t.TempDir()
+	legacySkillDir := filepath.Join(dir, "skills", "dyna")
 	target := harnessTarget{
-		path:         func() string { return filepath.Join(dir, "skills", "dyna", "SKILL.md") },
-		guidancePath: func() string { return filepath.Join(dir, "AGENTS.md") },
+		name:           "codex",
+		path:           func() string { return filepath.Join(dir, "skills", "load-dyna-orchestrator", "SKILL.md") },
+		legacySkillDir: func() string { return legacySkillDir },
+		guidancePath:   func() string { return filepath.Join(dir, "AGENTS.md") },
 	}
 	if err := installSkill(target); err != nil {
 		t.Fatal(err)
 	}
-	if err := installGuidance(target); err != nil {
+	if err := os.MkdirAll(legacySkillDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(legacySkillDir, "SKILL.md"), []byte("old skill"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeRetiredGuidance(t, target.guidancePath(), "", "retired guidance")
 	removed, err := uninstallSkill(target)
 	if err != nil {
 		t.Fatal(err)
@@ -443,9 +460,24 @@ func TestSkillUninstallAlsoRemovesGuidance(t *testing.T) {
 	if !removed {
 		t.Fatal("skill uninstall reported nothing removed")
 	}
-	for _, path := range []string{target.path(), target.guidancePath()} {
+	for _, path := range []string{target.path(), legacySkillDir, target.guidancePath()} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("managed file %s still exists: %v", path, err)
 		}
+	}
+}
+
+func writeRetiredGuidance(t *testing.T, path, userContent, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := userContent
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += guidanceMarkBegin + "\n" + body + "\n" + guidanceMarkEnd + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

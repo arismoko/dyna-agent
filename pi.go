@@ -28,49 +28,23 @@ journal and obey any disableSubagents restriction.
 
 ## Routing and launch
 
-Call dyna_profiles first. It returns only enabled profiles; route by the 1-10
-stats (cost for breadth, intelligence for hard implementation, taste for review
-and synthesis) and respect maxConcurrent and maxCallsPerRun — the first call
-beyond a per-profile cap aborts the entire run. Taste is judgment, design
-sensibility, and polish — quality over quantity: use taste-heavy workers for
-review, judging, synthesis, frontend/design work, and targeted remediation of
-confirmed findings, never as bulk implementation workhorses; broad
-implementation routes by intelligence. A high cost stat is not a capability
-warning: breadth stages — finders, sweeps, discovery, first-pass triage —
-default to the cheapest capable profile rather than a premium one. Pick by the
-stage's dominant stat and confirm or veto with the description; the common
-route is cheap to gather, intelligent to implement, tasteful to decide. Then use write to
-create the complete workflow at a unique /tmp/dyna-workflow-*.js path and call
-dyna_run with workflow_path; do not put source in the dyna_run call or use shell
-commands or CLI documentation for normal discovery. dyna_run always starts in
-the background and promptly returns its run id.
+Call dyna_profiles first; it returns only enabled profiles.
 
-## Script contract
+` + sharedProfileRoutingGuidance + `## Pi-native launch
 
-Scripts are plain JavaScript, not TypeScript, with no Node.js require, import,
-or filesystem surface; filesystem work belongs in workers. Scripts support
-top-level await and return a JSON value. Their globals are args and enabled
-profiles, plus phase(title), log(message), and sleep(ms). Optional
-export const meta = { name: 'review' } names the run. Select profiles inside
-the script, for example
+Use write to create the complete workflow at a unique
+/tmp/dyna-workflow-*.js path, then call dyna_run with workflow_path. Do not put
+source in the dyna_run call or use shell commands or CLI documentation for
+normal discovery. dyna_run always starts in the background and promptly
+returns its run ID.
+
+Scripts have no Node.js require, import, or filesystem surface; filesystem
+work belongs in workers. Select profiles inside the script, for example:
 const byStat = stat => [...profiles].sort((a, b) => b[stat] - a[stat])[0].name.
 
-agent(prompt, opts) supports profile, label, phase, schema, cwd, timeout seconds,
-and isolation: 'worktree'. Each worker sees only its own prompt and working
-directory, so include all needed context in the prompt. Schemas get up to three
-validation attempts, then the call rejects. Timeouts default to five hours and
-explicit values clamp to a 30-minute minimum. Worktree isolation starts from
-committed HEAD and never copies uncommitted changes; changed
-worktrees are kept for deliberate integration and never merged by Dyna; clean
-ones are removed. When a later stage needs a changed tree, have the implementer
-run pwd and report the absolute path, then pass it as the next stage's cwd.
-
-parallel is an all-results barrier and converts rejected thunks to null. pipeline
-streams each item through stages independently; a throwing stage makes only that
-item null and skips its remaining stages. Uncaught agent errors fail the
-workflow, so filter and account for nulls; return expected/completed/dropped
-counts instead of only results.filter(Boolean), because silent truncation looks
-like comprehensive success.
+` + sharedScriptContractGuidance + `When a later stage needs a changed tree, have
+the implementer run pwd and report the absolute path, then pass it as the next
+stage's cwd.
 
 Write this source to the temporary workflow file before calling dyna_run:
 
@@ -89,22 +63,7 @@ agent(...)). For typed output pass schema: { type: 'object', required: ['ok'],
 properties: { ok: { type: 'boolean' } } }. Use explicit phase options inside
 concurrent callbacks; phase(title), log(message), and sleep(ms) are also global.
 
-Shape follows dependencies, not caution: an authorized run's cost is its number
-of agent calls, not their arrangement, so never serialize independent calls.
-Scout the concrete work list, then make the script's top level
-pipeline(workList, ...stages). Consecutive awaits are justified only when the
-second prompt uses the first result; reserve parallel barriers for stages that
-need all results together. For implementation, partition the change into
-disjoint file scopes so no two writers touch the same files, fan out one
-implementer per partition with worktree isolation, and stream each partition
-into its own review stage. Parallel implementation over a clean partition is
-the expected shape, not an elevated risk. A full remediation run chains the
-routes end to end: cheap finders sweep in parallel, taste verifiers confirm
-each finding, intelligence implementers fix confirmed findings in disjoint
-worktrees, taste reviewers judge each diff, and implementers apply the
-touch-ups — all streaming through pipeline stages.
-
-## Large implementation runs
+` + sharedWorkflowShapeGuidance + `## Large implementation runs
 
 Partition first, then fan out. The canonical shape:
 
@@ -149,22 +108,7 @@ return { results, dropped: results.filter(r => r === null).length }
 Dyna keeps each changed worktree and reports its path; integrating them
 afterward is the orchestrator's job.
 
-## Quality patterns
-
-For adversarial verification, ask several independent skeptics to refute each
-claim (default refuted=true when uncertain) and keep only claims a conservative
-majority cannot refute; use distinct lenses such as correctness, security, and
-reproducibility because diversity catches more failure modes than identical
-prompts. For a judge panel, generate candidates from materially different
-angles, score them with independent judges against an explicit schema, and
-synthesize from the winner; never let one agent both propose and declare itself
-best. For unknown-size discovery, deduplicate against everything already seen
-and stop only after two consecutive finder rounds add nothing new, then run a
-completeness critic asking what modality, subsystem, or verification is still
-missing. If a run samples, caps, or skips work, log it and return coverage
-counts.
-
-## Runs, steering, and resume
+` + sharedQualityPatternsGuidance + `## Runs, steering, and resume
 
 Use dyna_runs to list, show, wait for, or cancel runs belonging to this Pi
 session, and dyna_steer to redirect an active worker in its existing session.
