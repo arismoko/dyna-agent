@@ -443,7 +443,7 @@ var (
 )
 
 func runCmd() *cobra.Command {
-	var argsJSON, name, dir, resumeID string
+	var argsJSON, name, dir, resumeID, workflowDir string
 	var quiet, asJSON, detach bool
 	var maxConc, maxAgents int
 	cmd := &cobra.Command{
@@ -477,6 +477,11 @@ func runCmd() *cobra.Command {
 			if dir == "" {
 				dir, _ = os.Getwd()
 			}
+			scriptPath := a[0]
+			if original := os.Getenv("DYNA_SCRIPT_PATH"); original != "" {
+				scriptPath = original
+			}
+			scriptPath, _ = filepath.Abs(scriptPath)
 
 			var cache *engine.Cache
 			if resumeID != "" {
@@ -504,11 +509,11 @@ func runCmd() *cobra.Command {
 			}
 			start := time.Now()
 			result, err := engine.Execute(ctx, engine.Options{
-				ScriptSrc: string(src), Args: argsVal, Store: store,
+				ScriptSrc: string(src), ScriptPath: scriptPath, Args: argsVal, Store: store,
 				Run: run, OnEvent: onEvent,
 				OnWarning: func(message string) { fmt.Fprintln(os.Stderr, stWarn.Render("warning: "+message)) },
 				WorkDir:   dir, MaxConc: maxConc,
-				MaxAgents: maxAgents, Cache: cache,
+				MaxAgents: maxAgents, Cache: cache, WorkflowDir: workflowDir,
 				Paused: func() bool { return runstore.IsPaused(run.Meta.ID) },
 			})
 			runstore.SetPaused(run.Meta.ID, false)
@@ -550,6 +555,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().IntVar(&maxConc, "max-concurrent", 0, "max concurrent workers (default min(16, cores-2))")
 	cmd.Flags().IntVar(&maxAgents, "max-agents", 0, "lifetime agent() cap for this run (default 1000)")
 	cmd.Flags().StringVar(&resumeID, "resume", "", "run id to resume: unchanged agent() calls replay from its journal")
+	cmd.Flags().StringVar(&workflowDir, "workflows-dir", "", "name-keyed workflow registry (default user config, then ./examples)")
 	cmd.Flags().BoolVar(&detach, "detach", false, "run in the background; prints the run id (poll with `dyna runs wait`)")
 	return cmd
 }
@@ -612,7 +618,9 @@ func detachRun(script string) error {
 		childArgs = append(childArgs, "--name", metaName(string(src), script))
 	}
 	child := exec.Command(self, childArgs...)
-	child.Env = append(os.Environ(), "DYNA_RUN_ID="+id)
+	originalScript, _ := filepath.Abs(script)
+	child.Env = setEnv(os.Environ(), "DYNA_RUN_ID", id)
+	child.Env = setEnv(child.Env, "DYNA_SCRIPT_PATH", originalScript)
 	child.Stdout = logf
 	child.Stderr = logf
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -626,27 +634,39 @@ func detachRun(script string) error {
 
 func printEvent(e runstore.Event) {
 	w := os.Stderr
+	indent := ""
+	if e.Workflow != "" {
+		indent = "    "
+	}
 	switch e.T {
 	case "phase":
-		fmt.Fprintln(w, stPhase.Render("── "+e.Title+" ──"))
+		fmt.Fprintln(w, stPhase.Render(indent+"── "+e.Title+" ──"))
+	case "workflow_start":
+		fmt.Fprintln(w, stPhase.Render("  ◇ workflow ")+stName.Render(e.Title)+stDim.Render("  "+e.Workflow))
 	case "agent_start":
-		fmt.Fprintln(w, stDim.Render("  ◌ queued  ")+stName.Render(e.Label)+stDim.Render("  ["+e.Profile+"]  "+e.Preview))
+		fmt.Fprintln(w, stDim.Render(indent+"  ◌ queued  ")+stName.Render(e.Label)+stDim.Render("  ["+e.Profile+"]  "+e.Preview))
 	case "agent_run":
-		fmt.Fprintln(w, stDim.Render("  ▶ running ")+stName.Render(e.Label)+stDim.Render("  ["+e.Profile+"]"))
+		fmt.Fprintln(w, stDim.Render(indent+"  ▶ running ")+stName.Render(e.Label)+stDim.Render("  ["+e.Profile+"]"))
 	case "agent_steer":
-		fmt.Fprintln(w, stPhase.Render("  ↪ steered ")+stName.Render(e.Label)+stDim.Render("  "+e.Preview))
+		fmt.Fprintln(w, stPhase.Render(indent+"  ↪ steered ")+stName.Render(e.Label)+stDim.Render("  "+e.Preview))
 	case "agent_end":
 		d := time.Duration(e.DurMs) * time.Millisecond
 		switch {
 		case e.Cached:
-			fmt.Fprintln(w, stOK.Render("  ⚡ cached  ")+stName.Render(e.Label)+stDim.Render("  "+e.Preview))
+			fmt.Fprintln(w, stOK.Render(indent+"  ⚡ cached  ")+stName.Render(e.Label)+stDim.Render("  "+e.Preview))
 		case e.Status == "ok":
-			fmt.Fprintln(w, stOK.Render("  ✓ done    ")+stName.Render(e.Label)+stDim.Render(fmt.Sprintf("  %s  %s", d.Round(time.Second), e.Preview)))
+			fmt.Fprintln(w, stOK.Render(indent+"  ✓ done    ")+stName.Render(e.Label)+stDim.Render(fmt.Sprintf("  %s  %s", d.Round(time.Second), e.Preview)))
 		default:
-			fmt.Fprintln(w, stErr.Render("  ✗ failed  ")+stName.Render(e.Label)+stErr.Render("  "+e.Error))
+			fmt.Fprintln(w, stErr.Render(indent+"  ✗ failed  ")+stName.Render(e.Label)+stErr.Render("  "+e.Error))
+		}
+	case "workflow_end":
+		if e.Status == "ok" {
+			fmt.Fprintln(w, stOK.Render("  ◆ workflow done  ")+stName.Render(e.Title)+stDim.Render("  "+(time.Duration(e.DurMs)*time.Millisecond).Round(time.Second).String()))
+		} else {
+			fmt.Fprintln(w, stErr.Render("  ◇ workflow failed  ")+stName.Render(e.Title)+stErr.Render("  "+e.Error))
 		}
 	case "log":
-		fmt.Fprintln(w, "  › "+e.Msg)
+		fmt.Fprintln(w, indent+"  › "+e.Msg)
 	}
 }
 

@@ -37,6 +37,7 @@ type runsModel struct {
 	metaFinal      bool // terminal status observed in meta.json, after result write
 	phases         []*phaseState
 	phaseByName    map[string]*phaseState
+	workflows      map[string]*workflowState
 	agents         map[int]*agentState
 	logs           []string
 	omittedLogs    int
@@ -96,6 +97,7 @@ func newRunsModel(session string) runsModel {
 		follow:         true,
 		paused:         make(map[string]bool),
 		phaseByName:    make(map[string]*phaseState),
+		workflows:      make(map[string]*workflowState),
 		agents:         make(map[int]*agentState),
 		completionByID: make(map[int]*runstore.JournalEntry),
 		journalFollow:  true,
@@ -633,6 +635,7 @@ func (m *runsModel) resetLoaded(id string) {
 func (m *runsModel) clearEvents() {
 	m.phases = nil
 	m.phaseByName = make(map[string]*phaseState)
+	m.workflows = make(map[string]*workflowState)
 	m.agents = make(map[int]*agentState)
 	m.agentOrder = nil
 	m.legacyAgentOrder = nil
@@ -657,6 +660,33 @@ func (m *runsModel) ensurePhase(name string) *phaseState {
 	return ph
 }
 
+func (m *runsModel) ensureWorkflow(id, name, parentPhase string) *workflowState {
+	if workflow := m.workflows[id]; workflow != nil {
+		if name != "" {
+			workflow.name = name
+		}
+		return workflow
+	}
+	workflow := &workflowState{
+		id: id, name: name, parentPhase: parentPhase, status: "running",
+		phaseByName: make(map[string]*phaseState),
+	}
+	m.workflows[id] = workflow
+	ph := m.ensurePhase(parentPhase)
+	ph.workflows = append(ph.workflows, workflow)
+	return workflow
+}
+
+func (w *workflowState) ensurePhase(name string) *phaseState {
+	if ph := w.phaseByName[name]; ph != nil {
+		return ph
+	}
+	ph := &phaseState{name: name}
+	w.phaseByName[name] = ph
+	w.phases = append(w.phases, ph)
+	return ph
+}
+
 const maxVisibleLogs = 500
 
 func (m *runsModel) applyEvents(events []runstore.Event) {
@@ -665,7 +695,15 @@ func (m *runsModel) applyEvents(events []runstore.Event) {
 	for _, e := range events {
 		switch e.T {
 		case "phase":
-			m.ensurePhase(e.Title)
+			if e.Workflow != "" {
+				m.ensureWorkflow(e.Workflow, "", "").ensurePhase(e.Title)
+			} else {
+				m.ensurePhase(e.Title)
+			}
+		case "workflow_start":
+			workflow := m.ensureWorkflow(e.Workflow, e.Title, e.Phase)
+			workflow.ref = e.Ref
+			workflow.status = "running"
 		case "agent_start":
 			a := m.agents[e.ID]
 			if a != nil && a.started {
@@ -680,11 +718,17 @@ func (m *runsModel) applyEvents(events []runstore.Event) {
 			a.label = e.Label
 			a.profile = e.Profile
 			a.phase = e.Phase
+			a.workflow = e.Workflow
 			a.status = "queued"
 			a.preview = e.Preview
 			a.started = true
 			m.agentOrder = append(m.agentOrder, a)
-			ph := m.ensurePhase(a.phase)
+			var ph *phaseState
+			if a.workflow != "" {
+				ph = m.ensureWorkflow(a.workflow, "", "").ensurePhase(a.phase)
+			} else {
+				ph = m.ensurePhase(a.phase)
+			}
 			ph.agents = append(ph.agents, a)
 		case "agent_run":
 			if a := m.agents[e.ID]; a != nil {
@@ -693,7 +737,13 @@ func (m *runsModel) applyEvents(events []runstore.Event) {
 		case "agent_end":
 			if a := m.agents[e.ID]; a != nil {
 				if !agentDone(a.status) && agentDone(e.Status) {
-					m.ensurePhase(a.phase).done++
+					var ph *phaseState
+					if a.workflow != "" {
+						ph = m.ensureWorkflow(a.workflow, "", "").ensurePhase(a.phase)
+					} else {
+						ph = m.ensurePhase(a.phase)
+					}
+					ph.done++
 				}
 				a.status = e.Status
 				a.durMs = e.DurMs
@@ -728,6 +778,11 @@ func (m *runsModel) applyEvents(events []runstore.Event) {
 			} else {
 				logBatch[(logCount-1)%maxVisibleLogs] = e.Msg
 			}
+		case "workflow_end":
+			workflow := m.ensureWorkflow(e.Workflow, e.Title, e.Phase)
+			workflow.status = e.Status
+			workflow.durMs = e.DurMs
+			workflow.errMsg = e.Error
 		case "run_end":
 			if r, ok := m.selectedMeta(); ok && r.ID == m.loadedID {
 				m.runs[m.sel].Status = e.Status
@@ -1178,6 +1233,7 @@ type agentState struct {
 	label            string
 	profile          string
 	phase            string
+	workflow         string
 	status           string // queued|running|ok|error
 	durMs            int64
 	preview          string
@@ -1198,9 +1254,22 @@ type agentState struct {
 }
 
 type phaseState struct {
-	name   string
-	agents []*agentState
-	done   int
+	name      string
+	agents    []*agentState
+	workflows []*workflowState
+	done      int
+}
+
+type workflowState struct {
+	id          string
+	name        string
+	ref         string
+	parentPhase string
+	status      string
+	durMs       int64
+	errMsg      string
+	phases      []*phaseState
+	phaseByName map[string]*phaseState
 }
 
 func (m runsModel) renderDetailHeader(frame int) string {
@@ -1247,45 +1316,34 @@ func (m *runsModel) renderDetailBody() string {
 		if name == "" {
 			name = "(no phase)"
 		}
-		b.WriteString(sPhase.Render("▮ "+name) + sDim.Render(fmt.Sprintf("  %d/%d", ph.done, len(ph.agents))) + "\n")
-		for _, a := range ph.agents {
-			icon := agentStatusIcon(a.status)
-			line := fmt.Sprintf("  %s %s", icon, a.label)
-			if a.profile != "" {
-				line += " " + sProfTag.Render("["+a.profile+"]")
+		done := ph.done
+		for _, workflow := range ph.workflows {
+			if agentDone(workflow.status) {
+				done++
 			}
-			line += " " + sDim.Render(a.status)
-			if a.cached {
-				line += sWarnS.Render("  ⚡cached")
-			} else if a.durMs > 0 {
-				line += sDim.Render("  " + fmtDur(a.durMs))
+		}
+		b.WriteString(sPhase.Render("▮ "+name) + sDim.Render(fmt.Sprintf("  %d/%d", done, len(ph.agents)+len(ph.workflows))) + "\n")
+		for _, a := range ph.agents {
+			renderAgent(&b, a, w, "  ")
+		}
+		for _, workflow := range ph.workflows {
+			line := fmt.Sprintf("  %s workflow %s %s", agentStatusIcon(workflow.status), workflow.name, sDim.Render(workflow.status))
+			if workflow.durMs > 0 {
+				line += sDim.Render("  " + fmtDur(workflow.durMs))
 			}
 			b.WriteString(line + "\n")
-			if a.status == "error" && a.errMsg != "" {
-				b.WriteString(sErrS.Render("      "+truncLine(a.errMsg, w-8)) + "\n")
-			} else if journalEntryCount(a) > 0 {
-				kind := strings.TrimSpace(a.journalKind)
-				if kind == "" {
-					kind = "note"
-				}
-				progress := strings.ToUpper(kind)
-				if a.journalPreview != "" {
-					progress += "  " + truncLine(a.journalPreview, max(8, w-26))
-				}
-				progress += "  ·  " + agentJournalSummary(a)
-				b.WriteString("      " + sJournalKind.Render(progress) + "\n")
-			} else if a.preview != "" && a.status == "ok" {
-				b.WriteString(sDim.Render("      ↳ "+truncLine(a.preview, w-10)) + "\n")
+			if workflow.errMsg != "" {
+				b.WriteString(sErrS.Render("      "+truncLine(workflow.errMsg, w-8)) + "\n")
 			}
-			if a.nudgeMsg != "" || a.nudgeStatus != "" {
-				badge := sNudge
-				if nudgeUnavailable(a) {
-					badge = sNudgeUnavailable
+			for _, childPhase := range workflow.phases {
+				childName := childPhase.name
+				if childName == "" {
+					childName = "(no phase)"
 				}
-				b.WriteString("      " + badge.Render(nudgeLabel(a)) + "\n")
-			}
-			if a.steerTS > 0 {
-				b.WriteString("      " + sJournalKind.Render("STEER  "+truncLine(a.steerPreview, max(8, w-20))) + "\n")
+				b.WriteString(sDim.Render(fmt.Sprintf("    ├ %s  %d/%d", childName, childPhase.done, len(childPhase.agents))) + "\n")
+				for _, a := range childPhase.agents {
+					renderAgent(&b, a, w, "      ")
+				}
 			}
 		}
 		b.WriteString("\n")
@@ -1311,6 +1369,48 @@ func (m *runsModel) renderDetailBody() string {
 		b.WriteString(wrap(res, w) + "\n")
 	}
 	return b.String()
+}
+
+func renderAgent(b *strings.Builder, a *agentState, w int, indent string) {
+	icon := agentStatusIcon(a.status)
+	line := fmt.Sprintf("%s%s %s", indent, icon, a.label)
+	if a.profile != "" {
+		line += " " + sProfTag.Render("["+a.profile+"]")
+	}
+	line += " " + sDim.Render(a.status)
+	if a.cached {
+		line += sWarnS.Render("  ⚡cached")
+	} else if a.durMs > 0 {
+		line += sDim.Render("  " + fmtDur(a.durMs))
+	}
+	b.WriteString(line + "\n")
+	detailIndent := indent + "    "
+	if a.status == "error" && a.errMsg != "" {
+		b.WriteString(sErrS.Render(detailIndent+truncLine(a.errMsg, w-len(detailIndent)-2)) + "\n")
+	} else if journalEntryCount(a) > 0 {
+		kind := strings.TrimSpace(a.journalKind)
+		if kind == "" {
+			kind = "note"
+		}
+		progress := strings.ToUpper(kind)
+		if a.journalPreview != "" {
+			progress += "  " + truncLine(a.journalPreview, max(8, w-26))
+		}
+		progress += "  ·  " + agentJournalSummary(a)
+		b.WriteString(detailIndent + sJournalKind.Render(progress) + "\n")
+	} else if a.preview != "" && a.status == "ok" {
+		b.WriteString(sDim.Render(detailIndent+"↳ "+truncLine(a.preview, w-len(detailIndent)-4)) + "\n")
+	}
+	if a.nudgeMsg != "" || a.nudgeStatus != "" {
+		badge := sNudge
+		if nudgeUnavailable(a) {
+			badge = sNudgeUnavailable
+		}
+		b.WriteString(detailIndent + badge.Render(nudgeLabel(a)) + "\n")
+	}
+	if a.steerTS > 0 {
+		b.WriteString(detailIndent + sJournalKind.Render("STEER  "+truncLine(a.steerPreview, max(8, w-20))) + "\n")
+	}
 }
 
 func agentStatusIcon(status string) string {

@@ -1,5 +1,5 @@
 // Package engine runs a workflow script: a plain-JavaScript program using
-// agent()/parallel()/pipeline()/phase()/log() to orchestrate worker profiles.
+// agent()/workflow()/parallel()/pipeline()/phase()/log() to orchestrate worker profiles.
 // Scripts run on an embedded JS engine (goja); agent() calls fan out to real
 // agent CLIs through the harness package, capped by a concurrency semaphore.
 package engine
@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,16 +39,18 @@ const (
 
 // Options configures one workflow execution.
 type Options struct {
-	ScriptSrc string
-	Args      any
-	Store     *profile.Store
-	Run       *runstore.Run        // persistence sink
-	OnEvent   func(runstore.Event) // optional live sink (CLI progress)
-	OnWarning func(string)         // optional parse-time warning sink
-	WorkDir   string               // cwd for workers
-	MaxConc   int                  // 0 => min(16, cores-2)
-	MaxAgents int                  // lifetime agent() cap; 0 => 1000
-	Cache     *Cache               // resume cache (nil = fresh run)
+	ScriptSrc   string
+	ScriptPath  string // invoking script path; relative workflow refs use its directory
+	Args        any
+	Store       *profile.Store
+	Run         *runstore.Run        // persistence sink
+	OnEvent     func(runstore.Event) // optional live sink (CLI progress)
+	OnWarning   func(string)         // optional parse-time warning sink
+	WorkDir     string               // cwd for workers
+	MaxConc     int                  // 0 => min(16, cores-2)
+	MaxAgents   int                  // lifetime agent() cap; 0 => 1000
+	Cache       *Cache               // resume cache (nil = fresh run)
+	WorkflowDir string               // optional name-keyed workflow registry directory
 	// JournalIdle controls how long a running worker may go without an
 	// agent-authored progress record before an exact-session reminder. Zero
 	// uses five minutes; exposed primarily as a deterministic test seam.
@@ -119,6 +122,24 @@ type outcome struct {
 // Execute runs the script to completion and returns the workflow's return
 // value as JSON.
 func Execute(ctx context.Context, o Options) (string, error) {
+	return execute(ctx, o, nil, 0, "")
+}
+
+// sharedState owns every limit whose meaning is "per run", including calls
+// made by nested workflows. Each script still gets an isolated JS runtime.
+type sharedState struct {
+	sem chan struct{}
+
+	mu          sync.Mutex
+	agentSeq    int
+	workflowSeq int
+	profSems    map[string]chan struct{}
+	profCalls   map[string]int
+	capErr      error // first profile call-cap failure anywhere in this run's tree
+	abortRoot   func(error)
+}
+
+func execute(ctx context.Context, o Options, shared *sharedState, depth int, workflowID string) (string, error) {
 	maxConc := o.MaxConc
 	if maxConc <= 0 {
 		maxConc = runtime.NumCPU() - 2
@@ -129,10 +150,12 @@ func Execute(ctx context.Context, o Options) (string, error) {
 			maxConc = 2
 		}
 	}
-	eng := &engine{
-		opts: o, sem: make(chan struct{}, maxConc),
-		profSems: map[string]chan struct{}{}, profCalls: map[string]int{},
+	if shared == nil {
+		shared = &sharedState{
+			sem: make(chan struct{}, maxConc), profSems: map[string]chan struct{}{}, profCalls: map[string]int{},
+		}
 	}
+	eng := &engine{opts: o, shared: shared, depth: depth, workflowID: workflowID}
 
 	if warning := resumeNondeterminismWarning(o.ScriptSrc); warning != "" && o.OnWarning != nil {
 		o.OnWarning(warning)
@@ -149,6 +172,12 @@ func Execute(ctx context.Context, o Options) (string, error) {
 	eng.ctx = ctx
 	eng.cancel = cancel
 	eng.loop = loop
+	if depth == 0 {
+		shared.abortRoot = func(err error) {
+			eng.settle(outcome{err: err})
+			eng.cancel()
+		}
+	}
 
 	loop.Start()
 	defer loop.Stop()
@@ -183,19 +212,17 @@ func Execute(ctx context.Context, o Options) (string, error) {
 
 type engine struct {
 	opts       Options
-	sem        chan struct{}
+	shared     *sharedState
+	depth      int
+	workflowID string
 	ctx        context.Context
 	cancel     context.CancelFunc
 	loop       *eventloop.EventLoop
 	vm         *goja.Runtime // valid only on the loop thread
 	done       chan outcome
 	settleOnce sync.Once
-	mu         sync.Mutex
+	phaseMu    sync.Mutex
 	curPhase   string
-	agentSeq   int
-	profSems   map[string]chan struct{} // per-profile concurrency limiters
-	profCalls  map[string]int           // per-profile call counts this run
-	capErr     error                    // first profile call-cap failure
 	workerMu   sync.Mutex
 	workers    sync.WaitGroup
 	stopping   bool
@@ -206,13 +233,16 @@ func (e *engine) settle(o outcome) {
 	e.settleOnce.Do(func() { e.done <- o })
 }
 
-// finish delivers the script outcome unless a profile call cap was exceeded.
-// A cap failure is surfaced only after every accepted worker has written its
-// terminal events and journal entry; those workers must remain resume-eligible.
+// finish delivers the script outcome unless a profile call cap was exceeded
+// anywhere in this run's tree (root or a nested workflow()). A cap failure is
+// surfaced only after every accepted worker owned by this engine has written
+// its terminal events and journal entry; those workers must remain
+// resume-eligible. capErr lives in sharedState because per-profile caps apply
+// across nested workflow() calls, not just the engine that happened to trip it.
 func (e *engine) finish(o outcome) {
-	e.mu.Lock()
-	capErr := e.capErr
-	e.mu.Unlock()
+	e.shared.mu.Lock()
+	capErr := e.shared.capErr
+	e.shared.mu.Unlock()
 	if capErr == nil {
 		e.settle(o)
 		return
@@ -248,6 +278,9 @@ func (e *engine) stopWorkers() {
 }
 
 func (e *engine) emit(ev runstore.Event) {
+	if ev.Workflow == "" {
+		ev.Workflow = e.workflowID
+	}
 	if e.opts.Run != nil {
 		e.opts.Run.Append(ev)
 	}
@@ -259,13 +292,13 @@ func (e *engine) emit(ev runstore.Event) {
 
 // bind installs the Go-backed globals: __spawn, __phase, __log, __finish,
 // __fail, args, profiles, then evaluates the JS prelude that builds the
-// public API (agent/parallel/pipeline/phase/log) on top of them.
+// public API (agent/workflow/parallel/pipeline/phase/log) on top of them.
 func (e *engine) bind(vm *goja.Runtime) error {
 	e.vm = vm
 	vm.Set("__phase", func(title string) {
-		e.mu.Lock()
+		e.phaseMu.Lock()
 		e.curPhase = title
-		e.mu.Unlock()
+		e.phaseMu.Unlock()
 		e.emit(runstore.Event{T: "phase", Title: title})
 	})
 	vm.Set("__log", func(msg string) {
@@ -278,14 +311,15 @@ func (e *engine) bind(vm *goja.Runtime) error {
 		e.finish(outcome{err: fmt.Errorf("workflow failed: %s", msg)})
 	})
 	vm.Set("__spawn", e.spawn)
+	vm.Set("__workflow", e.workflow)
 	vm.Set("__profileRemaining", func(name string) any {
 		p, ok := e.opts.Store.Get(name)
 		if !ok || p.MaxCallsPerRun <= 0 {
 			return nil
 		}
-		e.mu.Lock()
-		remaining := p.MaxCallsPerRun - e.profCalls[name]
-		e.mu.Unlock()
+		e.shared.mu.Lock()
+		remaining := p.MaxCallsPerRun - e.shared.profCalls[name]
+		e.shared.mu.Unlock()
 		if remaining < 0 {
 			remaining = 0
 		}
@@ -406,13 +440,15 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 	if maxAgents <= 0 {
 		maxAgents = 1000
 	}
-	e.mu.Lock()
-	e.agentSeq++
-	id := e.agentSeq
+	e.shared.mu.Lock()
+	e.shared.agentSeq++
+	id := e.shared.agentSeq
+	e.shared.mu.Unlock()
+	e.phaseMu.Lock()
 	if phase == "" {
 		phase = e.curPhase
 	}
-	e.mu.Unlock()
+	e.phaseMu.Unlock()
 	if id > maxAgents {
 		reject(fmt.Errorf("agent cap reached (%d); raise with --max-agents", maxAgents))
 		return vm.ToValue(promise)
@@ -430,7 +466,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase,
 				Status: "ok", Cached: true, Preview: truncate(fmt.Sprintf("%v", cached), 200)})
 			if e.opts.Run != nil {
-				e.opts.Run.Journal(runstore.JournalEntry{ID: id, Label: label, Profile: prof.Name, Key: key, Prompt: prompt, Result: cached, Cached: true})
+				e.opts.Run.Journal(runstore.JournalEntry{ID: id, Label: label, Profile: prof.Name, Key: key, Prompt: prompt, Result: cached, Cached: true, Workflow: e.workflowID})
 			}
 			resolve(cached)
 			return vm.ToValue(promise)
@@ -442,21 +478,21 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 	// Exceeding a call cap still fails the whole run, but accepted workers drain
 	// naturally so their successful journal entries can be reused on resume.
 	if prof.MaxCallsPerRun > 0 {
-		e.mu.Lock()
-		n := e.profCalls[prof.Name]
+		e.shared.mu.Lock()
+		n := e.shared.profCalls[prof.Name]
 		if n < prof.MaxCallsPerRun {
-			e.profCalls[prof.Name] = n + 1
+			e.shared.profCalls[prof.Name] = n + 1
 		}
 		overLimit := n >= prof.MaxCallsPerRun
 		var capErr error
 		if overLimit {
 			err := fmt.Errorf("profile %q call limit exceeded (%d per run)", prof.Name, prof.MaxCallsPerRun)
-			if e.capErr == nil {
-				e.capErr = fmt.Errorf("workflow failed: %v; size the fan-out within the profile's maxCallsPerRun (see `dyna profiles list --json`) or route bulk work to an unlimited profile", err)
+			if e.shared.capErr == nil {
+				e.shared.capErr = fmt.Errorf("workflow failed: %v; size the fan-out within the profile's maxCallsPerRun (see `dyna profiles list --json`) or route bulk work to an unlimited profile", err)
 			}
 			capErr = err
 		}
-		e.mu.Unlock()
+		e.shared.mu.Unlock()
 		if overLimit {
 			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", Error: capErr.Error()})
 			e.emit(runstore.Event{T: "log", Msg: "profile call limit exceeded; draining accepted calls before failing run: " + capErr.Error()})
@@ -466,13 +502,13 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 	}
 	var profSem chan struct{}
 	if prof.MaxConcurrent > 0 {
-		e.mu.Lock()
-		profSem = e.profSems[prof.Name]
+		e.shared.mu.Lock()
+		profSem = e.shared.profSems[prof.Name]
 		if profSem == nil {
 			profSem = make(chan struct{}, prof.MaxConcurrent)
-			e.profSems[prof.Name] = profSem
+			e.shared.profSems[prof.Name] = profSem
 		}
-		e.mu.Unlock()
+		e.shared.mu.Unlock()
 	}
 
 	if !e.beginWorker() {
@@ -509,12 +545,12 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			defer func() { <-profSem }()
 		}
 		select {
-		case e.sem <- struct{}{}:
+		case e.shared.sem <- struct{}{}:
 		case <-e.ctx.Done():
 			failBeforeRun(e.ctx.Err())
 			return
 		}
-		defer func() { <-e.sem }()
+		defer func() { <-e.shared.sem }()
 
 		e.emit(runstore.Event{T: "agent_run", ID: id, Label: label, Profile: prof.Name, Phase: phase})
 		start := time.Now()
@@ -675,7 +711,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			if err != nil {
 				errStr = err.Error()
 			}
-			e.opts.Run.Journal(runstore.JournalEntry{ID: id, Label: label, Profile: prof.Name, Key: key, Prompt: prompt, Result: resultAny, Error: errStr, Dir: keptDir, Worktree: worktreeStatus})
+			e.opts.Run.Journal(runstore.JournalEntry{ID: id, Label: label, Profile: prof.Name, Key: key, Prompt: prompt, Result: resultAny, Error: errStr, Dir: keptDir, Worktree: worktreeStatus, Workflow: e.workflowID})
 		}
 		if err != nil {
 			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", DurMs: dur.Milliseconds(), Error: truncate(err.Error(), 2000), Dir: keptDir, Worktree: worktreeStatus})
@@ -687,6 +723,194 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 	}()
 
 	return vm.ToValue(promise)
+}
+
+// workflow implements one nested workflow() call. The child has its own JS
+// runtime and phase state, but all paid-work limits live in sharedState.
+func (e *engine) workflow(call goja.FunctionCall) goja.Value {
+	vm := e.vm
+	promise, resolveFn, rejectFn := vm.NewPromise()
+	resolve := func(v any) {
+		e.loop.RunOnLoop(func(vm *goja.Runtime) { resolveFn(vm.ToValue(v)) })
+	}
+	reject := func(err error) {
+		e.loop.RunOnLoop(func(vm *goja.Runtime) { rejectFn(vm.NewGoError(err)) })
+	}
+
+	if e.depth >= 1 {
+		reject(fmt.Errorf("workflow nesting limit exceeded: a nested workflow cannot call workflow() (maximum depth is 1)"))
+		return vm.ToValue(promise)
+	}
+	ref := strings.TrimSpace(call.Argument(0).String())
+	path, src, err := e.resolveWorkflow(ref)
+	if err != nil {
+		reject(err)
+		return vm.ToValue(promise)
+	}
+
+	var workflowArgs any
+	if encoded := call.Argument(1); !goja.IsUndefined(encoded) {
+		if err := json.Unmarshal([]byte(encoded.String()), &workflowArgs); err != nil {
+			reject(fmt.Errorf("workflow args must be valid JSON: %w", err))
+			return vm.ToValue(promise)
+		}
+	}
+
+	e.shared.mu.Lock()
+	e.shared.workflowSeq++
+	workflowID := fmt.Sprintf("nested-%d", e.shared.workflowSeq)
+	e.shared.mu.Unlock()
+	e.phaseMu.Lock()
+	parentPhase := e.curPhase
+	e.phaseMu.Unlock()
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+
+	if e.opts.Run != nil {
+		if err := e.opts.Run.StartWorkflow(workflowID, name, path, src, workflowArgs, parentPhase); err != nil {
+			reject(fmt.Errorf("start nested workflow %q: %w", ref, err))
+			return vm.ToValue(promise)
+		}
+	}
+	e.emit(runstore.Event{
+		T: "workflow_start", Workflow: workflowID, Parent: parentRunID(e.opts.Run),
+		Title: name, Ref: path, Phase: parentPhase,
+	})
+	if !e.beginWorker() {
+		err := e.ctx.Err()
+		if err == nil {
+			err = fmt.Errorf("workflow is already finishing")
+		}
+		if e.opts.Run != nil {
+			if finishErr := e.opts.Run.FinishWorkflow(workflowID, "error", "", err); finishErr != nil {
+				err = errors.Join(err, fmt.Errorf("finish nested workflow %q: %w", ref, finishErr))
+			}
+		}
+		e.emit(runstore.Event{
+			T: "workflow_end", Workflow: workflowID, Title: name, Phase: parentPhase,
+			Status: "error", Error: errorString(err),
+		})
+		reject(err)
+		return vm.ToValue(promise)
+	}
+
+	go func() {
+		defer e.workers.Done()
+		started := time.Now()
+		childOpts := e.opts
+		childOpts.ScriptSrc = src
+		childOpts.ScriptPath = path
+		childOpts.Args = workflowArgs
+		resultJSON, runErr := execute(e.ctx, childOpts, e.shared, e.depth+1, workflowID)
+		var result any
+		if runErr == nil {
+			if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+				runErr = fmt.Errorf("nested workflow %q returned invalid JSON: %w", ref, err)
+			}
+		}
+		status := "ok"
+		if runErr != nil {
+			status = "error"
+		}
+		if e.opts.Run != nil {
+			if finishErr := e.opts.Run.FinishWorkflow(workflowID, status, resultJSON, runErr); finishErr != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("finish nested workflow %q: %w", ref, finishErr))
+				status = "error"
+			}
+		}
+		e.emit(runstore.Event{
+			T: "workflow_end", Workflow: workflowID, Title: name, Phase: parentPhase,
+			Status: status, DurMs: time.Since(started).Milliseconds(), Error: errorString(runErr),
+		})
+		if runErr != nil {
+			reject(fmt.Errorf("nested workflow %q failed: %w", ref, runErr))
+			return
+		}
+		resolve(result)
+	}()
+
+	return vm.ToValue(promise)
+}
+
+func parentRunID(run *runstore.Run) string {
+	if run == nil {
+		return ""
+	}
+	return run.Meta.ID
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return truncate(err.Error(), 2000)
+}
+
+func (e *engine) resolveWorkflow(ref string) (string, string, error) {
+	if ref == "" {
+		return "", "", fmt.Errorf("workflow reference must not be empty")
+	}
+	var candidates []string
+	seen := map[string]bool{}
+	add := func(base string) {
+		if base == "" {
+			return
+		}
+		for _, candidate := range []string{base, base + ".js"} {
+			if filepath.Ext(base) == ".js" && candidate != base {
+				continue
+			}
+			abs, err := filepath.Abs(candidate)
+			if err == nil && !seen[abs] {
+				seen[abs] = true
+				candidates = append(candidates, abs)
+			}
+		}
+	}
+
+	if filepath.IsAbs(ref) {
+		add(ref)
+	} else {
+		if e.opts.ScriptPath != "" {
+			add(filepath.Join(filepath.Dir(e.opts.ScriptPath), ref))
+		}
+		add(filepath.Join(e.opts.WorkDir, ref))
+		if filepath.Base(ref) == ref {
+			registry := e.opts.WorkflowDir
+			if registry == "" {
+				registry = defaultWorkflowDir()
+			}
+			add(filepath.Join(registry, ref))
+			add(filepath.Join(e.opts.WorkDir, "examples", ref))
+		}
+	}
+
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		b, err := os.ReadFile(candidate)
+		if err != nil {
+			return "", "", fmt.Errorf("read nested workflow %s: %w", candidate, err)
+		}
+		return candidate, string(b), nil
+	}
+	return "", "", fmt.Errorf("workflow %q was not found as a script path or in %s or %s", ref, workflowRegistryLabel(e.opts.WorkflowDir), filepath.Join(e.opts.WorkDir, "examples"))
+}
+
+func defaultWorkflowDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		dir = filepath.Join(os.Getenv("HOME"), ".config")
+	}
+	return filepath.Join(dir, "dyna", "workflows")
+}
+
+func workflowRegistryLabel(dir string) string {
+	if dir != "" {
+		return dir
+	}
+	return defaultWorkflowDir()
 }
 
 func clampAgentTimeout(timeout time.Duration) time.Duration {

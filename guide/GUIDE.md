@@ -163,6 +163,40 @@ Every `agent()` call sees only its own prompt, profile configuration, and
 working directory. It cannot see caller conversation history or sibling
 results unless the script includes them in its prompt.
 
+### `workflow(nameOrRef, args?)`
+
+`workflow()` runs another workflow script as a nested sub-step and resolves to
+that script's top-level return value. The child receives the optional JSON value
+as its own `args` global and runs in an isolated JavaScript runtime, so its
+globals and `phase()` state cannot overwrite the caller's.
+
+An existing absolute path is used directly. Relative references first resolve
+beside the calling script and then below the run's `--dir`; the `.js` suffix is
+optional. A bare name then looks in `--workflows-dir` (default
+`$XDG_CONFIG_HOME/dyna/workflows`, or the platform user-config equivalent) and
+finally `<work-dir>/examples`, where the work directory is `--dir` or the
+shell's current directory. For example:
+
+```js
+phase('Review')
+const findings = await workflow('adversarial-review', {
+  target: args.target,
+  dimensions: ['correctness', 'security'],
+})
+```
+
+Nesting is capped at one level: a top-level script may call `workflow()`, but
+that child must not call `workflow()` again. Sibling nested calls may run in
+parallel. Every child `agent()` shares the parent run's global concurrency
+semaphore, lifetime `--max-agents` counter, per-profile `maxConcurrent` limiter,
+and per-profile `maxCallsPerRun` counter. The composition call itself consumes
+none of those agent limits.
+
+Nested starts, phases, agents, and completion are annotated in the parent event
+stream and rendered as a child group in `dyna runs show` and the TUI. The child
+also gets a discoverable artifact directory under
+`workflows/<nested-id>/` inside the parent run.
+
 ### `parallel(thunks)`
 
 `parallel([() => promise, ...])` starts all thunks and is an all-results
@@ -509,7 +543,7 @@ clean result from degraded coverage.
 ```bash
 dyna run <script.js> [--args '<json>'] [--name NAME] [--dir PATH]
          [--json] [--quiet] [--max-concurrent N] [--max-agents N]
-         [--detach] [--resume <run-id>]
+         [--workflows-dir PATH] [--detach] [--resume <run-id>]
 
 dyna runs list [--json] [--session <id>]
 dyna runs show <run-id> [--json]
@@ -580,6 +614,12 @@ runs/<run-id>/
 ├── events.jsonl
 ├── journal.jsonl
 ├── agents/<agent-id>/journal.jsonl
+├── workflows/<nested-id>/
+│   ├── script.js
+│   ├── meta.json
+│   ├── events.jsonl
+│   ├── journal.jsonl
+│   └── result.json
 ├── daemon.log                 # detached runs
 └── result.json                # successful returned value
 ```
@@ -645,6 +685,12 @@ their cache keys on every execution. Pass timestamps and random seeds through
 `args` when replayability matters. After a resumed run, Dyna reports how many
 prior journaled calls were replayed and warns when the hit rate is suspiciously
 low.
+
+Nested workflow scripts always execute again during resume, so changes to their
+control flow and composition take effect. Their `agent()` calls use the same
+parent resume cache as top-level calls, because every nested completion is also
+written to the parent ledger. Matching child calls therefore replay normally;
+failed or changed-worktree calls rerun normally.
 
 Before diagnosing an unexpected resumed result, inspect the previous run's
 root journal and `dyna runs show <id> --json`; cached calls can faithfully replay

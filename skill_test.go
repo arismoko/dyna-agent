@@ -20,6 +20,7 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 		"dyna guide",
 		"export const meta",
 		"agent(prompt, opts)",
+		"workflow(nameOrRef, args)",
 		"profile`, `label`, `phase`, `schema`, `cwd`, `timeout`",
 		"isolation: 'worktree'",
 		"at most\n   three attempts",
@@ -62,8 +63,13 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 
 func TestAgentFacingDocsExcludeUnsupportedWorkflowConcepts(t *testing.T) {
 	forbidden := []string{
-		"ultracode", "<task-notification>", "/workflows", "StructuredOutput",
-		"workflow(name", "budget.remaining",
+		// "/workflows" (Claude Code's own slash command) and "workflow(name" are
+		// deliberately not forbidden here: dyna's own workflow(nameOrRef, args)
+		// primitive and its default registry path (.../dyna/workflows) are now
+		// legitimately documented. "Date.now"/"Math.random" are also allowed:
+		// the resume non-determinism warning legitimately names them as the
+		// APIs that break --resume cache hits.
+		"ultracode", "<task-notification>", "StructuredOutput", "budget.remaining",
 		"agentType", "opts.effort", "saved workflow", "nested workflow",
 		"4096 items",
 	}
