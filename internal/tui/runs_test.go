@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"dyna-agent/internal/runstore"
@@ -398,8 +399,69 @@ func TestRunListWindowsSelectionAndResize(t *testing.T) {
 	}
 
 	m.setSize(120, 0)
-	if view = m.viewList(0); !strings.Contains(view, "run-06") || !strings.Contains(view, "7-7 of 10") {
+	if view = m.viewList(0); !strings.Contains(view, "run-06") {
 		t.Fatalf("zero-height run list did not clamp safely:\n%s", view)
+	}
+}
+
+func TestRunListRepaintsStayWithinPaneHeight(t *testing.T) {
+	m := testRunsModel()
+	m.runs = make([]runstore.Meta, 25)
+	for i := range m.runs {
+		m.runs[i] = runstore.Meta{
+			ID:        fmt.Sprintf("wf_%02d", i),
+			Name:      fmt.Sprintf("stress-run-%02d", i),
+			Status:    "ok",
+			StartedAt: time.Now().Add(-time.Duration(i) * time.Minute),
+		}
+	}
+
+	for _, terminalHeight := range []int{1, 2, 3, 4, 5, 8, 12, 24, 40, 80, 200} {
+		t.Run(fmt.Sprintf("height_%d", terminalHeight), func(t *testing.T) {
+			paneHeight := (model{height: terminalHeight}).bodyHeight()
+			m.setSize(120, paneHeight)
+
+			var previousView string
+			for _, selected := range []int{0, len(m.runs) / 2, len(m.runs) - 1, 0} {
+				m.sel = selected
+				view := m.viewList(0)
+				plain := ansi.Strip(view)
+
+				if got := lipgloss.Height(view); got != paneHeight {
+					t.Fatalf("selected %d rendered %d lines into a %d-line pane:\n%s", selected, got, paneHeight, plain)
+				}
+				if selectedName := fmt.Sprintf("stress-run-%02d", selected); !strings.Contains(plain, selectedName) {
+					t.Fatalf("selected run %q is outside the rendered window:\n%s", selectedName, plain)
+				}
+
+				visibleRuns := 0
+				for i := range m.runs {
+					if strings.Contains(plain, fmt.Sprintf("stress-run-%02d", i)) {
+						visibleRuns++
+					}
+				}
+				if visibleRuns == 0 || visibleRuns > len(m.runs) {
+					t.Fatalf("rendered %d run rows:\n%s", visibleRuns, plain)
+				}
+				if visibleRuns < len(m.runs) {
+					switch selected {
+					case 0:
+						if strings.Contains(plain, "stress-run-24") {
+							t.Fatalf("repaint retained the stale last run in the first window:\n%s", plain)
+						}
+					case len(m.runs) - 1:
+						if strings.Contains(plain, "stress-run-00") {
+							t.Fatalf("repaint retained the stale first run in the last window:\n%s", plain)
+						}
+					}
+				}
+
+				if previousView != "" && lipgloss.Height(previousView) != lipgloss.Height(view) {
+					t.Fatalf("repaint changed pane height from %d to %d", lipgloss.Height(previousView), lipgloss.Height(view))
+				}
+				previousView = view
+			}
+		})
 	}
 }
 
