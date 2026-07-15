@@ -480,6 +480,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		// Worktree isolation: run the worker on a detached copy of the repo;
 		// keep the tree only if the worker changed something.
 		keptDir := ""
+		worktreeStatus := ""
 		var cleanupWT func() bool
 		if isolation == "worktree" {
 			wt, cleanup, werr := addWorktree(actx, cwd)
@@ -591,7 +592,10 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		if cleanupWT != nil {
 			if kept := cleanupWT(); kept {
 				keptDir = cwd
-				e.emit(runstore.Event{T: "log", Msg: fmt.Sprintf("%s kept worktree with changes: %s", label, cwd)})
+				worktreeStatus = "kept"
+				e.emit(runstore.Event{T: "log", Msg: fmt.Sprintf("%s kept worktree: %s", label, cwd)})
+			} else {
+				worktreeStatus = "removed"
 			}
 		}
 		if e.opts.Run != nil && journalPath != "" {
@@ -607,14 +611,14 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 			if err != nil {
 				errStr = err.Error()
 			}
-			e.opts.Run.Journal(runstore.JournalEntry{ID: id, Label: label, Profile: prof.Name, Key: key, Prompt: prompt, Result: resultAny, Error: errStr, Dir: keptDir})
+			e.opts.Run.Journal(runstore.JournalEntry{ID: id, Label: label, Profile: prof.Name, Key: key, Prompt: prompt, Result: resultAny, Error: errStr, Dir: keptDir, Worktree: worktreeStatus})
 		}
 		if err != nil {
-			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", DurMs: dur.Milliseconds(), Error: truncate(err.Error(), 2000), Dir: keptDir})
+			e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "error", DurMs: dur.Milliseconds(), Error: truncate(err.Error(), 2000), Dir: keptDir, Worktree: worktreeStatus})
 			reject(err)
 			return
 		}
-		e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "ok", DurMs: dur.Milliseconds(), Preview: truncate(rawOut, 200), Dir: keptDir})
+		e.emit(runstore.Event{T: "agent_end", ID: id, Label: label, Profile: prof.Name, Phase: phase, Status: "ok", DurMs: dur.Milliseconds(), Preview: truncate(rawOut, 200), Dir: keptDir, Worktree: worktreeStatus})
 		resolve(resultAny)
 	}()
 
@@ -721,13 +725,26 @@ func addWorktree(ctx context.Context, repoDir string) (string, func() bool, erro
 		os.RemoveAll(wt)
 		return "", nil, fmt.Errorf("worktree isolation requires a git repo at %s: %v: %s", repoDir, err, out)
 	}
+	baseCommit, err := gitRun(ctx, wt, "rev-parse", "HEAD")
+	if err != nil {
+		gitRun(context.Background(), repoDir, "worktree", "remove", "--force", wt)
+		os.RemoveAll(wt)
+		return "", nil, fmt.Errorf("resolve isolated worktree base at %s: %w", wt, err)
+	}
+	baseCommit = bytes.TrimSpace(baseCommit)
 	cleanup := func() bool {
 		status, err := gitRun(context.Background(), wt, "status", "--porcelain")
-		if err == nil && len(bytes.TrimSpace(status)) == 0 {
-			gitRun(context.Background(), repoDir, "worktree", "remove", "--force", wt)
-			return false
+		if err != nil || len(bytes.TrimSpace(status)) != 0 {
+			return true // keep: worker changed files, or status failed
 		}
-		return true // keep: worker made changes (or status failed; do not destroy work)
+		head, err := gitRun(context.Background(), wt, "rev-parse", "HEAD")
+		if err != nil || !bytes.Equal(bytes.TrimSpace(head), baseCommit) {
+			return true // keep: worker committed changes, or HEAD inspection failed
+		}
+		if _, err := gitRun(context.Background(), repoDir, "worktree", "remove", "--force", wt); err != nil {
+			return true // removal failed, so the worktree still exists
+		}
+		return false
 	}
 	return wt, cleanup, nil
 }

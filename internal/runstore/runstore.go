@@ -23,35 +23,37 @@ import (
 
 // Event is one line in events.jsonl.
 type Event struct {
-	T       string `json:"t"`  // run_start|phase|agent_start|agent_run|agent_journal|agent_nudge|agent_steer|agent_end|log|run_end
-	TS      int64  `json:"ts"` // unix millis
-	Title   string `json:"title,omitempty"`
-	ID      int    `json:"id,omitempty"`
-	Label   string `json:"label,omitempty"`
-	Profile string `json:"profile,omitempty"`
-	Phase   string `json:"phase,omitempty"`
-	Msg     string `json:"msg,omitempty"`
-	Kind    string `json:"kind,omitempty"`
-	Status  string `json:"status,omitempty"` // agent_end/run_end status, or sent|unavailable|ignored for agent_nudge
-	DurMs   int64  `json:"durMs,omitempty"`
-	Preview string `json:"preview,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Cached  bool   `json:"cached,omitempty"` // satisfied from a resumed run's journal
-	Dir     string `json:"dir,omitempty"`    // kept worktree path, when isolated
+	T        string `json:"t"`  // run_start|phase|agent_start|agent_run|agent_journal|agent_nudge|agent_steer|agent_end|log|run_end
+	TS       int64  `json:"ts"` // unix millis
+	Title    string `json:"title,omitempty"`
+	ID       int    `json:"id,omitempty"`
+	Label    string `json:"label,omitempty"`
+	Profile  string `json:"profile,omitempty"`
+	Phase    string `json:"phase,omitempty"`
+	Msg      string `json:"msg,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Status   string `json:"status,omitempty"` // agent_end/run_end status, or sent|unavailable|ignored for agent_nudge
+	DurMs    int64  `json:"durMs,omitempty"`
+	Preview  string `json:"preview,omitempty"`
+	Error    string `json:"error,omitempty"`
+	Cached   bool   `json:"cached,omitempty"`   // satisfied from a resumed run's journal
+	Dir      string `json:"dir,omitempty"`      // kept worktree path, when isolated
+	Worktree string `json:"worktree,omitempty"` // kept|removed; absent when no worktree was created
 }
 
 // JournalEntry is one line in journal.jsonl: the full record of one agent
 // call, also used as the cache source for --resume.
 type JournalEntry struct {
-	ID      int    `json:"id"`
-	Label   string `json:"label"`
-	Profile string `json:"profile"`
-	Key     string `json:"key"` // hash of (profile, prompt, schema) for resume matching
-	Prompt  string `json:"prompt"`
-	Result  any    `json:"result"`
-	Error   string `json:"error,omitempty"`
-	Cached  bool   `json:"cached,omitempty"`
-	Dir     string `json:"dir,omitempty"`
+	ID       int    `json:"id"`
+	Label    string `json:"label"`
+	Profile  string `json:"profile"`
+	Key      string `json:"key"` // hash of (profile, prompt, schema) for resume matching
+	Prompt   string `json:"prompt"`
+	Result   any    `json:"result"`
+	Error    string `json:"error,omitempty"`
+	Cached   bool   `json:"cached,omitempty"`
+	Dir      string `json:"dir,omitempty"`
+	Worktree string `json:"worktree,omitempty"` // kept|removed; absent when no worktree was created
 }
 
 // AgentJournalEnv is injected into a worker process with the absolute path of

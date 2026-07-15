@@ -982,6 +982,26 @@ func TestContextTerminationDoesNotLookLikeEmptyOutput(t *testing.T) {
 	}
 }
 
+func TestMissingWorkingDirectoryHasDistinctError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "removed-worktree")
+	p := profile.Profile{
+		Name: "missing-cwd", Harness: profile.HarnessCustom,
+		Command: []string{"/bin/sh", "-c", "printf should-not-run"},
+	}
+
+	_, err := runTest(context.Background(), p, "task", missing)
+	if err == nil {
+		t.Fatal("Run() succeeded with a missing working directory")
+	}
+	if !strings.Contains(err.Error(), "worker missing-cwd cannot start") ||
+		!strings.Contains(err.Error(), "working directory "+strconv.Quote(missing)+" is unavailable") {
+		t.Fatalf("Run() error = %v, want a distinct error naming the working directory", err)
+	}
+	if strings.Contains(err.Error(), "fork/exec") || strings.Contains(err.Error(), "(/bin/sh) failed") {
+		t.Fatalf("Run() error still looks like an ambiguous binary spawn failure: %v", err)
+	}
+}
+
 func TestCodexReportsBothFailures(t *testing.T) {
 	logPath := installFakeCLI(t, "codex", `#!/bin/sh
 set -eu

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -125,6 +126,17 @@ type attempt struct {
 	steeringInterrupted bool
 	steeringErr         error
 }
+
+type workingDirectoryError struct {
+	dir   string
+	cause error
+}
+
+func (e *workingDirectoryError) Error() string {
+	return fmt.Sprintf("working directory %q is unavailable: %v", e.dir, e.cause)
+}
+
+func (e *workingDirectoryError) Unwrap() error { return e.cause }
 
 // Run sends prompt to the worker described by p and returns its final message.
 func Run(ctx context.Context, p profile.Profile, prompt, cwd string) (Result, error) {
@@ -441,6 +453,9 @@ func waitForSessionNudge(ctx context.Context, delay time.Duration) error {
 }
 
 func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpec, tracker *sessionTracker, journal *journalSupervisor, steering *steeringSupervisor, resumable bool) attempt {
+	if err := validateWorkingDirectory(cwd); err != nil {
+		return finishAttempt(spec, "", "", err, false, ctx.Err() != nil, false, false, nil, nil)
+	}
 	cmd := exec.CommandContext(ctx, spec.argv[0], spec.argv[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = mergeEnv(os.Environ(), p.Env)
@@ -458,6 +473,9 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 	}
 
 	if err := cmd.Start(); err != nil {
+		if cwdErr := validateWorkingDirectory(cwd); cwdErr != nil {
+			err = cwdErr
+		}
 		return finishAttempt(spec, stdout.String(), stderr.String(), err, false, ctx.Err() != nil, false, false, nil, nil)
 	}
 	if steering != nil && steering.opts.OnMessage != nil {
@@ -548,6 +566,23 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 			}
 		}
 	}
+}
+
+func validateWorkingDirectory(cwd string) error {
+	if cwd == "" {
+		return nil
+	}
+	info, err := os.Stat(cwd)
+	if err != nil {
+		return &workingDirectoryError{dir: cwd, cause: err}
+	}
+	if !info.IsDir() {
+		return &workingDirectoryError{dir: cwd, cause: errors.New("not a directory")}
+	}
+	if err := syscall.Access(cwd, 1); err != nil {
+		return &workingDirectoryError{dir: cwd, cause: err}
+	}
+	return nil
 }
 
 // interruptForContinuation gives the CLI time to persist its exact session
@@ -1054,6 +1089,10 @@ func attemptError(ctx context.Context, p profile.Profile, argv []string, a attem
 		return fmt.Errorf("worker %s canceled/timed out: %w", p.Name, err)
 	}
 	if a.runErr != nil {
+		var cwdErr *workingDirectoryError
+		if errors.As(a.runErr, &cwdErr) {
+			return fmt.Errorf("worker %s cannot start: %w", p.Name, cwdErr)
+		}
 		errTail := tail(strings.TrimSpace(a.stderr), 2000)
 		if errTail == "" {
 			errTail = tail(strings.TrimSpace(a.stdout), 2000)
