@@ -63,7 +63,7 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 func TestAgentFacingDocsExcludeUnsupportedWorkflowConcepts(t *testing.T) {
 	forbidden := []string{
 		"ultracode", "<task-notification>", "/workflows", "StructuredOutput",
-		"workflow(name", "budget.remaining", "Date.now", "Math.random",
+		"workflow(name", "budget.remaining",
 		"agentType", "opts.effort", "saved workflow", "nested workflow",
 		"4096 items",
 	}

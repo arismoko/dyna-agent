@@ -437,6 +437,7 @@ var (
 	stDim   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "244", Dark: "243"})
 	stOK    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "35", Dark: "42"})
 	stErr   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "160", Dark: "203"})
+	stWarn  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "130", Dark: "214"})
 	stPhase = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "63", Dark: "111"})
 	stName  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "31", Dark: "81"})
 )
@@ -504,7 +505,9 @@ func runCmd() *cobra.Command {
 			start := time.Now()
 			result, err := engine.Execute(ctx, engine.Options{
 				ScriptSrc: string(src), Args: argsVal, Store: store,
-				Run: run, OnEvent: onEvent, WorkDir: dir, MaxConc: maxConc,
+				Run: run, OnEvent: onEvent,
+				OnWarning: func(message string) { fmt.Fprintln(os.Stderr, stWarn.Render("warning: "+message)) },
+				WorkDir:   dir, MaxConc: maxConc,
 				MaxAgents: maxAgents, Cache: cache,
 				Paused: func() bool { return runstore.IsPaused(run.Meta.ID) },
 			})
@@ -519,6 +522,14 @@ func runCmd() *cobra.Command {
 			}
 			run.Append(runstore.Event{T: "run_end", Status: status, DurMs: time.Since(start).Milliseconds()})
 			run.Finish(status, result, err)
+			if cache != nil {
+				message, suspicious := resumeCacheReport(cache.Stats())
+				style := stDim
+				if suspicious {
+					style = stWarn
+				}
+				fmt.Fprintln(os.Stderr, style.Render(message))
+			}
 			if err != nil {
 				return err
 			}
@@ -541,6 +552,15 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&resumeID, "resume", "", "run id to resume: unchanged agent() calls replay from its journal")
 	cmd.Flags().BoolVar(&detach, "detach", false, "run in the background; prints the run id (poll with `dyna runs wait`)")
 	return cmd
+}
+
+func resumeCacheReport(stats engine.CacheStats) (string, bool) {
+	message := fmt.Sprintf("resume cache: %d/%d prior journaled calls replayed", stats.Hits, stats.PriorCalls)
+	suspicious := stats.PriorCalls > 0 && stats.Hits*2 < stats.PriorCalls
+	if suspicious {
+		message += "; warning: suspiciously low hit rate may indicate prompt/schema nondeterminism or workflow changes"
+	}
+	return message, suspicious
 }
 
 // detachRun re-execs this command in the background with a pre-assigned run

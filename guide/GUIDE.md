@@ -634,6 +634,13 @@ Calls that retained a changed worktree have a stored directory and are not
 cached; a successful isolated call that made no changes has no retained
 directory and can be reused.
 
+Workflow loading warns when the script uses `Date.now()`, `new Date()`, or
+`Math.random()`, because prompts or schemas derived from those values change
+their cache keys on every execution. Pass timestamps and random seeds through
+`args` when replayability matters. After a resumed run, Dyna reports how many
+prior journaled calls were replayed and warns when the hit rate is suspiciously
+low.
+
 Before diagnosing an unexpected resumed result, inspect the previous run's
 root journal and `dyna runs show <id> --json`; cached calls can faithfully replay
 an earlier empty or semantically weak success.
