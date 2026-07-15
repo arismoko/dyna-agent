@@ -18,14 +18,24 @@ that scale merely because it could improve an ordinary task. Use the harness's
 built-in subagents for small context-local delegation, or describe the fleet and
 ask before running it.
 
-The usual shape is hybrid:
+Permission may also be granted once for the whole task. Treat natural task
+framing such as "you have standing authorization to run Dyna at whatever scale
+you judge appropriate for this task," or materially equivalent wording, as
+blanket authorization for a large, hands-off fan-out. While it remains in force,
+choose and escalate the fleet without asking again at each phase. Standing
+authorization applies only to the stated task, does not expand its scope, and
+may be narrowed or revoked by the invoking context at any time; engine and
+profile limits still apply.
+
+The usual shape is hybrid, even when one workflow spans several phases:
 
 1. **Scout inline.** List files, inspect the diff, and discover the actual work
    list with cheap local commands.
-2. **Orchestrate one coherent phase.** Fan out review, transformation, or
-   verification over that concrete list.
-3. **Read the result before escalating.** Let the result determine whether the
-   next run should implement, judge, synthesize, or stop.
+2. **Orchestrate one coherent route.** Fan out over that concrete list, and put
+   later conditional phases in the same script when earlier results fully
+   determine whether to continue.
+3. **Read the result before discretionary escalation.** Return control before a
+   next action that needs new scope, authorization, or operator judgment.
 
 If a prompt contains Dyna's run-owned work-journal instructions, that session
 is already a Dyna worker. It must never load the Dyna skill, call `dyna run`, or
@@ -238,6 +248,22 @@ Shape follows dependencies, not caution. Once a run is authorized, its cost is
 set by how many `agent()` calls it makes, not by their arrangement; serializing
 independent calls spends the same tokens and only adds wall-clock. Express cost
 caution as fewer calls or cheaper profiles, never as sequencing.
+
+A single script may contain several named phases and arbitrary JavaScript
+control flow. It can use `if (found.length) { ... }` to launch verification only
+when discovery succeeds, or a `while (...)` loop to run finder rounds until a
+convergence condition is met. Prefer one hands-off `dyna run` invocation for a
+scout -> decide -> escalate route when each decision is deterministic from the
+prior phase's result; chain separate top-level invocations only when the next
+step needs operator judgment, new authorization, or a changed scope.
+
+Neither `parallel()` nor `pipeline()` has a hard item-count cap: the current
+runtime maps every supplied item. The lifetime `--max-agents` counter and any
+profile `maxCallsPerRun` limit are checked reactively as `agent()` calls are
+created, while global and per-profile concurrency limits queue excess live calls
+instead of truncating the input. These are execution safeguards, not helper-level
+fan-out scale caps; size the route deliberately and configure its limits before
+launching it.
 
 Name the work list before writing the script. Scout inline until the concrete
 items exist—files, modules, findings, tasks—then make the script's top level
@@ -713,7 +739,8 @@ against a worker that can invoke arbitrary CLIs through a shell.
 ## Common mistakes
 
 - **Inferring expensive scale.** A task that could benefit from ten workers is
-  not permission to start ten paid sessions; get explicit opt-in.
+  not permission to start ten paid sessions; get explicit opt-in or rely on
+  standing authorization scoped to the current task.
 - **Recursing from a Dyna worker.** Worker prompts already contain the boundary;
   only the root orchestrator may launch Dyna workflows.
 - **Routing bulk implementation to a taste-max profile.** Taste is quality over
@@ -727,6 +754,9 @@ against a worker that can invoke arbitrary CLIs through a shell.
   calls belong in `parallel()` or `pipeline()`.
 - **Expressing cost caution as sequencing.** Cost is the number of calls, not
   their arrangement; shrink the fleet, do not serialize it.
+- **Splitting deterministic escalation across runs.** If one phase's result
+  fully determines whether to verify, implement, judge, or stop, encode that
+  branch or loop in one script instead of requiring another top-level command.
 - **Using a barrier for aesthetics.** If verification needs only its own prior
   item, use `pipeline()` and let it stream.
 - **Relying on global phase state in concurrent callbacks.** Pass `phase` in
