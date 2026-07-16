@@ -17,9 +17,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/console"
@@ -32,9 +35,10 @@ import (
 )
 
 const (
-	minimumAgentTimeout = 30 * time.Minute
-	defaultAgentTimeout = 5 * time.Hour
-	defaultJournalIdle  = 5 * time.Minute
+	minimumAgentTimeout       = 30 * time.Minute
+	defaultAgentTimeout       = 5 * time.Hour
+	defaultJournalIdle        = 5 * time.Minute
+	worktreeJournalEntryLimit = 20
 )
 
 // Options configures one workflow execution.
@@ -581,9 +585,10 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 		// keep the tree only if the worker changed something.
 		keptDir := ""
 		worktreeStatus := ""
+		worktreeBase := ""
 		var cleanupWT func() bool
 		if isolation == "worktree" {
-			wt, cleanup, werr := addWorktree(actx, cwd)
+			wt, baseCommit, cleanup, werr := addWorktree(actx, cwd)
 			if werr != nil {
 				if e.opts.Run != nil && journalPath != "" {
 					_ = e.opts.Run.AppendAgentJournal(id, runstore.AgentJournalEntry{Kind: "error", Message: truncate(werr.Error(), 4000)})
@@ -593,6 +598,7 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 				return
 			}
 			cwd = wt
+			worktreeBase = baseCommit
 			cleanupWT = cleanup
 		}
 
@@ -694,6 +700,19 @@ func (e *engine) spawn(call goja.FunctionCall) goja.Value {
 				keptDir = cwd
 				worktreeStatus = "kept"
 				e.emit(runstore.Event{T: "log", Msg: fmt.Sprintf("%s kept worktree: %s", label, cwd)})
+				if e.opts.Run != nil && journalPath != "" {
+					entries, journalErr := worktreeGitJournalEntries(context.Background(), cwd, worktreeBase)
+					if journalErr != nil {
+						e.emit(runstore.Event{T: "log", Msg: fmt.Sprintf("%s could not inspect kept worktree changes: %v", label, journalErr)})
+					} else {
+						for _, entry := range entries {
+							if appendErr := e.opts.Run.AppendAgentJournal(id, entry); appendErr != nil {
+								e.emit(runstore.Event{T: "log", Msg: fmt.Sprintf("%s could not journal kept worktree changes: %v", label, appendErr)})
+								break
+							}
+						}
+					}
+				}
 			} else {
 				worktreeStatus = "removed"
 			}
@@ -1002,22 +1021,22 @@ You must complete this task yourself. Do not spawn, delegate to, or invoke any s
 }
 
 // addWorktree creates a detached git worktree of repoDir at HEAD. The
-// returned cleanup removes the worktree if the worker left it unchanged and
-// reports whether it was kept.
-func addWorktree(ctx context.Context, repoDir string) (string, func() bool, error) {
+// returned base commit is the snapshot the worker started from. Cleanup removes
+// the worktree if the worker left it unchanged and reports whether it was kept.
+func addWorktree(ctx context.Context, repoDir string) (string, string, func() bool, error) {
 	wt, err := os.MkdirTemp("", "dyna-wt-*")
 	if err != nil {
-		return "", nil, err
+		return "", "", nil, err
 	}
 	if out, err := gitRun(ctx, repoDir, "worktree", "add", "--detach", wt, "HEAD"); err != nil {
 		os.RemoveAll(wt)
-		return "", nil, fmt.Errorf("worktree isolation requires a git repo at %s: %v: %s", repoDir, err, out)
+		return "", "", nil, fmt.Errorf("worktree isolation requires a git repo at %s: %v: %s", repoDir, err, out)
 	}
 	baseCommit, err := gitRun(ctx, wt, "rev-parse", "HEAD")
 	if err != nil {
 		gitRun(context.Background(), repoDir, "worktree", "remove", "--force", wt)
 		os.RemoveAll(wt)
-		return "", nil, fmt.Errorf("resolve isolated worktree base at %s: %w", wt, err)
+		return "", "", nil, fmt.Errorf("resolve isolated worktree base at %s: %w", wt, err)
 	}
 	baseCommit = bytes.TrimSpace(baseCommit)
 	cleanup := func() bool {
@@ -1034,7 +1053,145 @@ func addWorktree(ctx context.Context, repoDir string) (string, func() bool, erro
 		}
 		return false
 	}
-	return wt, cleanup, nil
+	return wt, string(baseCommit), cleanup, nil
+}
+
+func worktreeGitJournalEntries(ctx context.Context, worktreeDir, baseCommit string) ([]runstore.AgentJournalEntry, error) {
+	commits, err := worktreeCommitJournalEntries(ctx, worktreeDir, baseCommit)
+	if err != nil {
+		return nil, err
+	}
+	diffs, err := worktreeDiffJournalEntries(ctx, worktreeDir, baseCommit)
+	if err != nil {
+		return nil, err
+	}
+	return append(commits, diffs...), nil
+}
+
+func worktreeCommitJournalEntries(ctx context.Context, worktreeDir, baseCommit string) ([]runstore.AgentJournalEntry, error) {
+	out, err := gitRun(ctx, worktreeDir, "log", "--reverse", "--format=%h%x09%s", baseCommit+"..HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("list commits since isolated base: %v: %s", err, bytes.TrimSpace(out))
+	}
+	text := strings.TrimSuffix(string(out), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	lines := strings.Split(text, "\n")
+	count := len(lines)
+	if len(lines) > worktreeJournalEntryLimit {
+		lines = lines[:worktreeJournalEntryLimit]
+	}
+	entries := make([]runstore.AgentJournalEntry, 0, len(lines)+1)
+	for _, line := range lines {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("parse commit since isolated base: unexpected git log record %q", line)
+		}
+		entries = append(entries, runstore.AgentJournalEntry{
+			Kind: "git-commit", Message: worktreeJournalMessage(parts[0] + " " + parts[1]),
+		})
+	}
+	if omitted := count - len(lines); omitted > 0 {
+		entries = append(entries, runstore.AgentJournalEntry{
+			Kind: "git-commit", Message: fmt.Sprintf("...and %d more commits", omitted),
+		})
+	}
+	return entries, nil
+}
+
+type worktreeLineCounts struct {
+	insertions string
+	deletions  string
+}
+
+func worktreeDiffJournalEntries(ctx context.Context, worktreeDir, baseCommit string) ([]runstore.AgentJournalEntry, error) {
+	tracked, err := gitRun(ctx, worktreeDir, "diff", "--name-only", "-z", "--no-renames", baseCommit, "--")
+	if err != nil {
+		return nil, fmt.Errorf("list tracked changes since isolated base: %v: %s", err, bytes.TrimSpace(tracked))
+	}
+	untracked, err := gitRun(ctx, worktreeDir, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("list untracked changes since isolated base: %v: %s", err, bytes.TrimSpace(untracked))
+	}
+	numstat, err := gitRun(ctx, worktreeDir, "diff", "--numstat", "-z", "--no-renames", baseCommit, "--")
+	if err != nil {
+		return nil, fmt.Errorf("count changed lines since isolated base: %v: %s", err, bytes.TrimSpace(numstat))
+	}
+
+	pathSet := make(map[string]struct{})
+	for _, path := range append(splitNULRecords(tracked), splitNULRecords(untracked)...) {
+		pathSet[path] = struct{}{}
+	}
+	paths := make([]string, 0, len(pathSet))
+	for path := range pathSet {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	counts := make(map[string]worktreeLineCounts)
+	for _, record := range splitNULRecords(numstat) {
+		parts := strings.SplitN(record, "\t", 3)
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("parse changed line counts: unexpected git diff record %q", record)
+		}
+		if _, addErr := strconv.Atoi(parts[0]); addErr != nil {
+			continue // binary files use "-" instead of line counts
+		}
+		if _, deleteErr := strconv.Atoi(parts[1]); deleteErr != nil {
+			continue
+		}
+		counts[parts[2]] = worktreeLineCounts{insertions: parts[0], deletions: parts[1]}
+	}
+
+	total := len(paths)
+	if len(paths) > worktreeJournalEntryLimit {
+		paths = paths[:worktreeJournalEntryLimit]
+	}
+	entries := make([]runstore.AgentJournalEntry, 0, len(paths)+1)
+	for _, path := range paths {
+		_, baseErr := gitRun(ctx, worktreeDir, "cat-file", "-e", baseCommit+":"+path)
+		_, currentErr := os.Lstat(filepath.Join(worktreeDir, filepath.FromSlash(path)))
+		change := "modified"
+		switch {
+		case baseErr != nil:
+			change = "created"
+		case errors.Is(currentErr, os.ErrNotExist):
+			change = "deleted"
+		}
+		message := change + " " + path
+		if lineCounts, ok := counts[path]; ok && change != "deleted" {
+			message += " +" + lineCounts.insertions + "/-" + lineCounts.deletions
+		}
+		entries = append(entries, runstore.AgentJournalEntry{Kind: "git-diff", Message: worktreeJournalMessage(message)})
+	}
+	if omitted := total - len(paths); omitted > 0 {
+		entries = append(entries, runstore.AgentJournalEntry{
+			Kind: "git-diff", Message: fmt.Sprintf("...and %d more changed files", omitted),
+		})
+	}
+	return entries, nil
+}
+
+func splitNULRecords(data []byte) []string {
+	records := bytes.Split(data, []byte{0})
+	out := make([]string, 0, len(records))
+	for _, record := range records {
+		if len(record) != 0 {
+			out = append(out, string(record))
+		}
+	}
+	return out
+}
+
+func worktreeJournalMessage(message string) string {
+	message = strings.ToValidUTF8(message, "\uFFFD")
+	const maxBytes = 4000
+	for len(message) > maxBytes {
+		_, size := utf8.DecodeLastRuneInString(message)
+		message = message[:len(message)-size]
+	}
+	return message
 }
 
 func gitRun(ctx context.Context, dir string, args ...string) ([]byte, error) {
