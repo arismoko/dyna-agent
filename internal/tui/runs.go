@@ -994,6 +994,36 @@ func (m runsModel) update(msg tea.KeyMsg) (runsModel, tea.Cmd) {
 			m.resetLoaded(m.selectedID())
 			return m, m.requestRefresh(false)
 		}
+	case "home":
+		if len(m.runs) > 0 && m.sel > 0 {
+			m.sel = 0
+			m.follow = true
+			m.resetLoaded(m.selectedID())
+			return m, m.requestRefresh(false)
+		}
+	case "end":
+		if len(m.runs) > 0 && m.sel < len(m.runs)-1 {
+			m.sel = len(m.runs) - 1
+			m.follow = true
+			m.resetLoaded(m.selectedID())
+			return m, m.requestRefresh(false)
+		}
+	case "ctrl+u":
+		if len(m.runs) > 0 && m.sel > 0 {
+			maxRows, _ := m.runsListMaxRows()
+			m.sel = max(0, m.sel-maxRows)
+			m.follow = true
+			m.resetLoaded(m.selectedID())
+			return m, m.requestRefresh(false)
+		}
+	case "ctrl+d":
+		if len(m.runs) > 0 && m.sel < len(m.runs)-1 {
+			maxRows, _ := m.runsListMaxRows()
+			m.sel = min(len(m.runs)-1, m.sel+maxRows)
+			m.follow = true
+			m.resetLoaded(m.selectedID())
+			return m, m.requestRefresh(false)
+		}
 	case "d":
 		if m.sel < len(m.runs) {
 			m.confirm = "delete"
@@ -1157,18 +1187,7 @@ func (m runsModel) viewList(frame int) string {
 			b.WriteString(sDim.Render("\nloading runs…"))
 		}
 	}
-	footerLines := 0
-	if m.confirm != "" && m.sel < len(m.runs) {
-		footerLines = 3
-	} else if m.statusMsg != "" {
-		footerLines = 2
-	}
-	maxRows := max(1, m.height-3-footerLines) // pane interior minus title/footer
-	overflow := len(m.runs) > maxRows
-	showOverflow := overflow && maxRows > 1
-	if showOverflow {
-		maxRows = max(1, maxRows-1) // reserve the range indicator
-	}
+	maxRows, showOverflow := m.runsListMaxRows()
 	start, end := visibleRange(len(m.runs), m.sel, maxRows)
 	for i := start; i < end; i++ {
 		r := m.runs[i]
@@ -1199,6 +1218,23 @@ func (m runsModel) viewList(frame int) string {
 		b.WriteString("\n" + sDim.Render(m.statusMsg))
 	}
 	return sPaneL.Width(w).Height(max(0, m.height-2)).Render(strings.TrimSuffix(b.String(), "\n"))
+}
+
+// runsListMaxRows returns the number of run rows currently available in the
+// list pane, after reserving space for a range indicator when needed.
+func (m *runsModel) runsListMaxRows() (maxRows int, showOverflow bool) {
+	footerLines := 0
+	if m.confirm != "" && m.sel < len(m.runs) {
+		footerLines = 3
+	} else if m.statusMsg != "" {
+		footerLines = 2
+	}
+	maxRows = max(1, m.height-3-footerLines) // pane interior minus title/footer
+	showOverflow = len(m.runs) > maxRows && maxRows > 1
+	if showOverflow {
+		maxRows = max(1, maxRows-1) // reserve the range indicator
+	}
+	return maxRows, showOverflow
 }
 
 func statusIcon(status string, frame int) string {

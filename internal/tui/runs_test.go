@@ -431,6 +431,90 @@ func TestRunListWindowsSelectionAndResize(t *testing.T) {
 	}
 }
 
+func TestRunListPageNavigation(t *testing.T) {
+	m := testRunsModel()
+	m.runs = make([]runstore.Meta, 10)
+	for i := range m.runs {
+		m.runs[i] = runstore.Meta{ID: fmt.Sprintf("wf_%02d", i), Name: fmt.Sprintf("run-%02d", i), Status: "ok", StartedAt: time.Now()}
+	}
+	m.setSize(120, 8)
+
+	m, _ = m.update(key(tea.KeyCtrlD))
+	if m.sel != 4 || !strings.Contains(m.viewList(0), "run-04") {
+		t.Fatalf("ctrl+d selected %d, want 4 and visible selected row:\n%s", m.sel, m.viewList(0))
+	}
+	m, _ = m.update(key(tea.KeyCtrlD))
+	if m.sel != 8 || !strings.Contains(m.viewList(0), "run-08") {
+		t.Fatalf("second ctrl+d selected %d, want 8 and visible selected row:\n%s", m.sel, m.viewList(0))
+	}
+	m, _ = m.update(key(tea.KeyCtrlD))
+	if m.sel != 9 || !strings.Contains(m.viewList(0), "run-09") {
+		t.Fatalf("ctrl+d did not clamp at last run: selected %d\n%s", m.sel, m.viewList(0))
+	}
+	generation := m.generation
+	m, cmd := m.update(key(tea.KeyCtrlD))
+	if m.sel != 9 || m.generation != generation || cmd != nil {
+		t.Fatalf("ctrl+d at last run changed state: selected=%d generation=%d cmd=%v", m.sel, m.generation, cmd != nil)
+	}
+	m, _ = m.update(key(tea.KeyCtrlU))
+	if m.sel != 5 || !strings.Contains(m.viewList(0), "run-05") {
+		t.Fatalf("ctrl+u selected %d, want 5 and visible selected row:\n%s", m.sel, m.viewList(0))
+	}
+	m, _ = m.update(key(tea.KeyCtrlU))
+	if m.sel != 1 {
+		t.Fatalf("second ctrl+u selected %d, want 1", m.sel)
+	}
+	m, _ = m.update(key(tea.KeyCtrlU))
+	if m.sel != 0 || !strings.Contains(m.viewList(0), "run-00") {
+		t.Fatalf("ctrl+u did not clamp at first run: selected %d\n%s", m.sel, m.viewList(0))
+	}
+	generation = m.generation
+	m, cmd = m.update(key(tea.KeyCtrlU))
+	if m.sel != 0 || m.generation != generation || cmd != nil {
+		t.Fatalf("ctrl+u at first run changed state: selected=%d generation=%d cmd=%v", m.sel, m.generation, cmd != nil)
+	}
+}
+
+func TestRunListHomeEndNavigationAndBounds(t *testing.T) {
+	m := testRunsModel()
+	m.runs = make([]runstore.Meta, 10)
+	for i := range m.runs {
+		m.runs[i] = runstore.Meta{ID: fmt.Sprintf("wf_%02d", i), Name: fmt.Sprintf("run-%02d", i), Status: "ok", StartedAt: time.Now()}
+	}
+	m.sel = 4
+	m.setSize(120, 8)
+
+	m, _ = m.update(key(tea.KeyHome))
+	if m.sel != 0 || !strings.Contains(m.viewList(0), "run-00") {
+		t.Fatalf("home selected %d, want 0 and visible selected row:\n%s", m.sel, m.viewList(0))
+	}
+	generation := m.generation
+	m, cmd := m.update(key(tea.KeyHome))
+	if m.sel != 0 || m.generation != generation || cmd != nil {
+		t.Fatalf("home at first run changed state: selected=%d generation=%d cmd=%v", m.sel, m.generation, cmd != nil)
+	}
+
+	m, _ = m.update(key(tea.KeyEnd))
+	if m.sel != len(m.runs)-1 || !strings.Contains(m.viewList(0), "run-09") {
+		t.Fatalf("end selected %d, want %d and visible selected row:\n%s", m.sel, len(m.runs)-1, m.viewList(0))
+	}
+	generation = m.generation
+	m, cmd = m.update(key(tea.KeyEnd))
+	if m.sel != len(m.runs)-1 || m.generation != generation || cmd != nil {
+		t.Fatalf("end at last run changed state: selected=%d generation=%d cmd=%v", m.sel, m.generation, cmd != nil)
+	}
+
+	m.runs = nil
+	m.sel = 0
+	generation = m.generation
+	for _, msg := range []tea.KeyMsg{key(tea.KeyHome), key(tea.KeyEnd), key(tea.KeyCtrlU), key(tea.KeyCtrlD)} {
+		m, cmd = m.update(msg)
+		if m.sel != 0 || m.generation != generation || cmd != nil {
+			t.Fatalf("%s on empty list changed state: selected=%d generation=%d cmd=%v", msg.String(), m.sel, m.generation, cmd != nil)
+		}
+	}
+}
+
 func TestRunListRepaintsStayWithinPaneHeight(t *testing.T) {
 	m := testRunsModel()
 	m.runs = make([]runstore.Meta, 25)

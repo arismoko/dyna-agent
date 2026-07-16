@@ -192,7 +192,7 @@ func (m model) View() string {
 				help = helpLine("j/k/↑/↓", "agent", "s", "steer running", "enter/→", "open detail", "esc", "back")
 			}
 		} else {
-			help = helpLine("↑/↓", "select", "enter", "inspect agents", "pgup/pgdn", "scroll run result", "p", "pause", "x", "cancel", "d", "delete", "q", "quit")
+			help = helpLine("↑/↓", "select", "ctrl+u/d", "page", "home/end", "ends", "enter", "inspect agents", "pgup/pgdn", "scroll run result", "p", "pause", "x", "cancel", "d", "delete", "q", "quit")
 		}
 	case tabProfiles:
 		body = m.profs.view()
