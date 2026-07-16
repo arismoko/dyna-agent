@@ -5,52 +5,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"dyna-agent/internal/cli/guidance"
 )
 
 func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 	required := []string{
-		"Dyna orchestration engaged — ready to fan out the fleet.",
-		"Scout inline first",
-		"recursively orchestrate Dyna",
-		"use only `dyna journal`",
+		"entering orchestration mode",
+		"dyna run",
 		"dyna profiles list --json",
-		"maxConcurrent",
-		"maxCallsPerRun",
 		"dyna guide",
-		"export const meta",
-		"agent(prompt, opts)",
-		"workflow(nameOrRef, args)",
-		"profile`, `label`, `phase`, `schema`, `cwd`, `timeout`",
-		"isolation: 'worktree'",
-		"attempts, then the call rejects",
-		"30-minute minimum",
-		"all-results barrier",
-		"streams each item through",
-		"throwing stage makes that item `null`",
-		"Shape follows dependencies, not caution",
-		"pipeline(workList, ...stages)",
-		"one implementer per partition",
-		"expected shape",
-		"taste-heavy profile",
-		"cheapest capable profile",
-		"full remediation run chains the routes",
-		"adversarial verification",
-		"judge panel",
-		"two consecutive finder rounds",
-		"dyna runs wait <id>",
-		"--resume <id>",
-		"matching profile, prompt, and schema",
-		"Uncaught `agent()` errors fail the workflow",
-		"agents/<agent-id>/journal.jsonl",
-		"completed-call/resume\nledger",
-		"after orientation",
-		"before long operations",
-		"before finishing",
-		"progress\nside channel",
-		"never replaces\nthe worker's final response or schema output",
-		"never starts a replacement",
+		"Scout the concrete work list inline first",
+		"not restate anything the CLI can print live",
+		"never what \"use Dyna\"",
 	}
 	for _, contract := range required {
 		if !strings.Contains(skillBody, contract) {
@@ -60,14 +25,24 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 	if skillBody != agentFacingGuidance {
 		t.Fatal("skill body must use the canonical agent-facing contract")
 	}
-	for name, shared := range map[string]string{
-		"profile routing":  guidance.ProfileRouting,
-		"script contract":  guidance.ScriptContract,
-		"workflow shape":   guidance.WorkflowShape,
-		"quality patterns": guidance.QualityPatterns,
-	} {
-		if !strings.Contains(agentFacingGuidance, shared) {
-			t.Errorf("%s is not present in the skill guidance", name)
+}
+
+// The skill intentionally does not restate the shared guidance package's
+// content (profile routing, script contract, workflow shape, quality
+// patterns) — that would duplicate what `dyna guide` already prints live and
+// drift out of sync with it. Pi's separate, self-contained system prompt in
+// pi.go still uses guidance_shared.go directly, since it cannot rely on a
+// mid-task tool call the way a lazily-loaded skill can.
+func TestAgentFacingGuidanceDoesNotDuplicateLiveCLIOutput(t *testing.T) {
+	forbidden := []string{
+		"maxConcurrent", "maxCallsPerRun", "export const meta", "agent(prompt, opts)",
+		"workflow(nameOrRef, args)", "isolation: 'worktree'", "all-results barrier",
+		"pipeline(workList, ...stages)", "adversarial verification", "judge panel",
+		"dyna runs wait <id>", "--resume <id>", "agents/<agent-id>/journal.jsonl",
+	}
+	for _, term := range forbidden {
+		if strings.Contains(agentFacingGuidance, term) {
+			t.Errorf("skill guidance duplicates live CLI output %q; point at `dyna guide` instead", term)
 		}
 	}
 }

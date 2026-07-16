@@ -8,53 +8,48 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-
-	"dyna-agent/internal/cli/guidance"
 )
 
-// The detailed reference and runnable examples live in guide/GUIDE.md
-// (`dyna guide`). Shared orchestration mechanics live in guidance_shared.go;
-// Pi adds its tool-native invocation mechanics in pi.go.
-const agentFacingGuidance = `When this skill loads, open your response with: "Dyna orchestration engaged — ready to fan out the fleet."
+// This body deliberately does not restate anything `dyna guide` or
+// `dyna profiles list --json` can already print live: that content is owned by
+// guidance_shared.go (also used by Pi's self-contained, tool-native prompt in
+// pi.go) and the guide/GUIDE.md reference, and duplicating it here would drift
+// out of sync with the actual binary. The skill instead points the reader at
+// those commands.
+const agentFacingGuidance = `When this skill loads, say this exactly, verbatim, before doing anything else:
+"Dyna skill loaded — entering orchestration mode: only trivial, quick edits
+happen directly in my own hands; every other change is scoped, authored, and
+executed as a ` + "`dyna run`" + ` workflow."
 
 # Multi-model workflows with dyna
 
-Dyna runs plain JavaScript workflow files that orchestrate registered model
-workers deterministically.
+Dyna is the ` + "`dyna`" + ` CLI binary on this machine — full stop. Whatever agent
+harness is reading this (Claude Code, Pi, Codex, anything else) may separately
+offer its own built-in subagent, task, or multi-agent orchestration
+tool/feature under any name. That tool is not Dyna, has no connection to
+Dyna's profiles, worktree isolation, journals, or resume behavior, and is
+never what "use Dyna" / "use dyna workflows" refers to. Check what this
+specific harness actually calls its own such feature, if it has one, and do
+not reach for it here — "use Dyna" always and only means shell out to the
+` + "`dyna`" + ` binary.
 
-## Before orchestrating
+This file intentionally does not restate anything the CLI can print live —
+that content drifts out of sync with the actual binary. Before writing or
+running a workflow, always run these yourself and read the real output; never
+answer from memory of a past run of this skill:
 
-- Scout inline first: list files, inspect the diff, and discover the concrete
-  work list. Then orchestrate over that list. Keep each run to one coherent
-  phase when reading its result should influence the next phase. Scale to the
-  user's words: a quick check needs a small fan-out and one verification pass;
-  a thorough audit can justify broader finders, multiple votes, and synthesis.
-- If these instructions arrived inside a worker prompt with a run-owned Dyna
-  journal, you are already a Dyna worker. Never load the Dyna skill, run a
-  workflow, or recursively orchestrate Dyna; use only ` + "`dyna journal`" + `.
-  Native harness subagents remain governed by the selected
-  profile; ` + "`disableSubagents`" + ` profiles require the worker to finish alone.
+` + "```bash" + `
+dyna profiles list --json   # the enabled fleet, right now: stats, limits, defaults
+dyna guide                  # script contract, profile routing, workflow shape,
+                             # quality patterns, resume/journal semantics,
+                             # running/detaching/inspecting, common mistakes
+` + "```" + `
 
-## CLI invocation
-
-Run ` + "`dyna profiles list --json`" + ` to inspect the enabled fleet, read
-` + "`dyna guide`" + `, then write a plain ` + "`.js`" + ` workflow file. Run it with
-` + "`dyna run workflow.js --args '{...}'`" + `; progress goes to stderr and the
-returned JSON goes to stdout. ` + "`--detach`" + ` prints a run ID immediately, which
-` + "`dyna runs wait <id>`" + ` collects. ` + "`--resume <id>`" + ` reuses successful calls
-matching profile, prompt, and schema; failures and kept changed worktrees
-rerun. Inspect a run with ` + "`dyna runs show <id> --json`" + ` or ` + "`dyna tui`" + `.
-
-` + guidance.ProfileRouting + guidance.ScriptContract + guidance.WorkflowShape + guidance.QualityPatterns + `## Worker journals
-
-Dyna gives every worker a live ` + "`agents/<agent-id>/journal.jsonl`" + ` progress
-side channel and keeps the root ` + "`journal.jsonl`" + ` as the completed-call/resume
-ledger. Dyna injects the journal and no-recursion rules automatically; reinforce
-brief entries after orientation, on meaningful findings/decisions/verification/
-blockers, before long operations, and before finishing. The journal never replaces
-the worker's final response or schema output. A quiet resumable built-in session is
-reminded in that exact session; Dyna never starts a replacement merely to obtain a
-journal entry.
+Scout the concrete work list inline first (list files, inspect the diff) so
+the workflow script fans out over real items, then author a plain ` + "`.js`" + ` file
+and run it with ` + "`dyna run <file> --args '{...}'`" + ` per ` + "`dyna guide`" + `. Work
+directly, without a workflow, only for a change that is clearly small,
+mechanical, and trivially easy to verify by eye.
 `
 
 const skillBody = agentFacingGuidance
