@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"dyna-agent/internal/profile"
 	"dyna-agent/internal/runstore"
@@ -208,6 +209,11 @@ func (m model) View() string {
 		body = m.guide.view()
 		help = helpLine("↑/↓/pgup/pgdn", "scroll", "tab/1-3", "switch view", "q", "quit")
 	}
+	// The footer must stay exactly one line: bodyHeight reserves a fixed
+	// budget for header+footer, and an unbounded help line wraps at narrow
+	// widths, overflowing the whole layout past the terminal and pushing the
+	// header off-screen.
+	help = ansi.Truncate(help, max(1, m.width-2), "…")
 	footer := lipgloss.NewStyle().Width(m.width).Padding(0, 1).Render(help)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }

@@ -1180,14 +1180,17 @@ func (m runsModel) viewList(frame int) string {
 	w := m.listWidth()
 	var b strings.Builder
 	b.WriteString(sTitle.Render("Runs") + "\n")
-	if len(m.runs) == 0 {
-		if m.catalogLoaded {
-			b.WriteString(sDim.Render("\nno runs yet\n\nstart one:\n  dyna run script.js\n  dyna demo"))
-		} else {
-			b.WriteString(sDim.Render("\nloading runs…"))
-		}
-	}
 	maxRows, showOverflow := m.runsListMaxRows()
+	if len(m.runs) == 0 {
+		lines := []string{"", "no runs yet", "", "start one:", "  dyna run script.js", "  dyna demo"}
+		if !m.catalogLoaded {
+			lines = []string{"", "loading runs…"}
+		}
+		if len(lines) > maxRows {
+			lines = lines[:max(0, maxRows)]
+		}
+		b.WriteString(sDim.Render(strings.Join(lines, "\n")))
+	}
 	start, end := visibleRange(len(m.runs), m.sel, maxRows)
 	for i := start; i < end; i++ {
 		r := m.runs[i]
@@ -1196,7 +1199,7 @@ func (m runsModel) viewList(frame int) string {
 			status = "paused"
 		}
 		icon := statusIcon(status, frame)
-		name := ansi.Truncate(r.Name, max(1, w-14), "…")
+		name := ansi.Truncate(r.Name, max(1, w-18), "…")
 		meta := sDim.Render("  " + r.StartedAt.Format("Jan 02 15:04"))
 		row := icon + " " + name + meta
 		if i == m.sel {
@@ -1213,9 +1216,10 @@ func (m runsModel) viewList(frame int) string {
 			"cancel": "cancel %s? all in-flight workers will be KILLED",
 			"pause":  "pause %s? running workers finish, no new ones start",
 		}[m.confirm]
-		b.WriteString("\n" + sErrS.Render("⚠ "+fmt.Sprintf(warn, m.runs[m.sel].Name)) + "\n" + sErrS.Render("  confirm? (y/n)"))
+		warnLine := truncLine("⚠ "+fmt.Sprintf(warn, m.runs[m.sel].Name), w-2)
+		b.WriteString("\n" + sErrS.Render(warnLine) + "\n" + sErrS.Render("  confirm? (y/n)"))
 	} else if m.statusMsg != "" {
-		b.WriteString("\n" + sDim.Render(m.statusMsg))
+		b.WriteString("\n" + sDim.Render(truncLine(m.statusMsg, w-2)))
 	}
 	return sPaneL.Width(w).Height(max(0, m.height-2)).Render(strings.TrimSuffix(b.String(), "\n"))
 }

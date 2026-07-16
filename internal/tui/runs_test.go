@@ -576,6 +576,63 @@ func TestRunListRepaintsStayWithinPaneHeight(t *testing.T) {
 	}
 }
 
+// A run row (icon + name + timestamp) that is exactly as wide as the pane's
+// text budget must not wrap: a wrapped row silently consumes an extra
+// terminal line per row, which is not accounted for in runsListMaxRows and
+// overflows the whole dashboard past the terminal, pushing the header
+// off-screen. This reproduces the width math, not just the line count.
+func TestRunListRowsNeverWrapPaneWidth(t *testing.T) {
+	for _, listWidth := range []int{30, 34, 40, 48} {
+		t.Run(fmt.Sprintf("listWidth_%d", listWidth), func(t *testing.T) {
+			m := testRunsModel()
+			// listWidth() = clamp(width/3, 30, 48); pick a width that maps
+			// back to the target list width in the clamped range.
+			m.runs = []runstore.Meta{{
+				ID: "wf_wide", Name: strings.Repeat("x", 64), Status: "ok", StartedAt: time.Now(),
+			}}
+			m.setSize(listWidth*3, 24)
+			if got := m.listWidth(); got != listWidth {
+				t.Fatalf("listWidth() = %d, want %d (adjust the test width)", got, listWidth)
+			}
+			// sPaneL adds a 1-column border on each side outside the
+			// padding-inclusive Width(listWidth) box, so a non-wrapped line
+			// renders at listWidth+2 columns.
+			maxLineWidth := listWidth + 2
+			for _, line := range strings.Split(ansi.Strip(m.viewList(0)), "\n") {
+				if w := lipgloss.Width(line); w > maxLineWidth {
+					t.Fatalf("listWidth=%d: rendered line is %d columns wide (want <= %d), wraps the pane:\n%q", listWidth, w, maxLineWidth, line)
+				}
+			}
+		})
+	}
+}
+
+// The delete/cancel/pause confirmation warning and the status message are
+// unbounded strings (a run name, an error message); runsListMaxRows assumes
+// they render to a fixed number of lines (3 and 2 respectively). An
+// unwrapped long message silently adds lines beyond that budget and
+// overflows the pane past the terminal, the same way an unbounded row does.
+func TestRunListConfirmAndStatusMessagesStayBounded(t *testing.T) {
+	m := testRunsModel()
+	m.runs = []runstore.Meta{{
+		ID: "wf_long", Name: strings.Repeat("very-long-run-name-", 5), Status: "ok", StartedAt: time.Now(),
+	}}
+	m.setSize(40, 12)
+	paneHeight := lipgloss.Height(m.viewList(0))
+
+	m.confirm = "delete"
+	m.confirmID = m.selectedID()
+	if got := lipgloss.Height(m.viewList(0)); got != paneHeight {
+		t.Fatalf("confirm dialog changed pane height from %d to %d:\n%s", paneHeight, got, ansi.Strip(m.viewList(0)))
+	}
+
+	m.confirm = ""
+	m.statusMsg = "✗ " + strings.Repeat("some very long error detail ", 6)
+	if got := lipgloss.Height(m.viewList(0)); got != paneHeight {
+		t.Fatalf("status message changed pane height from %d to %d:\n%s", paneHeight, got, ansi.Strip(m.viewList(0)))
+	}
+}
+
 func TestInspectorAgentListWindowsSelectionAndResize(t *testing.T) {
 	m := testRunsModel()
 	events := make([]runstore.Event, 8)
