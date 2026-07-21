@@ -12,10 +12,9 @@ import (
 
 // This body deliberately does not restate anything `dyna guide` or
 // `dyna profiles list --json` can already print live: that content is owned by
-// guidance_shared.go (also used by Pi's self-contained, tool-native prompt in
-// pi.go) and the guide/GUIDE.md reference, and duplicating it here would drift
-// out of sync with the actual binary. The skill instead points the reader at
-// those commands.
+// guidance_shared.go and the guide/GUIDE.md reference, and duplicating it here
+// would drift out of sync with the actual binary. The skill instead points the
+// reader at those commands.
 const agentFacingGuidance = `When this skill loads, say this exactly, verbatim, before doing anything else:
 "Dyna skill loaded — entering orchestration mode: only trivial, quick edits
 happen directly in my own hands; every other change is scoped, authored, and
@@ -24,7 +23,7 @@ executed as a ` + "`dyna run`" + ` workflow."
 # Multi-model workflows with dyna
 
 Dyna is the ` + "`dyna`" + ` CLI binary on this machine — full stop. Whatever agent
-harness is reading this (Claude Code, Pi, Codex, anything else) may separately
+harness is reading this (Claude Code, Codex, anything else) may separately
 offer its own built-in subagent, task, or multi-agent orchestration
 tool/feature under any name. That tool is not Dyna, has no connection to
 Dyna's profiles, worktree isolation, journals, or resume behavior, and is
@@ -58,8 +57,6 @@ const skillDescription = "Load Dyna orchestration when the user explicitly reque
 
 const skillFrontmatter = "---\nname: load-dyna-orchestrator\ndescription: " + skillDescription + "\n---\n\n"
 
-const piSkillFrontmatter = "---\nname: load-dyna-orchestrator\ndescription: " + skillDescription + "\ndisable-model-invocation: true\n---\n\n"
-
 const (
 	markBegin         = "<!-- dyna:skill:begin (managed by `dyna skill install`; do not edit inside) -->"
 	markEnd           = "<!-- dyna:skill:end -->"
@@ -92,19 +89,6 @@ type harnessTarget struct {
 
 func home() string { h, _ := os.UserHomeDir(); return h }
 
-func piAgentDir() string {
-	if dir := os.Getenv("PI_CODING_AGENT_DIR"); dir != "" {
-		if dir == "~" {
-			return home()
-		}
-		if strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
-			return filepath.Join(home(), dir[2:])
-		}
-		return dir
-	}
-	return filepath.Join(home(), ".pi", "agent")
-}
-
 func hasCLI(bin string) bool { _, err := exec.LookPath(bin); return err == nil }
 
 func skillTargets() []harnessTarget {
@@ -134,15 +118,6 @@ func skillTargets() []harnessTarget {
 			guidancePath:   func() string { return filepath.Join(home(), ".config", "opencode", "AGENTS.md") },
 			legacyAgentsMD: func() string { return filepath.Join(home(), ".config", "opencode", "AGENTS.md") },
 		},
-		{
-			name:               "pi",
-			detect:             func() bool { return hasCLI("pi") || dirExists(filepath.Join(home(), ".pi")) },
-			path:               func() string { return filepath.Join(piAgentDir(), "skills", "load-dyna-orchestrator", "SKILL.md") },
-			legacySkillDir:     func() string { return filepath.Join(piAgentDir(), "skills", "dyna") },
-			guidancePath:       func() string { return filepath.Join(piAgentDir(), "AGENTS.md") },
-			legacyAgentsMD:     func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
-			legacyGuidancePath: func() string { return filepath.Join(home(), ".pi", "AGENTS.md") },
-		},
 	}
 }
 
@@ -160,7 +135,7 @@ func NewSkillCommand() *cobra.Command {
 	var all bool
 	install := &cobra.Command{
 		Use:   "install [harness...]",
-		Short: "Install into harnesses (default: all detected; or name claude-code|codex|opencode|pi)",
+		Short: "Install into harnesses (default: all detected; or name claude-code|codex|opencode)",
 		RunE: func(c *cobra.Command, argv []string) error {
 			targets := skillTargets()
 			pick := map[string]bool{}
@@ -270,11 +245,7 @@ func installSkill(t harnessTarget) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	frontmatter := skillFrontmatter
-	if t.name == "pi" {
-		frontmatter = piSkillFrontmatter
-	}
-	if err := os.WriteFile(p, []byte(frontmatter+skillBody), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(skillFrontmatter+skillBody), 0o644); err != nil {
 		return err
 	}
 	return nil

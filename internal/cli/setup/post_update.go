@@ -113,9 +113,6 @@ func askYesNo(reader *bufio.Reader, out io.Writer, question string) (bool, error
 }
 
 func applyPostUpdateSetup(answers postUpdateAnswers, out io.Writer) error {
-	if err := removeAutomaticPiGuidance(); err != nil {
-		return err
-	}
 	store, err := loadStore()
 	if err != nil {
 		return err
@@ -132,24 +129,7 @@ func applyPostUpdateSetup(answers postUpdateAnswers, out io.Writer) error {
 // applyRecurringPostUpdateSetup deliberately avoids ApplyBundledPreferences:
 // loading the store refreshes only profiles the user still marks managed.
 func applyRecurringPostUpdateSetup(_ postUpdateAnswers, _ io.Writer) error {
-	if err := removeAutomaticPiGuidance(); err != nil {
-		return err
-	}
 	if _, err := loadStore(); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Pi receives this contract directly from `dyna pi`; automatic setup removes
-// old managed copies from both Pi paths. Explicit guidance installation for
-// plain Pi remains available through `dyna skill guidance install pi`.
-func removeAutomaticPiGuidance() error {
-	for _, target := range skillTargets() {
-		if target.name != "pi" {
-			continue
-		}
-		_, err := uninstallGuidance(target)
 		return err
 	}
 	return nil

@@ -3,7 +3,7 @@
 Dynamic multi-agent workflows for any coding agent.
 
 `dyna` is a standalone, harness-agnostic port of Claude Code's dynamic
-workflow system. Any coding agent (claude-code, codex CLI, opencode, pi) can
+workflow system. Any coding agent (claude-code, codex CLI, opencode) can
 write plain JavaScript workflow scripts that orchestrate fleets of model
 workers deterministically, while humans configure the fleet and watch runs
 live in a terminal dashboard.
@@ -82,12 +82,6 @@ skill is selected:
 - **claude-code**: `~/.claude/skills/load-dyna-orchestrator/SKILL.md`
 - **codex**: `~/.codex/skills/load-dyna-orchestrator/SKILL.md`
 - **opencode**: `~/.config/opencode/skills/load-dyna-orchestrator/SKILL.md`
-- **pi**: `~/.pi/agent/skills/load-dyna-orchestrator/SKILL.md`
-
-The Pi skill uses Pi's supported `disable-model-invocation: true` frontmatter,
-so it stays available to a person as `/skill:load-dyna-orchestrator` in plain
-Pi without appearing in model discovery. `dyna pi` supplies its own
-self-contained prompt and tools.
 
 `dyna skill install <harness>` forces one, `--all` forces all,
 `dyna skill uninstall` removes cleanly, and `dyna skill show` prints the
@@ -99,8 +93,7 @@ Dyna no longer writes guidance into shared `CLAUDE.md` or `AGENTS.md` files.
 `dyna skill guidance uninstall [harness...]` remains as a cleanup escape hatch
 that removes only Dyna's retired marker block while preserving surrounding
 user content. Skill install, update refresh, and uninstall perform the same
-cleanup automatically, including Pi's current `~/.pi/agent/AGENTS.md` and
-legacy `~/.pi/AGENTS.md` locations.
+cleanup automatically.
 
 ## Worker profiles
 
@@ -170,7 +163,7 @@ delegation controls, and every harness receives the same final worker-prompt
 restriction. This is a strong policy guard, not a security boundary: workers
 with shell access can still launch another CLI if they deliberately disobey.
 
-Supported harnesses: `claude-code`, `codex`, `opencode`, `pi`, `custom` (any
+Supported harnesses: `claude-code`, `codex`, `opencode`, `custom` (any
 argv with `{{prompt}}`/`{{model}}` placeholders; the prompt goes to stdin if
 no placeholder is given), and `mock` for demos and tests. Workers run
 headless (`claude -p`, `codex exec`, `opencode run`) in the workflow's
@@ -338,42 +331,6 @@ as or replaces that result.
   ledger, and selected agent journal are tailed independently about every
   400 ms, so entries appear while the worker is still running, not only when
   it finishes.
-
-  `dyna pi` launches the built-in root agent preset `dyna-orchestrator`, names
-  new sessions after that preset unless `--name`/`-n` is supplied, and keeps an
-  `agent:dyna-orchestrator` footer status visible without a startup message. It
-  uses Dyna workflows by default for code changes, reserving direct work for
-  clearly small, straightforward changes that are easy to verify. By default it
-  activates every tool registered when Pi starts, including Pi's
-  normally opt-in built-ins, the native Dyna tools, and tools from other loaded
-  extensions. Explicit `--tools`/`-t`, `--exclude-tools`/`-xt`, `--no-tools`/`-nt`,
-  and `--no-builtin-tools`/`-nbt` selections remain authoritative.
-
-  The preset uses Pi's existing `openai-codex/gpt-5.6-terra` model at `xhigh`,
-  while explicit provider, model, and thinking flags still win. It reuses
-  Codex's ChatGPT OAuth in memory and
-  delegates refresh to Codex's app server, so no second Pi login or credential
-  copy is required. Unsupported or missing Codex auth fails with a `codex login`
-  instruction rather than falling back to another provider. Other Pi skills
-  remain enabled; an installed Dyna Pi skill is hidden from model discovery by
-  its frontmatter because the launcher supplies the Dyna contract directly.
-
-  The extension registers model-visible `dyna_profiles`, `dyna_run`,
-  `dyna_runs`, and `dyna_steer` tools. The orchestrator writes each bounded
-  workflow to a unique `/tmp/dyna-workflow-*.js` file and passes that path to
-  `dyna_run`, which always starts it detached and promptly returns its run ID.
-  The tools manage only runs owned by the persisted Pi session and steer active
-  workers without shell command assembly. Type `/dyna` to open the Pi-native
-  Dyna dashboard scoped to that persisted Pi session, so runs from other
-  sessions cannot be viewed or acted upon there. Pi keeps running underneath
-  and still reacts when a workflow completes; closing the dashboard restores
-  and redraws the conversation. A direct `dyna tui` remains global.
-
-  Pi 0.80.7 already reports `openai-codex/gpt-5.6-terra` with its correct 372K
-  context window, so Dyna leaves that model metadata untouched. Pi's public
-  extension API exposes context usage and manual compaction, but no
-  session-local compaction-threshold override, so Dyna does not mutate global
-  settings or replace the provider/model to emulate Codex's 95% threshold.
 
   ![Run inspector: per-agent journal timeline while workers run](docs/img/tui-journal.png)
 - **Profiles**: the fleet at a glance, with descriptions and

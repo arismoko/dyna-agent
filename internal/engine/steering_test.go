@@ -19,12 +19,12 @@ func TestExecuteDeliversSteeringAndEmitsUpdate(t *testing.T) {
 	t.Setenv(runstore.AgentJournalRootEnv, "")
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "calls.log")
-	piPath := filepath.Join(binDir, "pi")
+	claudePath := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
 set -eu
 printf 'CALL %s\n' "$*" >> "$DYNA_FAKE_LOG"
 case " $* " in
-  *" --session "*)
+  *" --resume "*)
     printf '%s\n' '{"ts":1,"kind":"verification","message":"Applied live steering.","source":"agent"}' >> "$DYNA_AGENT_JOURNAL"
     printf '%s\n' 'steered engine result'
     ;;
@@ -35,19 +35,19 @@ case " $* " in
     ;;
 esac
 `
-	if err := os.WriteFile(piPath, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	workflow := `return await agent("original task", {profile: "pi-steer", label: "live worker"});`
+	workflow := `return await agent("original task", {profile: "steer", label: "live worker"});`
 	run, err := runstore.Create("engine steering", workflow, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer run.Finish("ok", "", nil)
 	store := &profile.Store{Profiles: []profile.Profile{{
-		Name: "pi-steer", Harness: profile.HarnessPi, Default: true,
+		Name: "steer", Harness: profile.HarnessClaudeCode, Default: true,
 		Taste: 5, Intelligence: 5, Cost: 5,
 		Env: map[string]string{"DYNA_FAKE_LOG": logPath},
 	}}}
@@ -114,7 +114,7 @@ func TestSteeringStartFailureRecordsDispatchWithoutDelivery(t *testing.T) {
 	t.Setenv(runstore.AgentJournalRootEnv, "")
 	binDir := t.TempDir()
 	logPath := filepath.Join(binDir, "calls.log")
-	piPath := filepath.Join(binDir, "pi")
+	claudePath := filepath.Join(binDir, "claude")
 	script := `#!/bin/sh
 set -eu
 printf 'CALL %s\n' "$*" >> "$DYNA_FAKE_LOG"
@@ -122,19 +122,19 @@ trap '/bin/rm -f "$0"; exit 130' INT
 printf '%s\n' READY >> "$DYNA_FAKE_LOG"
 while :; do /bin/sleep 1; done
 `
-	if err := os.WriteFile(piPath, []byte(script), 0o755); err != nil {
+	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir)
 
-	workflow := `return await agent("original task", {profile: "pi-steer", label: "live worker"});`
+	workflow := `return await agent("original task", {profile: "steer", label: "live worker"});`
 	run, err := runstore.Create("engine steering start failure", workflow, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer run.Finish("error", "", nil)
 	store := &profile.Store{Profiles: []profile.Profile{{
-		Name: "pi-steer", Harness: profile.HarnessPi, Default: true,
+		Name: "steer", Harness: profile.HarnessClaudeCode, Default: true,
 		Taste: 5, Intelligence: 5, Cost: 5,
 		Env: map[string]string{"DYNA_FAKE_LOG": logPath},
 	}}}

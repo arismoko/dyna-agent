@@ -1,5 +1,5 @@
 // dyna: harness-agnostic dynamic multi-agent workflows.
-// CLI for agents (codex, claude-code, pi, opencode) + TUI for humans.
+// CLI for agents (codex, claude-code, opencode) + TUI for humans.
 package main
 
 import (
@@ -40,7 +40,7 @@ func newRootCommand() *cobra.Command {
 		Short:   "Dynamic multi-agent workflows for any coding agent",
 		Version: resolvedVersion,
 		Long: "dyna runs JavaScript workflow scripts that orchestrate registered worker\n" +
-			"profiles (claude-code, codex, opencode, pi, custom CLIs). Agents use the CLI;\n" +
+			"profiles (claude-code, codex, opencode, custom CLIs). Agents use the CLI;\n" +
 			"humans use `dyna tui` to configure profiles and watch runs live.",
 		SilenceUsage: true,
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
@@ -55,7 +55,6 @@ func newRootCommand() *cobra.Command {
 		journal.NewCommand(),
 		interactive.NewGuideCommand(),
 		interactive.NewTUICommand(version),
-		piCmd(),
 		workflows.NewDemoCommand(),
 		skillCmd(),
 		updatecmd.NewCommand(version),

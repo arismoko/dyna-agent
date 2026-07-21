@@ -1,7 +1,6 @@
-// Package guidance holds the Dyna orchestration prose shared between the
-// installed skill (internal/cli/setup) and the Pi orchestrator preset
-// (internal/cli/pi), so the two surfaces describe the same mechanics from
-// one source instead of two independently hand-maintained copies.
+// Package guidance holds the Dyna orchestration prose used by the installed
+// skill (internal/cli/setup), so every surface describes the same mechanics
+// from one source instead of independently hand-maintained copies.
 package guidance
 
 const ProfileRouting = `## Profile routing

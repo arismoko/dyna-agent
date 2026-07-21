@@ -31,7 +31,6 @@ func Installed(harness string) bool {
 		profile.HarnessClaudeCode: "claude",
 		profile.HarnessCodex:      "codex",
 		profile.HarnessOpenCode:   "opencode",
-		profile.HarnessPi:         "pi",
 	}[harness]
 	if bin == "" {
 		return true
@@ -99,7 +98,6 @@ func SuggestName(harness, model, effort string) string {
 		profile.HarnessClaudeCode: "claude",
 		profile.HarnessCodex:      "codex",
 		profile.HarnessOpenCode:   "oc",
-		profile.HarnessPi:         "pi",
 		profile.HarnessCustom:     "custom",
 		profile.HarnessMock:       "mock",
 	}[harness]

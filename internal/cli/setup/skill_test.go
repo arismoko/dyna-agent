@@ -30,9 +30,7 @@ func TestAgentFacingGuidanceDocumentsCompactRuntimeContract(t *testing.T) {
 // The skill intentionally does not restate the shared guidance package's
 // content (profile routing, script contract, workflow shape, quality
 // patterns) — that would duplicate what `dyna guide` already prints live and
-// drift out of sync with it. Pi's separate, self-contained system prompt in
-// pi.go still uses guidance_shared.go directly, since it cannot rely on a
-// mid-task tool call the way a lazily-loaded skill can.
+// drift out of sync with it.
 func TestAgentFacingGuidanceDoesNotDuplicateLiveCLIOutput(t *testing.T) {
 	forbidden := []string{
 		"maxConcurrent", "maxCallsPerRun", "export const meta", "agent(prompt, opts)",
@@ -48,24 +46,19 @@ func TestAgentFacingGuidanceDoesNotDuplicateLiveCLIOutput(t *testing.T) {
 }
 
 func TestSkillFrontmatterDrivesExplicitDiscovery(t *testing.T) {
-	for name, frontmatter := range map[string]string{"portable": skillFrontmatter, "pi": piSkillFrontmatter} {
-		for _, required := range []string{
-			"name: load-dyna-orchestrator",
-			"user explicitly requests Dyna",
-			"agent fan-out",
-			"parallel review, audits, judge panels, adversarial verification, or isolated migrations",
-			"when an invoked skill or instruction requires it",
-			"do not infer that scale merely because it could help",
-			"ordinary subagents for small context-local delegation",
-			"describe the proposed fleet and ask",
-		} {
-			if !strings.Contains(frontmatter, required) {
-				t.Errorf("%s frontmatter is missing %q", name, required)
-			}
+	for _, required := range []string{
+		"name: load-dyna-orchestrator",
+		"user explicitly requests Dyna",
+		"agent fan-out",
+		"parallel review, audits, judge panels, adversarial verification, or isolated migrations",
+		"when an invoked skill or instruction requires it",
+		"do not infer that scale merely because it could help",
+		"ordinary subagents for small context-local delegation",
+		"describe the proposed fleet and ask",
+	} {
+		if !strings.Contains(skillFrontmatter, required) {
+			t.Errorf("frontmatter is missing %q", required)
 		}
-	}
-	if !strings.Contains(piSkillFrontmatter, "disable-model-invocation: true") {
-		t.Fatal("Pi frontmatter no longer disables model invocation")
 	}
 }
 
@@ -88,24 +81,8 @@ func TestAgentFacingDocsExcludeUnsupportedWorkflowConcepts(t *testing.T) {
 	}
 }
 
-func TestPiOnlyToolsDoNotLeakIntoPortableGuidance(t *testing.T) {
-	for _, tool := range []string{"dyna_profiles", "dyna_run", "dyna_runs", "dyna_steer"} {
-		if strings.Contains(agentFacingGuidance, tool) || strings.Contains(skillBody, tool) {
-			t.Errorf("portable guidance contains Pi-only tool %q", tool)
-		}
-	}
-}
-
-func TestPiSkillIsManualOnlyForModelInvocation(t *testing.T) {
+func TestInstalledSkillKeepsModelInvocationEnabled(t *testing.T) {
 	dir := t.TempDir()
-	piTarget := harnessTarget{name: "pi", path: func() string { return filepath.Join(dir, "pi", "SKILL.md") }}
-	if err := installSkill(piTarget); err != nil {
-		t.Fatal(err)
-	}
-	if got := readFile(t, piTarget.path()); !strings.Contains(got, "disable-model-invocation: true") {
-		t.Fatalf("Pi skill is model-visible:\n%s", got)
-	}
-
 	portableTarget := harnessTarget{name: "codex", path: func() string { return filepath.Join(dir, "codex", "SKILL.md") }}
 	if err := installSkill(portableTarget); err != nil {
 		t.Fatal(err)
@@ -118,13 +95,11 @@ func TestPiSkillIsManualOnlyForModelInvocation(t *testing.T) {
 func TestSkillTargetsUseRenamedDirectoriesAndTrackLegacyDirs(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
-	t.Setenv("PI_CODING_AGENT_DIR", "")
 
 	wantBases := map[string]string{
 		"claude-code": filepath.Join(homeDir, ".claude", "skills"),
 		"codex":       filepath.Join(homeDir, ".codex", "skills"),
 		"opencode":    filepath.Join(homeDir, ".config", "opencode", "skills"),
-		"pi":          filepath.Join(homeDir, ".pi", "agent", "skills"),
 	}
 	for _, target := range skillTargets() {
 		base := wantBases[target.name]
@@ -141,7 +116,6 @@ func TestGuidanceCommandOnlyUninstallsRetiredBlocks(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("PATH", t.TempDir())
-	t.Setenv("PI_CODING_AGENT_DIR", "")
 	path := filepath.Join(homeDir, ".codex", "AGENTS.md")
 	userContent := "# User instructions\n\nKeep this.\n"
 	writeRetiredGuidance(t, path, userContent, "stale guidance")
@@ -157,69 +131,6 @@ func TestGuidanceCommandOnlyUninstallsRetiredBlocks(t *testing.T) {
 	if got := readFile(t, path); got != userContent {
 		t.Fatalf("guidance cleanup changed user content: got %q, want %q", got, userContent)
 	}
-}
-
-func TestPiTargetUsesPiAgentDirectory(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("PI_CODING_AGENT_DIR", "")
-
-	var pi harnessTarget
-	for _, target := range skillTargets() {
-		if target.name == "pi" {
-			pi = target
-			break
-		}
-	}
-	agentDir := filepath.Join(homeDir, ".pi", "agent")
-	if got, want := pi.path(), filepath.Join(agentDir, "skills", "load-dyna-orchestrator", "SKILL.md"); got != want {
-		t.Fatalf("pi skill path = %q, want %q", got, want)
-	}
-	if got, want := pi.legacySkillDir(), filepath.Join(agentDir, "skills", "dyna"); got != want {
-		t.Fatalf("pi legacy skill dir = %q, want %q", got, want)
-	}
-	if got, want := pi.guidancePath(), filepath.Join(agentDir, "AGENTS.md"); got != want {
-		t.Fatalf("pi guidance path = %q, want %q", got, want)
-	}
-}
-
-func TestPiTargetHonorsCustomAgentDirectory(t *testing.T) {
-	agentDir := t.TempDir()
-	t.Setenv("PI_CODING_AGENT_DIR", agentDir)
-
-	for _, target := range skillTargets() {
-		if target.name != "pi" {
-			continue
-		}
-		if got, want := target.path(), filepath.Join(agentDir, "skills", "load-dyna-orchestrator", "SKILL.md"); got != want {
-			t.Fatalf("pi skill path = %q, want %q", got, want)
-		}
-		if got, want := target.legacySkillDir(), filepath.Join(agentDir, "skills", "dyna"); got != want {
-			t.Fatalf("pi legacy skill dir = %q, want %q", got, want)
-		}
-		if got, want := target.guidancePath(), filepath.Join(agentDir, "AGENTS.md"); got != want {
-			t.Fatalf("pi guidance path = %q, want %q", got, want)
-		}
-		return
-	}
-	t.Fatal("pi target not found")
-}
-
-func TestPiTargetExpandsTildeInCustomAgentDirectory(t *testing.T) {
-	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
-	t.Setenv("PI_CODING_AGENT_DIR", "~/.custom-pi")
-
-	for _, target := range skillTargets() {
-		if target.name != "pi" {
-			continue
-		}
-		if got, want := target.guidancePath(), filepath.Join(homeDir, ".custom-pi", "AGENTS.md"); got != want {
-			t.Fatalf("pi guidance path = %q, want %q", got, want)
-		}
-		return
-	}
-	t.Fatal("pi target not found")
 }
 
 func TestSkillInstallMigratesLegacySkillAndGuidance(t *testing.T) {

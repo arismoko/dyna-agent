@@ -23,12 +23,11 @@ const (
 	HarnessClaudeCode = "claude-code"
 	HarnessCodex      = "codex"
 	HarnessOpenCode   = "opencode"
-	HarnessPi         = "pi"
 	HarnessCustom     = "custom"
 	HarnessMock       = "mock"
 )
 
-var Harnesses = []string{HarnessClaudeCode, HarnessCodex, HarnessOpenCode, HarnessPi, HarnessCustom, HarnessMock}
+var Harnesses = []string{HarnessClaudeCode, HarnessCodex, HarnessOpenCode, HarnessCustom, HarnessMock}
 
 // Profile describes one registered worker.
 type Profile struct {

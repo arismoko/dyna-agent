@@ -602,46 +602,6 @@ gracefully interrupts an active resumable worker and continues that exact
 session with the message; unsupported sessions reject instead of launching a
 replacement.
 
-`dyna pi` launches the built-in root agent preset `dyna-orchestrator` with the
-bundled extension and a full, self-contained tool-native Dyna prompt appended
-directly to the root system prompt — the same routing, workflow-shape,
-example, and quality-pattern guidance as this guide, phrased for the
-extension's native tools — while preserving every other Pi skill. Its sessions default to the `dyna-orchestrator` display
-name and show `agent:dyna-orchestrator` in the footer. At session start the
-preset activates every registered Pi tool, including all built-ins, the four
-native Dyna tools, and tools from other extensions; explicit `--tools`/`-t`,
-`--exclude-tools`/`-xt`, `--no-tools`/`-nt`, and `--no-builtin-tools`/`-nbt`
-controls override that default. A separately installed Dyna Pi skill uses
-`disable-model-invocation: true`, which retains manual
-`/skill:dyna` use in plain Pi without duplicating the launch prompt in model
-discovery.
-
-The model calls `dyna_profiles` to route work, uses `write` to create complete
-workflow JavaScript at a unique `/tmp/dyna-workflow-*.js` path, then passes that
-path to `dyna_run`. Every `dyna_run` invocation is detached and promptly returns
-its run ID. The model reports what it launched and keeps other work or the
-conversation moving instead of waiting by default; the extension sends one
-automatic completion notification when the launched run finishes. That
-notification is process-local and does not survive a Pi restart, so the model
-uses `dyna_runs` for user-requested monitoring, inspection, cancellation,
-troubleshooting, and restart recovery, and `dyna_steer` when the user redirects
-an active worker. The extension invokes the exact Dyna binary without a shell,
-privately consumes bounded workflow input, and rejects
-show/wait/cancel/resume/steer requests for runs outside the persisted Pi
-session. Type `/dyna` to open the Pi-native Dyna
-dashboard scoped to that persisted Pi session. It replaces the editor while
-open and detaches the chat scrollback from the renderer so off-screen updates
-cannot force full-screen repaints; Pi keeps running underneath and still
-reacts when a workflow completes, and closing the dashboard restores and
-redraws the conversation with everything that happened meanwhile. A direct
-`dyna tui` remains a global cross-session dashboard unless `--session <id>` is
-supplied explicitly.
-
-Pi's bundled `openai-codex/gpt-5.6-terra` metadata already reports the correct
-372K context window. Pi 0.80.7 exposes context usage and manual compaction to
-extensions, but it has no public session-local API for changing the automatic
-compaction threshold, so Dyna leaves model metadata and global settings alone.
-
 ## Journals and live progress
 
 Each run persists under the Dyna data directory:
@@ -739,7 +699,7 @@ an earlier empty or semantically weak success.
 
 Claude Code and Codex workers run headlessly. Unless a profile enables
 `safeMode` or supplies explicit permission arguments, Dyna adds those harnesses'
-permission-bypass flags so approval prompts cannot hang. OpenCode, Pi, and
+permission-bypass flags so approval prompts cannot hang. OpenCode and
 custom profiles run with their configured command and arguments rather than a
 universal Dyna sandbox policy.
 
