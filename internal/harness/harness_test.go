@@ -14,7 +14,7 @@ import (
 	"dyna-agent/internal/runstore"
 )
 
-func TestSteeringInterruptsAndResumesExactPiSession(t *testing.T) {
+func TestSteeringInterruptsAndResumesExactClaudeSession(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("DYNA_RUN_ID", "wf_harness-steering")
 	t.Setenv(runstore.AgentJournalRootEnv, "")
@@ -23,15 +23,17 @@ func TestSteeringInterruptsAndResumesExactPiSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer run.Finish("ok", "null", nil)
-	if _, err := run.StartAgentJournal(1, "pi worker", "pi-test", "Test", "original task"); err != nil {
+	if _, err := run.StartAgentJournal(1, "claude worker", "claude-test", "Test", "original task"); err != nil {
 		t.Fatal(err)
 	}
 
-	logPath := installFakeCLI(t, "pi", `#!/bin/sh
+	logPath := installFakeCLI(t, "claude", `#!/bin/sh
 set -eu
 printf 'CALL %s\n' "$*" >> "$DYNA_FAKE_LOG"
 case " $* " in
-  *" --session "*)
+  *" --resume "*)
+    input=$(cat)
+    printf 'INPUT %s\n' "$input" >> "$DYNA_FAKE_LOG"
     printf '%s\n' 'steered exact-session result'
     ;;
   *)
@@ -51,7 +53,7 @@ esac
 	defer cancel()
 	go func() {
 		result, err := RunWithJournalAndSteering(ctx, profile.Profile{
-			Name: "pi-test", Harness: profile.HarnessPi,
+			Name: "claude-test", Harness: profile.HarnessClaudeCode,
 			Env: map[string]string{"DYNA_FAKE_LOG": logPath},
 		}, "original task", t.TempDir(), true, JournalOptions{}, SteeringOptions{
 			RunID: run.Meta.ID, AgentID: 1,
@@ -60,7 +62,7 @@ esac
 		done <- outcome{result: result, err: err}
 	}()
 	if !waitForTestFile(logPath, "READY", 2*time.Second) {
-		t.Fatal("initial pi session did not start")
+		t.Fatal("initial claude session did not start")
 	}
 	if err := runstore.SubmitAgentSteering(run.Meta.ID, 1, "prioritize the parser boundary"); err != nil {
 		t.Fatal(err)
@@ -78,7 +80,7 @@ esac
 		t.Fatalf("delivered messages = %#v", delivered)
 	}
 	log := readTestFile(t, logPath)
-	assertSameAssignedSession(t, log, "--session-id", "--session")
+	assertSameAssignedSession(t, log, "--session-id", "--resume")
 	if !strings.Contains(log, "[DYNA STEERING]") || !strings.Contains(log, "prioritize the parser boundary") || strings.Contains(log, sessionNudgePrompt) {
 		t.Fatalf("steering prompt was not isolated from recovery:\n%s", log)
 	}
@@ -96,16 +98,16 @@ func TestCancellationAfterFinalSteeringPollDoesNotResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer run.Finish("canceled", "", context.Canceled)
-	if _, err := run.StartAgentJournal(1, "pi worker", "pi-test", "Test", "original task"); err != nil {
+	if _, err := run.StartAgentJournal(1, "claude worker", "claude-test", "Test", "original task"); err != nil {
 		t.Fatal(err)
 	}
 
 	mailbox := filepath.Join(run.Dir, "agents", "1", "steering.jsonl")
-	logPath := installFakeCLI(t, "pi", `#!/bin/sh
+	logPath := installFakeCLI(t, "claude", `#!/bin/sh
 set -eu
 printf 'CALL %s\n' "$*" >> "$DYNA_FAKE_LOG"
 case " $* " in
-  *" --session "*)
+  *" --resume "*)
     printf '%s\n' UNEXPECTED_RESUME >> "$DYNA_FAKE_LOG"
     printf '%s\n' 'unexpected resumed result'
     ;;
@@ -118,7 +120,7 @@ esac
 	ctx, cancel := context.WithCancel(context.Background())
 	var dispatched, delivered []runstore.SteeringMessage
 	result, err := RunWithJournalAndSteering(ctx, profile.Profile{
-		Name: "pi-test", Harness: profile.HarnessPi,
+		Name: "claude-test", Harness: profile.HarnessClaudeCode,
 		Env: map[string]string{"DYNA_FAKE_LOG": logPath, "STEERING_MAILBOX": mailbox},
 	}, "original task", t.TempDir(), true, JournalOptions{}, SteeringOptions{
 		RunID: run.Meta.ID, AgentID: 1, pollEvery: time.Hour,
@@ -1002,6 +1004,32 @@ func TestMissingWorkingDirectoryHasDistinctError(t *testing.T) {
 	}
 }
 
+func TestWorkerEnvPWDMatchesWorkingDirectory(t *testing.T) {
+	t.Setenv("PWD", "/somewhere/else")
+	t.Setenv("OLDPWD", "/somewhere/older")
+	dir := t.TempDir()
+	p := profile.Profile{
+		Name: "pwd-env", Harness: profile.HarnessCustom,
+		Command: []string{"/bin/sh", "-c", `printf '%s|%s' "$PWD" "${OLDPWD:-unset}"`},
+	}
+
+	result, err := runTest(context.Background(), p, "task", dir)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		resolved = dir
+	}
+	pwd, oldpwd, _ := strings.Cut(result.Output, "|")
+	if pwd != dir && pwd != resolved {
+		t.Fatalf("worker $PWD = %q, want working directory %q", pwd, dir)
+	}
+	if oldpwd != "unset" {
+		t.Fatalf("worker $OLDPWD = %q, want unset", oldpwd)
+	}
+}
+
 func TestCodexReportsBothFailures(t *testing.T) {
 	logPath := installFakeCLI(t, "codex", `#!/bin/sh
 set -eu
@@ -1047,24 +1075,6 @@ esac
 	assertSameAssignedSession(t, readTestFile(t, logPath), "--session-id", "--resume")
 }
 
-func TestPiFailureNudgesAssignedSession(t *testing.T) {
-	logPath := installFakeCLI(t, "pi", `#!/bin/sh
-set -eu
-printf 'CALL %s\n' "$*" >> "$DYNA_FAKE_LOG"
-case " $* " in
-  *" --session "*) printf '%s\n' 'pi recovered' ;;
-  *) printf '%s\n' 'temporary provider failure' >&2; exit 1 ;;
-esac
-`)
-	p := profile.Profile{Name: "pi", Harness: profile.HarnessPi, Model: "pi-model", Env: map[string]string{"DYNA_FAKE_LOG": logPath}}
-
-	result, err := runTest(context.Background(), p, "task", t.TempDir())
-	if err != nil || result.Output != "pi recovered" || !result.Nudged {
-		t.Fatalf("Run() = %#v, %v; want recovered result", result, err)
-	}
-	assertSameAssignedSession(t, readTestFile(t, logPath), "--session-id", "--session")
-}
-
 func TestOpenCodeFailureNudgesParsedSession(t *testing.T) {
 	logPath := installFakeCLI(t, "opencode", `#!/bin/sh
 set -eu
@@ -1107,8 +1117,6 @@ func TestExplicitControlsDisableNudge(t *testing.T) {
 		{"claude-fork", profile.Profile{Harness: profile.HarnessClaudeCode, ExtraArgs: []string{"--fork-session"}}},
 		{"codex", profile.Profile{Harness: profile.HarnessCodex, ExtraArgs: []string{"--ephemeral"}}},
 		{"opencode", profile.Profile{Harness: profile.HarnessOpenCode, ExtraArgs: []string{"--format", "default"}}},
-		{"pi", profile.Profile{Harness: profile.HarnessPi, ExtraArgs: []string{"--no-session"}}},
-		{"pi-fork", profile.Profile{Harness: profile.HarnessPi, ExtraArgs: []string{"--fork", "existing"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1302,7 +1310,6 @@ func TestDisableSubagentsNativeControlsAreOptInAndNarrow(t *testing.T) {
 		{Harness: profile.HarnessClaudeCode},
 		{Harness: profile.HarnessCodex},
 		{Harness: profile.HarnessOpenCode, DisableSubagents: true},
-		{Harness: profile.HarnessPi, DisableSubagents: true},
 		{Harness: profile.HarnessCustom, Command: []string{"worker"}, DisableSubagents: true},
 	} {
 		inv, err := buildInvocation(p, "task")

@@ -459,6 +459,7 @@ func runOnce(ctx context.Context, p profile.Profile, cwd string, spec commandSpe
 	cmd := exec.CommandContext(ctx, spec.argv[0], spec.argv[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = mergeEnv(os.Environ(), p.Env)
+	cmd.Env = withWorkingDirectoryEnv(cmd.Env, cwd)
 	if spec.stdinPrompt {
 		cmd.Stdin = strings.NewReader(spec.prompt)
 	}
@@ -677,6 +678,32 @@ func signalProcessGroup(cmd *exec.Cmd, signal syscall.Signal) error {
 		return err
 	}
 	return nil
+}
+
+// withWorkingDirectoryEnv points PWD (and clears OLDPWD) at the worker's
+// working directory. cmd.Dir changes the real cwd but leaves the inherited
+// PWD variable at dyna's own directory, and some harnesses (opencode) trust
+// $PWD over getcwd — which silently ran every worker in the wrong directory.
+func withWorkingDirectoryEnv(env []string, cwd string) []string {
+	if cwd == "" {
+		return env
+	}
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		abs = cwd
+	}
+	out := env[:0:0]
+	for _, pair := range env {
+		key := pair
+		if i := strings.IndexByte(pair, '='); i >= 0 {
+			key = pair[:i]
+		}
+		if key == "PWD" || key == "OLDPWD" {
+			continue
+		}
+		out = append(out, pair)
+	}
+	return append(out, "PWD="+abs)
 }
 
 func mergeEnv(base []string, overrides map[string]string) []string {
@@ -1442,37 +1469,6 @@ func buildInvocation(p profile.Profile, prompt string) (inv invocation, err erro
 				}
 				args = append(args, "--session", id, nudge)
 				return commandSpec{argv: args, parseOutput: openCodeOutput}
-			}
-		}
-		return inv, nil
-
-	case profile.HarnessPi:
-		argv := []string{"pi", "-p"}
-		if p.Model != "" {
-			argv = append(argv, "--model", p.Model)
-		}
-		resumable := !hasAnyOption(p.ExtraArgs, "--session-id", "--session", "--continue", "-c", "--resume", "-r", "--fork", "--no-session")
-		var sessionID string
-		if resumable {
-			sessionID, err = newSessionID()
-			if err != nil {
-				return invocation{}, fmt.Errorf("create pi session id: %w", err)
-			}
-			argv = append(argv, "--session-id", sessionID)
-		}
-		argv = append(argv, p.ExtraArgs...)
-		argv = append(argv, prompt)
-		inv.initial = commandSpec{argv: argv}
-		if resumable {
-			inv.sessionID = func(string) string { return sessionID }
-			inv.resume = func(id, nudge string) commandSpec {
-				args := []string{"pi", "-p", "--session", id}
-				if p.Model != "" {
-					args = append(args, "--model", p.Model)
-				}
-				args = append(args, p.ExtraArgs...)
-				args = append(args, nudge)
-				return commandSpec{argv: args}
 			}
 		}
 		return inv, nil
